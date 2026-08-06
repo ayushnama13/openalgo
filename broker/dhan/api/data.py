@@ -108,11 +108,20 @@ def get_api_response(endpoint, auth, method="POST", payload="", retry_count=0):
     logger.debug(f"Response status: {res.status}")
     logger.debug(f"Response: {json.dumps(response, indent=2)}")
 
-    # Handle Dhan API error codes
-    if response.get("status") == "failed":
-        error_data = response.get("data", {})
-        error_code = list(error_data.keys())[0] if error_data else "unknown"
-        error_message = error_data.get(error_code, "Unknown error")
+    # Handle Dhan API error codes. Dhan uses two different error shapes:
+    # older endpoints return {"status": "failed", "data": {"<code>": "<msg>"}},
+    # newer ones (e.g. /v2/charts/historical) return
+    # {"errorType": ..., "errorCode": "DH-905", "errorMessage": ...} with no
+    # "status" key at all. Only checking for the first shape let the second
+    # one fall through as if it were a successful, empty response.
+    if response.get("status") == "failed" or "errorCode" in response:
+        if response.get("status") == "failed":
+            error_data = response.get("data", {})
+            error_code = list(error_data.keys())[0] if error_data else "unknown"
+            error_message = error_data.get(error_code, "Unknown error")
+        else:
+            error_code = response.get("errorCode", "unknown")
+            error_message = response.get("errorMessage", "Unknown error")
 
         # Handle rate limit error (805) with retry
         if error_code == "805" and retry_count < MAX_RETRIES:
