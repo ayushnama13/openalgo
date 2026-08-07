@@ -52,7 +52,12 @@ def _apply_rate_limit(category="data"):
 
 def get_api_response(endpoint, auth, method="POST", payload="", retry_count=0):
     """Make API request to Dhan with rate limiting and retry logic"""
-    MAX_RETRIES = 3
+    # Bounded so a single rate-limited symbol can't pin a Historify job-pool
+    # worker thread for too long: retry/backoff is cooperative-cancellation-only
+    # at the job layer, so a long retry storm here delays a cancelled job from
+    # ever releasing its worker slot. 2 retries x (2s + 4s) caps this call's own
+    # backoff at 6s instead of 3 x (2+4+8)=14s.
+    MAX_RETRIES = 2
     RETRY_DELAY = 2.0  # Base delay for exponential backoff
 
     # Apply rate limiting before making the request. Quote endpoints
@@ -589,7 +594,11 @@ class BrokerData:
                         # dropped 90-day chunk would otherwise leave a permanent hole
                         # in the stored history while the download still reported
                         # success, so we retry and ultimately surface the failure.
-                        CHUNK_MAX_RETRIES = 3
+                        # Bounded to 2 for the same reason as get_api_response's
+                        # MAX_RETRIES: fewer/shorter retry storms per chunk means a
+                        # cancelled Historify job frees its worker thread sooner, and
+                        # a multi-chunk download can't compound as many retries.
+                        CHUNK_MAX_RETRIES = 2
                         last_error = None
                         chunk_candle_count = 0
                         for attempt in range(CHUNK_MAX_RETRIES):
