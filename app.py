@@ -108,6 +108,7 @@ from blueprints.tv_json import tv_json_bp
 from blueprints.vol_surface import vol_surface_bp  # Import the vol surface blueprint
 from blueprints.websocket_example import websocket_bp  # Import the websocket example blueprint
 from blueprints.whatsapp import whatsapp_bp  # Import the WhatsApp blueprint
+from blueprints.depth_recorder import depth_recorder_bp  # Import the depth recorder blueprint
 from cors import cors  # Import the CORS instance
 from csp import apply_csp_middleware  # Import the CSP middleware
 from database.action_center_db import init_db as ensure_action_center_tables_exists
@@ -119,6 +120,7 @@ from database.flow_db import init_db as ensure_flow_tables_exists
 from database.historify_db import init_database as ensure_historify_tables_exists
 from database.latency_db import init_latency_db as ensure_latency_tables_exists
 from database.leverage_db import init_db as ensure_leverage_tables_exists
+from database.depth_recorder_db import init_db as ensure_depth_recorder_tables_exists
 from database.sandbox_db import init_db as ensure_sandbox_tables_exists
 from database.scalping_db import init_db as ensure_scalping_tables_exists
 from database.settings_db import init_db as ensure_settings_tables_exists
@@ -309,6 +311,7 @@ def create_app():
     app.register_blueprint(strategy_bp)
     app.register_blueprint(master_contract_status_bp)
     app.register_blueprint(websocket_bp)  # Register WebSocket example blueprint
+    app.register_blueprint(depth_recorder_bp)  # Register Depth Recorder blueprint
     app.register_blueprint(chart_test_bp)  # Register standalone chart test page (dev/testing only)
     app.register_blueprint(pnltracker_bp)  # Register PnL tracker blueprint
     app.register_blueprint(python_strategy_bp)  # Register Python strategy blueprint
@@ -710,6 +713,7 @@ def setup_environment(app):
                 ("Scalping DB", ensure_scalping_tables_exists),
                 ("Leverage DB", ensure_leverage_tables_exists),
                 ("Strategy Portfolio DB", ensure_strategy_portfolio_tables_exists),
+                ("Depth Recorder DB", ensure_depth_recorder_tables_exists),
             ]
 
             db_init_start = time.time()
@@ -983,6 +987,13 @@ def _restore_caches_background():
                     )
         except Exception as e:
             logger.debug(f"Cache restoration skipped: {e}")
+
+        try:
+            from services.depth_recorder_service import restore_active_recorders
+
+            restore_active_recorders()
+        except Exception as e:
+            logger.debug(f"Depth recorder auto-restore skipped: {e}")
 
 
 threading.Thread(target=_restore_caches_background, daemon=True).start()
