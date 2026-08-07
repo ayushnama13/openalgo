@@ -132,4 +132,11 @@ export const tools: Tool[] = [
     href: '/arbitrage',
     color: 'bg-green-600',
   },
+  {
+    title: 'Depth Recorder',
+    description:
+      'Stream and store live market depth ticks to SQLite with status monitoring and historical query',
+    href: '/depth-recorder',
+    color: 'bg-cyan-600',
+  },
 ]
