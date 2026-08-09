@@ -51,8 +51,19 @@ class FlowScheduler:
             self._api_key = api_key
 
             try:
+                # SQLAlchemyJobStore(url=...) calls create_engine(url) with no
+                # poolclass/connect_args, so it defaults to QueuePool instead
+                # of the NullPool every other SQLite engine in this project
+                # uses (see database/engine_factory.py) — that leaves several
+                # connections held open for the scheduler's lifetime and was
+                # the real cause of "database is locked" at boot. Passing our
+                # own NullPool engine avoids it.
+                from database.engine_factory import create_db_engine
+
                 jobstores = {
-                    "default": SQLAlchemyJobStore(url=db_url, tablename="flow_apscheduler_jobs")
+                    "default": SQLAlchemyJobStore(
+                        engine=create_db_engine(db_url), tablename="flow_apscheduler_jobs"
+                    )
                 }
                 self._scheduler = BackgroundScheduler(
                     jobstores=jobstores,

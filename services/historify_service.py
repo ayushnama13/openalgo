@@ -1316,8 +1316,11 @@ def cleanup_zombie_jobs():
     """
     Clean up zombie jobs on server startup.
 
-    Jobs that are in 'running' or 'paused' state but have no corresponding
-    in-memory thread tracking are zombie jobs (likely from a server restart).
+    Jobs that are in 'running', 'paused' or 'pending' state but have no
+    corresponding in-memory thread tracking are zombie jobs (likely from a
+    server restart). A job created moments before a restart dies with its
+    worker thread while still 'pending', so pending jobs must be reaped too,
+    or stale "pending forever" cards stay in the UI.
     This function marks them as 'failed' so users can retry them.
     """
     from database.historify_db import get_all_download_jobs, update_job_status
@@ -1326,7 +1329,8 @@ def cleanup_zombie_jobs():
         # Get running jobs
         running_jobs = get_all_download_jobs(status="running", limit=100)
         paused_jobs = get_all_download_jobs(status="paused", limit=100)
-        all_active_jobs = running_jobs + paused_jobs
+        pending_jobs = get_all_download_jobs(status="pending", limit=100)
+        all_active_jobs = running_jobs + paused_jobs + pending_jobs
         zombie_count = 0
 
         for job in all_active_jobs:
@@ -1839,12 +1843,12 @@ def cancel_job(job_id: str) -> tuple[bool, dict[str, Any], int]:
         if not job:
             return False, {"status": "error", "message": "Job not found"}, 404
 
-        if job["status"] not in ("running", "paused"):
+        if job["status"] not in ("running", "paused", "pending"):
             return (
                 False,
                 {
                     "status": "error",
-                    "message": f"Job is not running or paused (status: {job['status']})",
+                    "message": f"Job is not running, paused or pending (status: {job['status']})",
                 },
                 400,
             )

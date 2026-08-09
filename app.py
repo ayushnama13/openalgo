@@ -785,13 +785,23 @@ def setup_environment(app):
             except Exception as e:
                 logger.error(f"Failed to initialize Python strategy scheduler: {e}")
 
-            try:
-                from services.flow_scheduler_service import init_flow_scheduler
+            # Retried like strategy_book above: APScheduler's SQLAlchemyJobStore
+            # creates its jobs table on first start, and that write can race
+            # the cache-restoration thread's writes on the same file. That
+            # collision is SQLITE_BUSY_SNAPSHOT, which busy_timeout does NOT
+            # cover (see database/__init__.py) — only a retry recovers.
+            for _attempt in range(1, 4):
+                try:
+                    from services.flow_scheduler_service import init_flow_scheduler
 
-                init_flow_scheduler()
-                logger.debug("Flow scheduler initialized")
-            except Exception as e:
-                logger.error(f"Failed to initialize Flow scheduler: {e}")
+                    init_flow_scheduler()
+                    logger.debug("Flow scheduler initialized")
+                    break
+                except Exception as e:
+                    logger.error(
+                        f"Failed to initialize Flow scheduler (attempt {_attempt} of 3): {e}"
+                    )
+                    time.sleep(0.5 * _attempt)
 
             try:
                 from services.flow_order_update_monitor_service import (
@@ -802,13 +812,21 @@ def setup_environment(app):
             except Exception:
                 logger.exception("Failed to restore Flow order-update watches")
 
-            try:
-                from services.historify_scheduler_service import init_historify_scheduler
+            # Same SQLITE_BUSY_SNAPSHOT race as the Flow scheduler above.
+            for _attempt in range(1, 4):
+                try:
+                    from services.historify_scheduler_service import (
+                        init_historify_scheduler,
+                    )
 
-                init_historify_scheduler(socketio=socketio)
-                logger.debug("Historify scheduler initialized")
-            except Exception as e:
-                logger.error(f"Failed to initialize Historify scheduler: {e}")
+                    init_historify_scheduler(socketio=socketio)
+                    logger.debug("Historify scheduler initialized")
+                    break
+                except Exception as e:
+                    logger.error(
+                        f"Failed to initialize Historify scheduler (attempt {_attempt} of 3): {e}"
+                    )
+                    time.sleep(0.5 * _attempt)
 
             try:
                 # Server-side scalping SL / target / trailing-stop engine. Runs
@@ -1179,4 +1197,16 @@ if __name__ == "__main__":
             flush=True,
         )
 
-    socketio.run(app, host=host_ip, port=port, debug=debug, reloader_options=reloader_options)
+    # This path only runs `uv run app.py` (the dev server) — production runs
+    # under gunicorn+eventlet (see CLAUDE.md). async_mode="threading"
+    # (extensions.py) makes socketio.run() fall back to Werkzeug, which
+    # refuses to start without this flag. Safe here: it is the documented
+    # opt-in for exactly this single-user, non-gunicorn dev use.
+    socketio.run(
+        app,
+        host=host_ip,
+        port=port,
+        debug=debug,
+        reloader_options=reloader_options,
+        allow_unsafe_werkzeug=True,
+    )
