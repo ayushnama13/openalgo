@@ -157,6 +157,12 @@ def react_scalping():
     return serve_react_app()
 
 
+# Depth Recorder (record + analyse live order-book depth)
+@react_bp.route("/depth-recorder", strict_slashes=False)
+def react_depth_recorder():
+    return serve_react_app()
+
+
 # Search pages
 @react_bp.route("/search/token")
 def react_search_token():

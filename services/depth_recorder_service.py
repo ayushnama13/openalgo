@@ -20,7 +20,8 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime, time as dtime
+from datetime import datetime
+from datetime import time as dtime
 
 # Use the unpatched OS threading module so recorder threads are real OS threads.
 # Under gunicorn+eventlet, threading.Thread is monkey-patched to greenlets that
@@ -55,14 +56,18 @@ IST = pytz.timezone("Asia/Kolkata")
 MARKET_OPEN = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 31)  # 15:30 + 1 min grace
 
-FLUSH_INTERVAL_SECONDS = float(os.getenv("DEPTH_RECORDER_FLUSH_INTERVAL", "1.0"))
-RECONNECT_DELAY_BASE = 2   # seconds
-RECONNECT_DELAY_MAX = 60   # seconds
+FLUSH_INTERVAL_SECONDS = float(os.getenv("DEPTH_RECORDER_FLUSH_INTERVAL", "0.25"))
+RECONNECT_DELAY_BASE = 2  # seconds
+RECONNECT_DELAY_MAX = 60  # seconds
 
 # ---------------------------------------------------------------------------
 # Module-level state
 # ---------------------------------------------------------------------------
-_lock = threading.Lock()
+# Use the UNPATCHED threading for the lock too. Under gunicorn+eventlet the
+# patched threading.Lock is a cooperative greenthread lock; the recorder loop
+# runs on a real OS thread while Flask handlers run on greenlets, so locks and
+# threads must come from the same module (both unpatched).
+_lock = _original_threading.Lock()
 
 # symbol_key -> { thread, stop_event, ticks_buffered, ticks_written, status, ... }
 _recorders: dict[str, dict] = {}
@@ -130,6 +135,11 @@ def stop_recorder(symbol: str, exchange: str) -> dict:
         state = _recorders.get(key)
         if not state:
             return {"status": "not_running", "symbol": symbol, "exchange": exchange}
+        if state.get("status") == "subscribe_failed":
+            # The recorder thread already exited; the entry exists only to
+            # surface the rejection. Remove it cleanly.
+            _recorders.pop(key, None)
+            return {"status": "stopped", "symbol": symbol, "exchange": exchange}
         state["stop_event"].set()
         state["status"] = "stopping"
 
@@ -170,10 +180,10 @@ def restore_active_recorders():
 
         # Try to resolve API key for the logged-in user
         # (There's only one user in OpenAlgo, fetch from session / first available)
-        from database.user_db import UserDetails
+        from database.user_db import User
         from database.user_db import db_session as user_session
 
-        user = user_session.query(UserDetails).first()
+        user = user_session.query(User).first()
         if not user:
             logger.info("[DepthRecorder] No user found — skipping auto-restore")
             return
@@ -186,9 +196,7 @@ def restore_active_recorders():
         for cfg in configs:
             try:
                 start_recorder(cfg["symbol"], cfg["exchange"], api_key)
-                logger.info(
-                    f"[DepthRecorder] Auto-restored: {cfg['exchange']}:{cfg['symbol']}"
-                )
+                logger.info(f"[DepthRecorder] Auto-restored: {cfg['exchange']}:{cfg['symbol']}")
             except Exception as exc:
                 logger.error(
                     f"[DepthRecorder] Auto-restore failed for "
@@ -210,6 +218,7 @@ def _state_to_dict(state: dict) -> dict:
         "ticks_buffered": state.get("ticks_buffered", 0),
         "last_tick_time": state.get("last_tick_time"),
         "connected": state.get("connected", False),
+        "subscribed": state.get("subscribed", False),
         "error": state.get("error"),
         "started_at": state.get("started_at"),
     }
@@ -226,6 +235,65 @@ def _is_market_hours() -> bool:
 
 def _get_ws_url() -> str:
     return os.getenv("WEBSOCKET_URL", "ws://127.0.0.1:8765")
+
+
+async def _read_subscribe_ack(ws, symbol: str, exchange: str, request_id: str) -> tuple[bool, str]:
+    """Read and validate the proxy's subscribe acknowledgement.
+
+    Returns (ok, note). ok=False means the proxy explicitly rejected the
+    subscribe (bad symbol/exchange, unauthorized instrument, broker-side
+    error) and note carries the reason. A missing ack within the deadline
+    (older proxy, or a proxy that streams without acking) is treated as
+    success so recording still starts, with a note.
+    """
+    import asyncio
+    import json
+
+    deadline = asyncio.get_running_loop().time() + 10.0
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return True, "no subscribe ack within 10s — proxy may not send acks"
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+        except TimeoutError:
+            return True, "no subscribe ack within 10s — proxy may not send acks"
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if msg.get("type") == "error":
+            code = msg.get("code")
+            detail = msg.get("message", "")
+            note = f"proxy error {code}: {detail}".strip(" :")
+            return False, note
+        if msg.get("type") != "subscribe":
+            continue  # unrelated tick before the ack (tick, order_update)
+        if request_id and msg.get("request_id") not in (None, request_id):
+            continue  # ack belongs to a different session
+
+        status = msg.get("status")
+        if status != "success":
+            failed = [
+                f"{sub.get('symbol')}: {sub.get('message') or sub.get('status')}"
+                for sub in msg.get("subscriptions") or []
+                if sub.get("status") != "success"
+            ]
+            detail = "; ".join(failed) or msg.get("message", status)
+            return False, f"subscribe rejected: {detail}"
+
+        for sub in msg.get("subscriptions") or []:
+            if (
+                str(sub.get("symbol", "")).upper() == symbol.upper()
+                and str(sub.get("exchange", "")).upper() == exchange.upper()
+                and sub.get("status") != "success"
+            ):
+                return (
+                    False,
+                    f"broker rejected {symbol}/{exchange}: "
+                    f"{sub.get('message') or sub.get('status')}",
+                )
+        return True, ""
 
 
 def _normalise_depth_payload(data: dict, symbol: str, exchange: str) -> dict | None:
@@ -268,36 +336,57 @@ def _normalise_depth_payload(data: dict, symbol: str, exchange: str) -> dict | N
         except (IndexError, TypeError):
             return None
 
+    def _lo(levels, i):
+        """Order count as an int; None when the broker feed does not surface it."""
+        try:
+            v = levels[i].get("orders", levels[i].get("order_count"))
+            if v in (None, ""):
+                return None
+            return int(v)
+        except (IndexError, TypeError, ValueError):
+            return None
+
     now = _now_ist()
     return {
         "symbol": symbol,
         "exchange": exchange,
         "tick_time": now,
+        "ltt": _safe_float(md.get("ltt")),
         "ltp": _safe_float(md.get("ltp")),
         "volume": _safe_float(md.get("volume")),
         "oi": _safe_float(md.get("oi")),
-        "total_buy_qty": _safe_float(md.get("total_buy_qty")),
-        "total_sell_qty": _safe_float(md.get("total_sell_qty")),
+        "total_buy_qty": _safe_float(md.get("total_buy_qty", md.get("total_buy_quantity"))),
+        "total_sell_qty": _safe_float(md.get("total_sell_qty", md.get("total_sell_quantity"))),
         "bid1_price": _lv(bids, 0, "price"),
         "bid1_qty": _lv(bids, 0, "quantity"),
+        "bid1_orders": _lo(bids, 0),
         "bid2_price": _lv(bids, 1, "price"),
         "bid2_qty": _lv(bids, 1, "quantity"),
+        "bid2_orders": _lo(bids, 1),
         "bid3_price": _lv(bids, 2, "price"),
         "bid3_qty": _lv(bids, 2, "quantity"),
+        "bid3_orders": _lo(bids, 2),
         "bid4_price": _lv(bids, 3, "price"),
         "bid4_qty": _lv(bids, 3, "quantity"),
+        "bid4_orders": _lo(bids, 3),
         "bid5_price": _lv(bids, 4, "price"),
         "bid5_qty": _lv(bids, 4, "quantity"),
+        "bid5_orders": _lo(bids, 4),
         "ask1_price": _lv(asks, 0, "price"),
         "ask1_qty": _lv(asks, 0, "quantity"),
+        "ask1_orders": _lo(asks, 0),
         "ask2_price": _lv(asks, 1, "price"),
         "ask2_qty": _lv(asks, 1, "quantity"),
+        "ask2_orders": _lo(asks, 1),
         "ask3_price": _lv(asks, 2, "price"),
         "ask3_qty": _lv(asks, 2, "quantity"),
+        "ask3_orders": _lo(asks, 2),
         "ask4_price": _lv(asks, 3, "price"),
         "ask4_qty": _lv(asks, 3, "quantity"),
+        "ask4_orders": _lo(asks, 3),
         "ask5_price": _lv(asks, 4, "price"),
         "ask5_qty": _lv(asks, 4, "quantity"),
+        "ask5_orders": _lo(asks, 4),
         "raw_json": None,  # Skip raw payload storage to save space; set True to enable
     }
 
@@ -348,14 +437,40 @@ def _recorder_loop(
                 s = _recorders.get(key, {})
                 s["status"] = "recording"
                 s["connected"] = True
+                s["subscribed"] = False
 
             logger.info(f"[DepthRecorder:{key}] Authenticated — subscribing Depth")
 
-            await ws.send(json.dumps({
-                "action": "subscribe",
-                "symbols": [{"symbol": symbol, "exchange": exchange}],
-                "mode": "Depth",
-            }))
+            request_id = f"dr-{key}"
+            await ws.send(
+                json.dumps(
+                    {
+                        "action": "subscribe",
+                        "request_id": request_id,
+                        "symbols": [{"symbol": symbol, "exchange": exchange}],
+                        "mode": "Depth",
+                    }
+                )
+            )
+
+            # Read the subscribe ack. A bad symbol/exchange or a broker-side
+            # reject produces an error/partial ack; without this check the
+            # recorder would sit in "recording" forever with zero ticks and no
+            # signal for the user.
+            ack_ok, ack_note = await _read_subscribe_ack(ws, symbol, exchange, request_id)
+            if not ack_ok:
+                with _lock:
+                    s = _recorders.get(key, {})
+                    s["status"] = "subscribe_failed"
+                    s["connected"] = False
+                    s["error"] = ack_note
+                logger.error(f"[DepthRecorder:{key}] Subscribe rejected: {ack_note}")
+                return
+
+            with _lock:
+                s = _recorders.get(key, {})
+                s["subscribed"] = True
+            logger.info(f"[DepthRecorder:{key}] Subscribed — recording Depth")
 
             while not stop_event.is_set():
                 now_mono = asyncio.get_running_loop().time()
@@ -374,7 +489,7 @@ def _recorder_loop(
 
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=FLUSH_INTERVAL_SECONDS + 0.5)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
 
                 try:
@@ -416,6 +531,15 @@ def _recorder_loop(
             finally:
                 loop.close()
                 asyncio.set_event_loop(None)
+
+            # A rejected subscribe is a hard, non-retryable condition (bad
+            # symbol/exchange, unauthorized instrument, broker-side ban):
+            # keep the failure visible in status instead of churning
+            # reconnects every few seconds.
+            with _lock:
+                if _recorders.get(key, {}).get("status") == "subscribe_failed":
+                    logger.info(f"[DepthRecorder:{key}] Subscribe rejected — not retrying")
+                    break
             delay = RECONNECT_DELAY_BASE
         except Exception as exc:
             err_msg = str(exc)
@@ -433,10 +557,14 @@ def _recorder_loop(
         stop_event.wait(delay)
         delay = min(delay * 2, RECONNECT_DELAY_MAX)
 
+    # Drop the registry entry once the thread has actually exited. Identity
+    # check: if the entry was already replaced by a new start_recorder for the
+    # same symbol, leave the new entry untouched.
     with _lock:
-        s = _recorders.get(key, {})
-        s["status"] = "stopped"
-        s["connected"] = False
+        s = _recorders.get(key)
+        if s is not None and s.get("status") != "subscribe_failed":
+            s["status"] = "stopped"
+            s["connected"] = False
+            _recorders.pop(key, None)
 
     logger.info(f"[DepthRecorder:{key}] Stopped")
-
