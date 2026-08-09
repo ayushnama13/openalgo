@@ -16,6 +16,16 @@ IMAGE_NAME="openalgo"
 IMAGE_TAG="latest"
 CONTAINER_NAME="openalgo-web"
 
+# Prefer docker compose (v2 plugin); fall back to docker-compose (v1 standalone)
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    DC="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+    DC="docker-compose"
+else
+    echo "Neither 'docker compose' nor 'docker-compose' was found. Install Docker Compose first." >&2
+    exit 1
+fi
+
 # Functions
 print_header() {
     echo -e "\n${BLUE}========================================${NC}"
@@ -74,7 +84,7 @@ cleanup_existing() {
 
     if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
         print_info "Stopping existing container: ${CONTAINER_NAME}"
-        docker-compose down 2>/dev/null || docker stop ${CONTAINER_NAME} 2>/dev/null || true
+        $DC down 2>/dev/null || docker stop ${CONTAINER_NAME} 2>/dev/null || true
         print_success "Existing container stopped"
     else
         print_info "No existing container found"
@@ -90,9 +100,9 @@ build_image() {
 
     # Build with docker-compose (recommended)
     if [ -f "docker-compose.yaml" ]; then
-        print_info "Using docker-compose build..."
-        docker-compose build --no-cache
-        print_success "Docker image built successfully via docker-compose"
+        print_info "Using $DC build..."
+        $DC build --no-cache
+        print_success "Docker image built successfully via $DC"
     else
         # Fallback to direct docker build
         print_info "Using docker build..."
@@ -161,9 +171,9 @@ start_container() {
     print_header "Starting OpenAlgo Container"
 
     if [ -f "docker-compose.yaml" ]; then
-        print_info "Starting with docker-compose..."
-        docker-compose up -d
-        print_success "Container started via docker-compose"
+        print_info "Starting with $DC..."
+        $DC up -d
+        print_success "Container started via $DC"
     else
         print_info "Starting with docker run..."
         docker run -d \
@@ -196,7 +206,7 @@ health_check() {
     else
         print_error "Container is not running!"
         print_info "Checking logs..."
-        docker-compose logs --tail=50 openalgo || docker logs ${CONTAINER_NAME}
+        $DC logs --tail=50 openalgo || docker logs ${CONTAINER_NAME}
         exit 1
     fi
 
@@ -222,18 +232,18 @@ test_python_deps() {
     print_info "Testing basic imports..."
 
     # Test 1: Basic imports
-    if docker-compose exec -T openalgo python -c "import numba; import llvmlite; print('SUCCESS')" 2>/dev/null | grep -q "SUCCESS"; then
+    if $DC exec -T openalgo python -c "import numba; import llvmlite; print('SUCCESS')" 2>/dev/null | grep -q "SUCCESS"; then
         print_success "numba, llvmlite imports successful"
     else
         print_error "Failed to import dependencies"
         print_info "Running detailed test..."
-        docker-compose exec openalgo python -c "import numba; import llvmlite; print('SUCCESS')"
+        $DC exec openalgo python -c "import numba; import llvmlite; print('SUCCESS')"
         return 1
     fi
 
     # Test 2: Numba JIT compilation
     print_info "Testing numba JIT compilation..."
-    if docker-compose exec -T openalgo python -c "
+    if $DC exec -T openalgo python -c "
 from numba import jit
 import numpy as np
 
@@ -252,7 +262,7 @@ print('SUCCESS' if len(result) == 3 else 'FAILED')
 
     # Test 3: Cache directory permissions
     print_info "Testing cache directory..."
-    if docker-compose exec -T openalgo bash -c "
+    if $DC exec -T openalgo bash -c "
 [ -d /app/tmp/numba_cache ] && [ -w /app/tmp/numba_cache ] && echo 'SUCCESS'
 " 2>/dev/null | grep -q "SUCCESS"; then
         print_success "Numba cache directory is writable"
