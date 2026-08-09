@@ -120,3 +120,13 @@ workspace/**/.sample.env
 
 # Local Git worktrees created for isolated feature and documentation work.
 .worktrees/
+
+# Personal/local MCP config (machine-specific paths) -- use .mcp.local.json instead
+.mcp.json
+
+# Serena MCP tool-local state (project.local.yml/cache already self-excluded)
+.serena/
+
+# Personal scratch strategy scripts (not part of the product)
+/Stratergies/
+/test_editor_strategy.py
