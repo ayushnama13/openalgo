@@ -1,0 +1,61 @@
+# Token-optimization ignore list. Mirrors .gitignore's exclusions plus a few
+# large/generated files that ARE tracked in git but should not be pulled into
+# context automatically. Does not affect what gets committed — see .gitignore
+# for that.
+
+# Databases (db/ alone is ~550MB: openalgo.db, sandbox.db, historify.duckdb, WAL/SHM sidecars)
+db/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.duckdb
+*.duckdb.wal
+*.sqlite
+
+# Logs
+log/
+*.log
+*.jsonl
+
+# Frontend build output and dependencies (frontend/ is ~660MB, almost all node_modules)
+frontend/node_modules/
+frontend/dist/
+node_modules/
+**/node_modules/
+dist/
+build/
+
+# Python artifacts
+__pycache__/
+**/__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Numba/LLVM caches (auto-created on Linux)
+.numba_cache/
+.llvm_tmp/
+
+# Secrets and generated keys — never pull into context
+.env
+.env.*
+*.env
+!.sample.env
+keys/
+db/strategy_encryption.key
+db/backups/
+
+# Stale generated audit doc — docs/INDEX.md is the maintained source of truth (see CLAUDE.md)
+DISCOVERY_MAP.md
+
+# Large data/CSV dumps
+*.csv
+!symbols.csv
+!all_symbols.csv
+!data/qtyfreeze.csv
+
+# Git worktrees
+.worktrees/

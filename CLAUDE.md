@@ -5,6 +5,10 @@ Guidance for Claude Code working in this repository. This file carries what is
 constraints, and conventions. Structure, commands, and config are discoverable —
 read them from the repo.
 
+Domain-specific detail (Python backend, React frontend) lives in
+`.claude/rules/` and loads only when editing matching files — see those files
+for logging, DB/migration, FD hygiene, eventlet, and frontend-build rules.
+
 ## Overview
 
 OpenAlgo is a production algorithmic trading platform: Flask backend, React 19
@@ -35,7 +39,9 @@ installation, audits) to its entry file.
 
 Read `docs/INDEX.md` first, then open only the specific doc you need instead of
 scanning the tree. Do **not** copy or restate docs into a second location — edit
-the source file in `docs/` and every reader sees the change.
+the source file in `docs/` and every reader sees the change. `DISCOVERY_MAP.md`
+at the repo root is a point-in-time audit snapshot, not a maintained doc — don't
+treat it as authoritative or update it in place.
 
 ## Skills
 
@@ -54,23 +60,6 @@ Detailed procedures live in `.claude/skills/` and load on demand:
 - External platforms (TradingView, GoCharting, Chartink) send API keys in the JSON body or URL query params — they cannot set custom HTTP headers. This is an accepted architectural trade-off.
 - The stdio MCP server (`mcp/mcpserver.py`) is local-only and not remotely exposed. `blueprints/mcp_http.py` and `blueprints/mcp_oauth.py` are the remote-facing MCP surfaces.
 - Indian broker tokens expire daily at ~3:00 AM IST. Session management is aligned to that schedule.
-
-## Runtime Constraints
-
-### Eventlet + Gunicorn (production)
-
-Production (Ubuntu direct and Docker) runs `gunicorn --worker-class eventlet -w 1`:
-
-- **No `asyncio`.** Eventlet monkey-patches the stdlib and is incompatible with `asyncio.run()`, `async`/`await`, and `asyncio.get_event_loop()`. Async work must use eventlet green threads or run on a separate real OS thread — see `telegram_bot_service.py:_render_plotly_png` for the pattern.
-- **Single worker (`-w 1`) is mandatory.** Flask-SocketIO state is in-process and cannot be shared across workers.
-- **`threading.local()` maps to green threads**, which is why `scoped_session` works correctly under eventlet.
-
-### Development server differs
-
-`uv run app.py` uses standard threading, not eventlet. Code must work in both.
-`asyncio` works fine on the dev server and **breaks in production** — this is the
-single most common way a change passes locally and fails on deploy. SQLite
-locking is also stricter on Windows.
 
 ## Invariants — do not break these
 
@@ -111,12 +100,9 @@ All SQLite engines are created via `database.engine_factory.create_db_engine()`,
 which applies `NullPool` — a fresh connection per operation, closed immediately.
 **Never use `StaticPool`**: a single shared connection has its cursor state
 corrupted by concurrent requests, producing `"bad parameter or other API misuse"`
-and `"cannot commit - SQL statements in progress"`. All platforms.
-
-FD leak prevention rests on five session-cleanup layers: `app.py`
-`teardown_appcontext`; `traffic_logger.py` explicit `logs_session.remove()` in a
-`finally`; `security_middleware.py` for the banned-IP WSGI path; and teardown
-handlers in `blueprints/traffic.py` and `blueprints/security.py`.
+and `"cannot commit - SQL statements in progress"`. All platforms. Full FD-hygiene
+detail (session cleanup layers, HTTP client, subprocess reaping) is in
+`.claude/rules/backend.md`.
 
 ## Architecture
 
@@ -183,84 +169,19 @@ US30/JAPAN225/HANGSENG plus `GIFTNIFTY` from NSE IFSC).
 API keys reach `/api/v1/` in the JSON body (preferred) or the `X-API-KEY` header;
 they are generated at `/apikey` and hashed with pepper before storage.
 
-## Conventions
+## Cross-cutting conventions
 
 **Always use uv.** Never global Python, never a hand-managed venv, never activate
 anything: `uv run app.py`, `uv run python script.py`, `uv run pytest test/ -v`,
 `uv add package`, `uv sync`. Python 3.12+.
 
-**Logging.** `logger = get_logger(__name__)` from `utils/logging.py` in every
-module. Error logging is always `logger.exception()` — it captures the traceback
-and routes it to the JSON handler. Never `import traceback` /
-`traceback.print_exc()` / `traceback.format_exc()`; those bypass centralized
-logging. Never `print()`.
-
-**When debugging, read `log/errors.jsonl` first.** One JSON object per line:
-timestamp, logger, module, `file:line`, message, full traceback, and Flask
-request context (method, path, IP) when available. Truncated to the last 1000
-entries at startup.
-
-**FD hygiene.** Every DB engine/session, file, socket, WebSocket, ZMQ socket,
-subprocess pipe, thread, and executor is a file descriptor, and production is a
-single Gunicorn worker that never restarts — a leak accumulates until "too many
-open files". Preventing one at creation is far cheaper than hunting it later:
-
-- SQLite engines via `database.engine_factory.create_db_engine()`
-- Every `scoped_session` registered in the `app.py` teardown, or used as `with db_session() as session:`
-- HTTP via the shared `utils/httpx_client.get_httpx_client()`, always with an explicit timeout
-- WebSocket adapters close before reconnect
-- Subprocesses write to a log file (not `PIPE`) and are `.wait()`-reaped
-- Threads and executors are shared module-level singletons, never per-call
-
-After a change touching any of these, run the **`fd-audit`** skill before calling
-it done.
-
-**Database access** goes through the SQLAlchemy ORM, not raw SQL.
-
-**Schema changes need a migration script, not just a startup hook.** Users
-upgrade with `cd upgrade && uv run migrate_all.py`, so every schema change ships
-as a script in `upgrade/` registered in that file's `MIGRATIONS` list. Applying
-the change from `init_db()` alone is *not* enough: seeding functions typically
-only run against an empty table, so an existing installation keeps the old
-schema forever and the change silently never reaches the ~290k live deployments.
-
-- **Idempotent, and safe to re-run.** Check whether the change is already
-  present (`PRAGMA table_info`) and return quietly if so.
-- **Support `--status`** to report what would change without changing it.
-- **Never clobber a value the user may have customised.** Guard the update on
-  the old value, so an admin who has already set their own is left alone.
-- **Backfill from the data, not from a default.** A new column defaulted
-  uniformly is usually wrong for existing rows; derive each row's value from
-  what the row already says.
-- **SQLite limits shape the approach.** It cannot alter a `CHECK` constraint or
-  add a `UNIQUE` column in place: rebuild the table (see
-  `migrate_sandbox_trigger_pending.py`) or add a partial unique index instead.
-
-Test it against a *copy of a real database forced back to the old schema*, not
-only a fresh one. A migration that works on an empty database and fails on a
-populated one is the common failure.
-
-**Style.** Python: Ruff (`uv run ruff check . --fix`, `uv run ruff format .`),
-config in `pyproject.toml`; 4 spaces, Google-style docstrings. React/TypeScript:
-Biome (`frontend/biome.json`), functional components with hooks, PascalCase
-component files, TanStack Query for server state.
+**Schema changes need a migration script, not just a startup hook** — see
+`.claude/rules/backend.md` for the full requirements. Skipping this means a
+change never reaches the ~290k live deployments that upgrade via
+`cd upgrade && uv run migrate_all.py` instead of a fresh install.
 
 **Commits.** Conventional Commits: `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`.
 
 **No icons or emojis anywhere** — source, comments, log messages, commit
 messages, PR descriptions, changelogs, release notes, or any generated text
 including drafts for Discord or Telegram. Use plain text labels.
-
-## Frontend build
-
-`frontend/dist/` is in `.gitignore` so contributors cannot commit half-built
-artifacts — but on `main` it **is tracked**. The `commit-dist` job in
-`.github/workflows/ci.yml` force-adds (`git add -f`) the freshly built dist back
-to `main` after every successful push.
-
-- **Production servers and backend-only contributors need no Node.js.** A plain `git pull` from `main` brings the latest UI. This is the canonical upgrade path.
-- **React developers** run `cd frontend && npm install && npm run build` (or `npm run dev`) locally, since the local `.gitignore` will not track their output. Build only — tests run in CI.
-- **Feature branches** CI has not built may carry stale or missing `dist/`. Build locally or rebase onto recent `main`.
-
-Config lives in `.env` (copy from `.sample.env`); `VALID_BROKERS` gates which
-broker plugins load, and plugins are discovered at startup only.
