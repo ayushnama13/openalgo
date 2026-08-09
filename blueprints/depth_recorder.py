@@ -14,7 +14,9 @@ Routes:
   DEL  /api/depth-recorder/config       → delete a config
 """
 
-from flask import Blueprint, jsonify, request, session
+import json
+
+from flask import Blueprint, Response, jsonify, request, session
 
 from database.auth_db import get_api_key_for_tradingview
 from database.depth_recorder_db import (
@@ -23,6 +25,14 @@ from database.depth_recorder_db import (
     get_recent_ticks,
     get_stats,
     get_tick_count,
+)
+from services.depth_analysis import (
+    leadlag_report,
+    list_sessions,
+    metrics_series,
+    render_heatmap_png,
+    report_health,
+    walls_report,
 )
 from services.depth_recorder_service import (
     get_all_statuses,
@@ -122,14 +132,16 @@ def api_ticks():
     ticks = get_recent_ticks(symbol, exchange, limit)
     count = get_tick_count(symbol, exchange)
 
-    return jsonify({
-        "status": "success",
-        "symbol": symbol,
-        "exchange": exchange,
-        "total_count": count,
-        "returned": len(ticks),
-        "ticks": ticks,
-    }), 200
+    return jsonify(
+        {
+            "status": "success",
+            "symbol": symbol,
+            "exchange": exchange,
+            "total_count": count,
+            "returned": len(ticks),
+            "ticks": ticks,
+        }
+    ), 200
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -167,8 +179,128 @@ def api_delete_config():
     stop_recorder(symbol, exchange)
 
     deleted = delete_config(symbol, exchange)
-    return jsonify({
-        "status": "success" if deleted else "not_found",
-        "symbol": symbol,
-        "exchange": exchange,
-    }), 200
+    return jsonify(
+        {
+            "status": "success" if deleted else "not_found",
+            "symbol": symbol,
+            "exchange": exchange,
+        }
+    ), 200
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Analytics (Layer 1 + Layer 2)
+# ────────────────────────────────────────────────────────────────────────────
+def _session_params():
+    """Read common symbol/exchange/day query params, with smart defaults."""
+    symbol = (request.args.get("symbol") or "").strip().upper()
+    exchange = (request.args.get("exchange") or "NSE").strip().upper()
+    day = (request.args.get("day") or "").strip()
+    if not symbol:
+        return None, None, None
+    if not day:
+        # latest day available for the symbol
+        sessions = list_sessions(exchange=exchange, symbol=symbol)
+        if not sessions:
+            return None, None, None
+        day = sessions[0]["day"]
+    return symbol, exchange, day
+
+
+@depth_recorder_bp.route("/api/depth-recorder/sessions", methods=["GET"])
+@check_session_validity
+def api_sessions():
+    """List all recorded sessions (symbol/exchange/day with tick counts)."""
+    symbol = (request.args.get("symbol") or "").strip().upper() or None
+    exchange = (request.args.get("exchange") or "NSE").strip().upper()
+    sessions = list_sessions(exchange=exchange, symbol=symbol)
+    return jsonify({"status": "success", "sessions": sessions}), 200
+
+
+@depth_recorder_bp.route("/api/depth-recorder/health", methods=["GET"])
+@check_session_validity
+def api_health():
+    """Recorder health: packets/minute + feed-gap table (>3s)."""
+    symbol, exchange, day = _session_params()
+    if not symbol:
+        return jsonify({"status": "error", "message": "symbol required"}), 400
+    return jsonify(report_health(symbol, exchange, day)), 200
+
+
+@depth_recorder_bp.route("/api/depth-recorder/leadlag", methods=["GET"])
+@check_session_validity
+def api_leadlag():
+    """Lead-lag: OFI vs forward mid-return correlation, per horizon + band."""
+    symbol, exchange, day = _session_params()
+    if not symbol:
+        return jsonify({"status": "error", "message": "symbol required"}), 400
+
+    try:
+        horizons = [int(h) for h in (request.args.get("horizons") or "1,10,30,120").split(",")]
+    except (TypeError, ValueError):
+        horizons = [1, 10, 30, 120]
+    return jsonify(leadlag_report(symbol, exchange, day, horizons=horizons)), 200
+
+
+@depth_recorder_bp.route("/api/depth-recorder/walls", methods=["GET"])
+@check_session_validity
+def api_walls():
+    """Support/resistance walls: top price levels by time-weighted resting size."""
+    symbol, exchange, day = _session_params()
+    if not symbol:
+        return jsonify({"status": "error", "message": "symbol required"}), 400
+    try:
+        top = max(1, min(int(request.args.get("top", 8)), 50))
+    except (TypeError, ValueError):
+        top = 8
+    return jsonify(walls_report(symbol, exchange, day, top=top)), 200
+
+
+@depth_recorder_bp.route("/api/depth-recorder/heatmap.png", methods=["GET"])
+@check_session_validity
+def api_heatmap_png():
+    """Server-rendered liquidity heatmap PNG (frontend overlays crosshair)."""
+    symbol, exchange, day = _session_params()
+    if not symbol:
+        return jsonify({"status": "error", "message": "symbol required"}), 400
+
+    try:
+        step = float(request.args.get("step", 0))
+    except (TypeError, ValueError):
+        step = 0.0
+    step = step or None
+
+    png_bytes, meta = render_heatmap_png(exchange, symbol, day, step=step)
+    if not png_bytes:
+        return jsonify({"status": "error", "message": "no data for session"}), 404
+
+    resp = Response(png_bytes, mimetype="image/png")
+    resp.headers["X-Depth-Meta"] = json.dumps(meta)
+    return resp
+
+
+@depth_recorder_bp.route("/api/depth-recorder/heatmap", methods=["GET"])
+@check_session_validity
+def api_heatmap_meta():
+    """Return heatmap metadata (price/time axes) without the image bytes."""
+    symbol, exchange, day = _session_params()
+    if not symbol:
+        return jsonify({"status": "error", "message": "symbol required"}), 400
+    _png, meta = render_heatmap_png(exchange, symbol, day)
+    if not meta or meta.get("status") != "ok":
+        return jsonify({"status": "error", "message": "no data for session"}), 404
+    return jsonify(meta), 200
+
+
+@depth_recorder_bp.route("/api/depth-recorder/metrics", methods=["GET"])
+@check_session_validity
+def api_metrics():
+    """Compact per-second metrics series for a session (charts + replay)."""
+    symbol, exchange, day = _session_params()
+    if not symbol:
+        return jsonify({"status": "error", "message": "symbol required"}), 400
+    try:
+        max_points = max(200, min(int(request.args.get("max_points", 12000)), 60000))
+    except (TypeError, ValueError):
+        max_points = 12000
+    return jsonify(metrics_series(symbol, exchange, day, max_points=max_points)), 200

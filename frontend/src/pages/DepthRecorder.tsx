@@ -10,6 +10,7 @@ import {
   TrendingUp,
 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import DepthAnalytics from '@/components/depth-recorder/DepthAnalytics'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -21,6 +22,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 import { showToast } from '@/utils/toast'
 
@@ -122,9 +124,11 @@ function fmtTime(iso: string | null | undefined): string {
 
 function statusColor(status: string): 'success' | 'warning' | 'error' | 'idle' {
   if (status === 'recording') return 'success'
-  if (status === 'reconnecting' || status === 'connecting' || status === 'starting') return 'warning'
+  if (status === 'reconnecting' || status === 'connecting' || status === 'starting')
+    return 'warning'
   if (status === 'stopped' || status === 'stopping') return 'idle'
   if (status === 'waiting_market_hours') return 'warning'
+  if (status === 'subscribe_failed') return 'error'
   return 'idle'
 }
 
@@ -304,8 +308,7 @@ function RecorderCard({
               <span>Latest snapshot · {fmtTime(latestTick.tick_time)}</span>
               <div className="flex items-center gap-3 font-mono">
                 <span>
-                  LTP{' '}
-                  <span className="text-foreground font-semibold">{fmt(latestTick.ltp)}</span>
+                  LTP <span className="text-foreground font-semibold">{fmt(latestTick.ltp)}</span>
                 </span>
                 <span className="text-emerald-400 flex items-center gap-0.5">
                   <TrendingUp className="w-3 h-3" />
@@ -342,6 +345,7 @@ export default function DepthRecorder() {
   const [symbol, setSymbol] = useState('RELIANCE')
   const [exchange, setExchange] = useState('NSE')
   const [loading, setLoading] = useState(false)
+  const [tab, setTab] = useState('recorders')
   const pollerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const fetchStatuses = useCallback(async () => {
@@ -363,10 +367,9 @@ export default function DepthRecorder() {
 
   const fetchLatestTick = useCallback(async (sym: string, exch: string) => {
     try {
-      const r = await fetch(
-        `/api/depth-recorder/ticks?symbol=${sym}&exchange=${exch}&limit=1`,
-        { credentials: 'include' }
-      )
+      const r = await fetch(`/api/depth-recorder/ticks?symbol=${sym}&exchange=${exch}&limit=1`, {
+        credentials: 'include',
+      })
       if (r.ok) {
         const d = await r.json()
         const tick = d.ticks?.[0]
@@ -450,14 +453,17 @@ export default function DepthRecorder() {
             Depth Recorder
           </h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            Stream &amp; store live market depth ticks to SQLite
+            Stream &amp; store live market depth ticks to SQLite, then analyse them
           </p>
         </div>
 
         <Button
           variant="outline"
           size="sm"
-          onClick={() => { fetchStatuses(); fetchStats() }}
+          onClick={() => {
+            fetchStatuses()
+            fetchStats()
+          }}
           className="self-start sm:self-auto"
         >
           <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
@@ -465,99 +471,128 @@ export default function DepthRecorder() {
         </Button>
       </div>
 
-      {/* ── Global Stats ── */}
-      {stats && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          {[
-            { label: 'Total Ticks', value: stats.total_ticks.toLocaleString('en-IN'), icon: Activity, color: 'text-cyan-400' },
-            { label: 'Symbols Tracked', value: stats.symbols.length, icon: Database, color: 'text-violet-400' },
-            { label: 'Active Recorders', value: recordingCount, icon: Circle, color: 'text-emerald-400' },
-            {
-              label: 'Latest Tick',
-              value: stats.latest_tick_time ? fmtTime(stats.latest_tick_time) : '—',
-              icon: Activity,
-              color: 'text-amber-400',
-            },
-          ].map(({ label, value, icon: Icon, color }) => (
-            <div
-              key={label}
-              className="rounded-xl border border-border bg-card/60 backdrop-blur px-4 py-3"
-            >
-              <div className="flex items-center gap-2 mb-1">
-                <Icon className={cn('w-3.5 h-3.5', color)} />
-                <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                  {label}
-                </span>
-              </div>
-              <div className="text-xl font-bold font-mono">{value}</div>
-            </div>
-          ))}
-        </div>
-      )}
+      <Tabs value={tab} onValueChange={setTab}>
+        <TabsList>
+          <TabsTrigger value="recorders">Recorders</TabsTrigger>
+          <TabsTrigger value="analytics">Analytics</TabsTrigger>
+        </TabsList>
+      </Tabs>
 
-      {/* ── Add Recorder ── */}
-      <Card className="border-border bg-card/60 backdrop-blur">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base">Add Recorder</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-3">
-            <Input
-              id="depth-symbol-input"
-              className="w-40 font-mono uppercase"
-              placeholder="RELIANCE"
-              value={symbol}
-              onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-              onKeyDown={(e) => e.key === 'Enter' && handleStart()}
-            />
-            <Select value={exchange} onValueChange={setExchange}>
-              <SelectTrigger id="depth-exchange-select" className="w-28">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {EXCHANGES.map((ex) => (
-                  <SelectItem key={ex} value={ex}>
-                    {ex}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Button
-              id="depth-start-btn"
-              onClick={handleStart}
-              disabled={loading}
-              className="bg-cyan-500 hover:bg-cyan-400 text-black font-semibold"
-            >
-              <Play className="w-3.5 h-3.5 mr-1.5" />
-              {loading ? 'Starting…' : 'Start Recording'}
-            </Button>
-          </div>
-          <p className="text-[11px] text-muted-foreground mt-2">
-            Connects to <code className="text-cyan-400">ws://127.0.0.1:8765</code>, subscribes
-            Depth mode, and writes ticks to <code className="text-cyan-400">depth_ticks</code> table.
-            Auto-reconnects on disconnect. Active only during market hours (9:15–15:30 IST weekdays).
-          </p>
-        </CardContent>
-      </Card>
-
-      {/* ── Recorder Cards ── */}
-      {statuses.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-3">
-          <Database className="w-12 h-12 opacity-20" />
-          <p className="text-sm">No recorders yet. Add one above.</p>
-        </div>
+      {tab === 'analytics' ? (
+        <DepthAnalytics />
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {statuses.map((rec) => (
-            <RecorderCard
-              key={`${rec.exchange}:${rec.symbol}`}
-              rec={rec}
-              latestTick={latestTicks[`${rec.exchange}:${rec.symbol}`] ?? null}
-              onStop={() => handleStop(rec.symbol, rec.exchange)}
-              onDelete={() => handleDelete(rec.symbol, rec.exchange)}
-            />
-          ))}
-        </div>
+        <>
+          {/* ── Global Stats ── */}
+          {stats && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {[
+                {
+                  label: 'Total Ticks',
+                  value: stats.total_ticks.toLocaleString('en-IN'),
+                  icon: Activity,
+                  color: 'text-cyan-400',
+                },
+                {
+                  label: 'Symbols Tracked',
+                  value: stats.symbols.length,
+                  icon: Database,
+                  color: 'text-violet-400',
+                },
+                {
+                  label: 'Active Recorders',
+                  value: recordingCount,
+                  icon: Circle,
+                  color: 'text-emerald-400',
+                },
+                {
+                  label: 'Latest Tick',
+                  value: stats.latest_tick_time ? fmtTime(stats.latest_tick_time) : '—',
+                  icon: Activity,
+                  color: 'text-amber-400',
+                },
+              ].map(({ label, value, icon: Icon, color }) => (
+                <div
+                  key={label}
+                  className="rounded-xl border border-border bg-card/60 backdrop-blur px-4 py-3"
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    <Icon className={cn('w-3.5 h-3.5', color)} />
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                      {label}
+                    </span>
+                  </div>
+                  <div className="text-xl font-bold font-mono">{value}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* ── Add Recorder ── */}
+          <Card className="border-border bg-card/60 backdrop-blur">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Add Recorder</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="flex flex-wrap gap-3">
+                <Input
+                  id="depth-symbol-input"
+                  className="w-40 font-mono uppercase"
+                  placeholder="RELIANCE"
+                  value={symbol}
+                  onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+                  onKeyDown={(e) => e.key === 'Enter' && handleStart()}
+                />
+                <Select value={exchange} onValueChange={setExchange}>
+                  <SelectTrigger id="depth-exchange-select" className="w-28">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {EXCHANGES.map((ex) => (
+                      <SelectItem key={ex} value={ex}>
+                        {ex}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button
+                  id="depth-start-btn"
+                  onClick={handleStart}
+                  disabled={loading}
+                  className="bg-cyan-500 hover:bg-cyan-400 text-black font-semibold"
+                >
+                  <Play className="w-3.5 h-3.5 mr-1.5" />
+                  {loading ? 'Starting…' : 'Start Recording'}
+                </Button>
+              </div>
+              <p className="text-[11px] text-muted-foreground mt-2">
+                Connects to <code className="text-cyan-400">ws://127.0.0.1:8765</code>, subscribes
+                Depth mode, and writes ticks to <code className="text-cyan-400">depth_ticks</code>{' '}
+                table. Auto-reconnects on disconnect. Active only during market hours (9:15–15:30
+                IST weekdays).
+              </p>
+            </CardContent>
+          </Card>
+
+          {/* ── Recorder Cards ── */}
+          {statuses.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-3">
+              <Database className="w-12 h-12 opacity-20" />
+              <p className="text-sm">No recorders yet. Add one above.</p>
+            </div>
+          ) : (
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              {statuses.map((rec) => (
+                <RecorderCard
+                  key={`${rec.exchange}:${rec.symbol}`}
+                  rec={rec}
+                  latestTick={latestTicks[`${rec.exchange}:${rec.symbol}`] ?? null}
+                  onStop={() => handleStop(rec.symbol, rec.exchange)}
+                  onDelete={() => handleDelete(rec.symbol, rec.exchange)}
+                />
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   )

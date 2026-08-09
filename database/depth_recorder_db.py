@@ -22,7 +22,16 @@ import os
 from datetime import datetime
 
 import pytz
-from sqlalchemy import Column, DateTime, Float, Index, Integer, String, Text
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Float,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import scoped_session, sessionmaker
 
@@ -40,9 +49,7 @@ DEPTH_RECORDER_DATABASE_URL = os.getenv(
 )
 engine = create_db_engine(DEPTH_RECORDER_DATABASE_URL)
 
-db_session = scoped_session(
-    sessionmaker(autocommit=False, autoflush=False, bind=engine)
-)
+db_session = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=engine))
 Base = declarative_base()
 Base.query = db_session.query_property()
 
@@ -61,8 +68,14 @@ class DepthTick(Base):
     symbol = Column(String(60), nullable=False)
     exchange = Column(String(20), nullable=False)
 
-    # Timestamp stored in IST (YYYY-MM-DD HH:MM:SS.ffffff)
+    # Timestamp stored in IST (YYYY-MM-DD HH:MM:SS.ffffff), set from our own
+    # receive clock (LTT does not advance between trades, so it cannot order
+    # depth updates — see CLAUDE.md / depth analysis notes).
     tick_time = Column(DateTime(timezone=False), nullable=False)
+
+    # Exchange last-trade time (epoch). Only advances on a trade — kept as a
+    # secondary column for aligning the depth feed against trade data later.
+    ltt = Column(Float, nullable=True)
 
     # Top-level scalars
     ltp = Column(Float, nullable=True)
@@ -74,26 +87,36 @@ class DepthTick(Base):
     # Bid levels (buy side)
     bid1_price = Column(Float, nullable=True)
     bid1_qty = Column(Float, nullable=True)
+    bid1_orders = Column(Integer, nullable=True)
     bid2_price = Column(Float, nullable=True)
     bid2_qty = Column(Float, nullable=True)
+    bid2_orders = Column(Integer, nullable=True)
     bid3_price = Column(Float, nullable=True)
     bid3_qty = Column(Float, nullable=True)
+    bid3_orders = Column(Integer, nullable=True)
     bid4_price = Column(Float, nullable=True)
     bid4_qty = Column(Float, nullable=True)
+    bid4_orders = Column(Integer, nullable=True)
     bid5_price = Column(Float, nullable=True)
     bid5_qty = Column(Float, nullable=True)
+    bid5_orders = Column(Integer, nullable=True)
 
     # Ask levels (sell side)
     ask1_price = Column(Float, nullable=True)
     ask1_qty = Column(Float, nullable=True)
+    ask1_orders = Column(Integer, nullable=True)
     ask2_price = Column(Float, nullable=True)
     ask2_qty = Column(Float, nullable=True)
+    ask2_orders = Column(Integer, nullable=True)
     ask3_price = Column(Float, nullable=True)
     ask3_qty = Column(Float, nullable=True)
+    ask3_orders = Column(Integer, nullable=True)
     ask4_price = Column(Float, nullable=True)
     ask4_qty = Column(Float, nullable=True)
+    ask4_orders = Column(Integer, nullable=True)
     ask5_price = Column(Float, nullable=True)
     ask5_qty = Column(Float, nullable=True)
+    ask5_orders = Column(Integer, nullable=True)
 
     # Raw JSON dump of the full depth payload (for reference)
     raw_json = Column(Text, nullable=True)
@@ -115,12 +138,16 @@ class DepthRecorderConfig(Base):
     __tablename__ = "depth_recorder_config"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    symbol = Column(String(60), nullable=False, unique=True)
+    symbol = Column(String(60), nullable=False)
     exchange = Column(String(20), nullable=False)
     # 'active' | 'stopped'
     status = Column(String(10), nullable=False, default="stopped")
     created_at = Column(DateTime(timezone=False), nullable=False)
     updated_at = Column(DateTime(timezone=False), nullable=False)
+
+    # One config per (symbol, exchange) — the same base symbol may be recorded
+    # on multiple exchanges (RELIANCE on NSE and BSE at once).
+    __table_args__ = (UniqueConstraint("symbol", "exchange"),)
 
 
 # ---------------------------------------------------------------------------
@@ -280,9 +307,7 @@ def get_all_configs() -> list[dict]:
 
 def get_active_configs() -> list[dict]:
     try:
-        rows = (
-            db_session.query(DepthRecorderConfig).filter_by(status="active").all()
-        )
+        rows = db_session.query(DepthRecorderConfig).filter_by(status="active").all()
         return [_config_to_dict(r) for r in rows]
     except Exception:
         logger.exception("depth_recorder_db: get_active_configs failed")
@@ -338,6 +363,102 @@ def get_recent_ticks(
         return []
 
 
+def get_session_ticks(symbol: str, exchange: str, start: datetime, end: datetime) -> list[dict]:
+    """Return all ticks for a symbol between start (inclusive) and end (exclusive).
+
+    Ordered old->new by tick_time. This powers the pandas metrics engine, so it
+    returns every stored row in the range — use it only for analysis queries,
+    not the live dashboard.
+    """
+    try:
+        rows = (
+            db_session.query(DepthTick)
+            .filter(
+                DepthTick.symbol == symbol.upper(),
+                DepthTick.exchange == exchange.upper(),
+                DepthTick.tick_time >= start,
+                DepthTick.tick_time < end,
+            )
+            .order_by(DepthTick.tick_time.asc())
+            .all()
+        )
+        return [_tick_to_dict(r) for r in rows]
+    except Exception:
+        logger.exception("depth_recorder_db: get_session_ticks failed")
+        db_session.rollback()
+        return []
+
+
+def get_session_ticks_flat(
+    symbol: str, exchange: str, start: datetime, end: datetime
+) -> list[dict]:
+    """Return all ticks in range as flat scalar dicts, old -> new.
+
+    Same rows as :func:`get_session_ticks` but already flattened into the
+    bid/ask scalar columns the analytics engine consumes (bid1_p ... ask5_o),
+    skipping the nested bids/asks round-trip entirely.
+    """
+    try:
+        rows = (
+            db_session.query(DepthTick)
+            .filter(
+                DepthTick.symbol == symbol.upper(),
+                DepthTick.exchange == exchange.upper(),
+                DepthTick.tick_time >= start,
+                DepthTick.tick_time < end,
+            )
+            .order_by(DepthTick.tick_time.asc())
+            .all()
+        )
+        out = []
+        for r in rows:
+            d = {
+                "tick_time": r.tick_time,
+                "ltp": r.ltp,
+                "volume": r.volume,
+                "ltt": r.ltt,
+                "total_buy_qty": r.total_buy_qty,
+                "total_sell_qty": r.total_sell_qty,
+            }
+            for i in (1, 2, 3, 4, 5):
+                d[f"bid{i}_p"] = getattr(r, f"bid{i}_price")
+                d[f"bid{i}_q"] = getattr(r, f"bid{i}_qty")
+                d[f"bid{i}_o"] = getattr(r, f"bid{i}_orders")
+                d[f"ask{i}_p"] = getattr(r, f"ask{i}_price")
+                d[f"ask{i}_q"] = getattr(r, f"ask{i}_qty")
+                d[f"ask{i}_o"] = getattr(r, f"ask{i}_orders")
+            out.append(d)
+        return out
+    except Exception:
+        logger.exception("depth_recorder_db: get_session_ticks_flat failed")
+        db_session.rollback()
+        return []
+
+
+def get_session_bounds(symbol: str, exchange: str) -> tuple[datetime, datetime] | None:
+    """Return (first_tick_time, last_tick_time) for a symbol, or None if empty."""
+    try:
+        first = (
+            db_session.query(DepthTick)
+            .filter_by(symbol=symbol.upper(), exchange=exchange.upper())
+            .order_by(DepthTick.tick_time.asc())
+            .first()
+        )
+        last = (
+            db_session.query(DepthTick)
+            .filter_by(symbol=symbol.upper(), exchange=exchange.upper())
+            .order_by(DepthTick.tick_time.desc())
+            .first()
+        )
+        if not first or not last:
+            return None
+        return first.tick_time, last.tick_time
+    except Exception:
+        logger.exception("depth_recorder_db: get_session_bounds failed")
+        db_session.rollback()
+        return None
+
+
 def get_tick_count(symbol: str, exchange: str) -> int:
     """Return total stored tick count for a symbol."""
     try:
@@ -355,16 +476,8 @@ def get_stats() -> dict:
     """Return overall DB stats for the dashboard."""
     try:
         total = db_session.query(DepthTick).count()
-        symbols = (
-            db_session.query(DepthTick.symbol, DepthTick.exchange)
-            .distinct()
-            .all()
-        )
-        latest = (
-            db_session.query(DepthTick)
-            .order_by(DepthTick.tick_time.desc())
-            .first()
-        )
+        symbols = db_session.query(DepthTick.symbol, DepthTick.exchange).distinct().all()
+        latest = db_session.query(DepthTick).order_by(DepthTick.tick_time.desc()).first()
         return {
             "total_ticks": total,
             "symbols": [{"symbol": s, "exchange": e} for s, e in symbols],
@@ -382,23 +495,24 @@ def _tick_to_dict(row: DepthTick) -> dict:
         "symbol": row.symbol,
         "exchange": row.exchange,
         "tick_time": row.tick_time.isoformat() if row.tick_time else None,
+        "ltt": row.ltt,
         "ltp": row.ltp,
         "volume": row.volume,
         "oi": row.oi,
         "total_buy_qty": row.total_buy_qty,
         "total_sell_qty": row.total_sell_qty,
         "bids": [
-            {"price": row.bid1_price, "quantity": row.bid1_qty},
-            {"price": row.bid2_price, "quantity": row.bid2_qty},
-            {"price": row.bid3_price, "quantity": row.bid3_qty},
-            {"price": row.bid4_price, "quantity": row.bid4_qty},
-            {"price": row.bid5_price, "quantity": row.bid5_qty},
+            {"price": row.bid1_price, "quantity": row.bid1_qty, "orders": row.bid1_orders},
+            {"price": row.bid2_price, "quantity": row.bid2_qty, "orders": row.bid2_orders},
+            {"price": row.bid3_price, "quantity": row.bid3_qty, "orders": row.bid3_orders},
+            {"price": row.bid4_price, "quantity": row.bid4_qty, "orders": row.bid4_orders},
+            {"price": row.bid5_price, "quantity": row.bid5_qty, "orders": row.bid5_orders},
         ],
         "asks": [
-            {"price": row.ask1_price, "quantity": row.ask1_qty},
-            {"price": row.ask2_price, "quantity": row.ask2_qty},
-            {"price": row.ask3_price, "quantity": row.ask3_qty},
-            {"price": row.ask4_price, "quantity": row.ask4_qty},
-            {"price": row.ask5_price, "quantity": row.ask5_qty},
+            {"price": row.ask1_price, "quantity": row.ask1_qty, "orders": row.ask1_orders},
+            {"price": row.ask2_price, "quantity": row.ask2_qty, "orders": row.ask2_orders},
+            {"price": row.ask3_price, "quantity": row.ask3_qty, "orders": row.ask3_orders},
+            {"price": row.ask4_price, "quantity": row.ask4_qty, "orders": row.ask4_orders},
+            {"price": row.ask5_price, "quantity": row.ask5_qty, "orders": row.ask5_orders},
         ],
     }
