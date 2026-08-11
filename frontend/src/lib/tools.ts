@@ -22,6 +22,13 @@ export const tools: Tool[] = [
     color: 'bg-fuchsia-500',
   },
   {
+    title: 'Strategy Backtester',
+    description:
+      'Test signal-based Python strategies against Historify data with realistic fills, slippage, costs, drawdown and tearsheet exports',
+    href: '/backtest',
+    color: 'bg-cyan-500',
+  },
+  {
     title: 'Strategy Portfolio',
     description: 'Saved strategies across MyTrades and Simulation watchlists',
     href: '/strategybuilder/portfolio',
