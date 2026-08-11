@@ -792,6 +792,31 @@ def is_daily_aggregated_interval(interval: str) -> bool:
     return parsed["type"] in ("weekly", "monthly", "quarterly", "yearly")
 
 
+def resolve_base_interval(interval: str) -> str:
+    """
+    Map a requested interval onto the storage interval it is served from.
+
+    Only 1m and D are ever stored (STORAGE_INTERVALS); everything else is
+    aggregated on the fly by get_ohlcv(). Availability checks must therefore
+    query the base interval — data_catalog has no row for '5m' or 'W' even
+    when get_ohlcv() can return thousands of such bars.
+
+    Args:
+        interval: Requested interval (e.g. '5m', '2h', 'W', 'D')
+
+    Returns:
+        '1m' for intraday intervals, 'D' for daily-aggregated ones, and the
+        interval itself when it is stored directly or cannot be parsed.
+    """
+    if interval in STORAGE_INTERVALS:
+        return interval
+    if is_daily_aggregated_interval(interval):
+        return "D"
+    if interval in COMPUTED_INTERVALS or is_custom_interval(interval):
+        return "1m"
+    return interval
+
+
 def get_ohlcv(
     symbol: str,
     exchange: str,

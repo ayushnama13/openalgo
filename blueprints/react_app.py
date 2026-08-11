@@ -579,6 +579,12 @@ def react_flow_editor(workflow_id):
     return serve_react_app()
 
 
+# Backtest Route
+@react_bp.route("/backtest", strict_slashes=False)
+def react_backtest_index():
+    return serve_react_app()
+
+
 # ============================================================
 # Static Assets - Always served for React app
 # ============================================================

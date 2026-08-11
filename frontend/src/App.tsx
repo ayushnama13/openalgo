@@ -60,6 +60,8 @@ const Playground = lazy(() => import('@/pages/Playground'))
 const Trading = lazy(() => import('@/pages/Trading'))
 const Historify = lazy(() => import('@/pages/Historify'))
 const HistorifyCharts = lazy(() => import('@/pages/HistorifyCharts'))
+const Backtest = lazy(() => import('@/pages/Backtest'))
+const BacktestResults = lazy(() => import('@/pages/BacktestResults'))
 
 // Tools & Option Chain
 const Tools = lazy(() => import('@/pages/Tools'))
@@ -198,6 +200,8 @@ function App() {
                 <Route path="/platforms" element={<Platforms />} />
                 <Route path="/tradingview" element={<TradingView />} />
                 <Route path="/portfolio-backtester" element={<PortfolioBacktester />} />
+                <Route path="/backtest" element={<Backtest />} />
+                <Route path="/backtest/results" element={<BacktestResults />} />
                 <Route
                   path="/portfolio-backtester/results"
                   element={<PortfolioBacktesterResults />}

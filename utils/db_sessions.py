@@ -45,6 +45,7 @@ SCOPED_SESSION_MODULES = [
     ("database.oauth_db", "db_session"),
     ("database.whatsapp_db", "db_session"),
     ("database.depth_recorder_db", "db_session"),
+    ("database.backtest_db", "db_session"),
 ]
 
 

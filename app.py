@@ -52,6 +52,7 @@ from blueprints.analyzer import analyzer_bp  # Import the analyzer blueprint
 from blueprints.apikey import api_key_bp
 from blueprints.arbitrage import arbitrage_bp  # Import the Arbitrage blueprint
 from blueprints.auth import auth_bp
+from blueprints.backtest import backtest_bp  # Import the backtest blueprint
 from blueprints.brlogin import brlogin_bp
 from blueprints.broker_credentials import (
     broker_credentials_bp,  # Import the broker credentials blueprint
@@ -340,6 +341,7 @@ def create_app():
     app.register_blueprint(system_permissions_bp)  # Register System permissions blueprint
     app.register_blueprint(strategy_portfolio_bp)  # Register Strategy Portfolio blueprint
     app.register_blueprint(postback_bp)  # Register broker postback (order-update webhook) blueprint
+    app.register_blueprint(backtest_bp)  # Register Backtest blueprint
 
     # Remote MCP (HTTP + OAuth) — opt-in via MCP_HTTP_ENABLED. Off by default.
     # Pre-flight refusal: must NEVER coexist with FLASK_DEBUG=True (debug-mode
@@ -774,6 +776,12 @@ def setup_environment(app):
                     "placed, but per-strategy P&L will report an error until restart "
                     "rather than a misleading zero."
                 )
+
+            try:
+                from database.backtest_db import init_backtest_db
+                init_backtest_db()
+            except Exception as e:
+                logger.exception(f"Failed to initialize backtest database: {e}")
 
             # Signal that DB tables are ready (unblocks cache restoration)
             app.db_ready.set()
