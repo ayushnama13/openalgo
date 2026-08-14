@@ -191,6 +191,7 @@ export function DrawingRail({ stats, onPick, onUndo, onRedo, onRemove, onMagnet,
                     return (
                       <DropdownMenuItem
                         key={t.id ?? 'cursor'}
+                        title={t.label}
                         onSelect={() => {
                           if (t.id) lastRef.current[g.key] = t.id
                           onPick(t.id)
