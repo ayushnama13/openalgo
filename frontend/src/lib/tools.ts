@@ -146,4 +146,11 @@ export const tools: Tool[] = [
     href: '/depth-recorder',
     color: 'bg-cyan-600',
   },
+  {
+    title: 'Replay Mode',
+    description:
+      'Global market clock and replay engine for historical tick/depth simulation, pattern overlays, and fill testing',
+    href: '/replay',
+    color: 'bg-purple-600',
+  },
 ]

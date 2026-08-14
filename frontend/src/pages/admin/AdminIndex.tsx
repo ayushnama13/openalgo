@@ -5,6 +5,7 @@ import {
   Clock,
   Gauge,
   Globe,
+  History,
   Settings,
   Shield,
   Snowflake,
@@ -62,6 +63,14 @@ export default function AdminIndex() {
       count: 7,
       countLabel: 'exchanges',
       color: 'bg-purple-500',
+    },
+    {
+      title: 'Replay Tape Recording',
+      description: 'Manage live second-by-second tick recording targets and Parquet archives',
+      icon: History,
+      href: '/admin/replay',
+      countLabel: 'recording',
+      color: 'bg-amber-500',
     },
     {
       title: 'Security Dashboard',

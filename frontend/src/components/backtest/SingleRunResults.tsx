@@ -6,10 +6,11 @@
  * fetching and caching.
  */
 
-import { BarChart3, ChevronDown, Table2 } from 'lucide-react'
+import { BarChart3, ChevronDown, Download, Table2 } from 'lucide-react'
 import type * as PlotlyTypes from 'plotly.js'
 import { useMemo } from 'react'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
@@ -281,6 +282,43 @@ export default function SingleRunResults({
 
   const showParams = jobDetails != null && jobDetails.job_id === result.job_id
 
+  const handleExportCSV = () => {
+    if (!result || !result.trades || !result.trades.length) return
+    const headers = [
+      '#',
+      'Action',
+      'Entry Time',
+      'Entry Price',
+      'Exit Time',
+      'Exit Price',
+      'Quantity',
+      'PnL',
+      'PnL %',
+      'Exit Reason',
+    ]
+    const rows = result.trades.map((t, idx) => [
+      idx + 1,
+      t.action,
+      t.entry_time,
+      t.entry_price,
+      t.exit_time,
+      t.exit_price,
+      t.quantity,
+      t.pnl,
+      `${t.pnl_pct}%`,
+      t.exit_reason || 'Signal Exit',
+    ])
+    const csvContent = [headers.join(','), ...rows.map((r) => r.map((c) => `"${c}"`).join(','))].join('\n')
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.setAttribute('download', `backtest_trades_${result.job_id || 'run'}.csv`)
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
   return (
     <div className="space-y-6">
       {/* Parameters used */}
@@ -411,14 +449,22 @@ export default function SingleRunResults({
       <Card>
         <CardContent className="p-4">
           <Tabs defaultValue="trades">
-            <TabsList>
-              <TabsTrigger value="trades">
-                <Table2 className="h-4 w-4" /> Trade Log
-              </TabsTrigger>
-              <TabsTrigger value="pnl">
-                <BarChart3 className="h-4 w-4" /> Distributions
-              </TabsTrigger>
-            </TabsList>
+            <div className="flex items-center justify-between">
+              <TabsList>
+                <TabsTrigger value="trades">
+                  <Table2 className="h-4 w-4" /> Trade Log ({result.trades?.length || 0})
+                </TabsTrigger>
+                <TabsTrigger value="pnl">
+                  <BarChart3 className="h-4 w-4" /> Distributions
+                </TabsTrigger>
+              </TabsList>
+
+              {result.trades && result.trades.length > 0 && (
+                <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs" onClick={handleExportCSV}>
+                  <Download className="h-3.5 w-3.5" /> Export CSV
+                </Button>
+              )}
+            </div>
             <TabsContent value="trades" className="mt-4">
               <ScrollArea className="h-96 rounded-md border border-slate-800">
                 <Table>

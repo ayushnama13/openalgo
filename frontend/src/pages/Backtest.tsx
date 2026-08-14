@@ -174,6 +174,33 @@ def strategy(df):
     return df
 `,
   },
+  {
+    label: 'MACD Crossover',
+    code: `# MACD signal line crossover strategy
+# ta.macd returns (macd, signal, histogram)
+def strategy(df):
+    macd_line, signal_line, hist = ta.macd(df["close"], fast=12, slow=26, signal=9)
+
+    df["signal"] = 0
+    df.loc[(macd_line > signal_line) & (macd_line.shift(1) <= signal_line.shift(1)), "signal"] = 1
+    df.loc[(macd_line < signal_line) & (macd_line.shift(1) >= signal_line.shift(1)), "signal"] = -1
+    return df
+`,
+  },
+  {
+    label: 'Opening Range Breakout',
+    code: `# Opening Range Breakout (ORB) strategy
+def strategy(df):
+    # Simple rolling 30-period high/low breakout
+    df["orb_high"] = df["high"].rolling(30).max().shift(1)
+    df["orb_low"] = df["low"].rolling(30).min().shift(1)
+
+    df["signal"] = 0
+    df.loc[(df["close"] > df["orb_high"]) & (df["close"].shift(1) <= df["orb_high"].shift(1)), "signal"] = 1
+    df.loc[(df["close"] < df["orb_low"]) & (df["close"].shift(1) >= df["orb_low"].shift(1)), "signal"] = -1
+    return df
+`,
+  },
 ]
 
 const DEFAULT_STRATEGY_CODE = STRATEGY_TEMPLATES[0].code
@@ -236,7 +263,7 @@ export default function Backtest() {
   const [maxPositions, setMaxPositions] = useState(5)
 
   // Run state
-  const [running, setRunning] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
   const [activeJobId, setActiveJobId] = useState<string | null>(null)
   const [activeBatch, setActiveBatch] = useState<ActiveBatch | null>(null)
   const [jobProgress, setJobProgress] = useState<
@@ -320,11 +347,10 @@ export default function Backtest() {
       if (data.status === 'success') {
         setJobs(data.jobs || [])
         const newRunning = new Set<string>()
-        for (const job of data.jobs as JobSummary[]) {
+        for (const job of (data.jobs || []) as JobSummary[]) {
           if (job.status === 'pending' || job.status === 'running') {
             newRunning.add(job.job_id)
             setActiveJobId(job.job_id)
-            setRunning(job.status === 'running')
           }
         }
         setRunningJobIds(newRunning)
@@ -362,34 +388,22 @@ export default function Backtest() {
       equity: number
       trades_count: number
     }) => {
-      if (activeBatch?.jobs.some((j) => j.job_id === data.job_id)) {
-        setJobProgress((prev) => ({
-          ...prev,
-          [data.job_id]: {
-            percent: data.percent,
-            current_date: data.current_date,
-            equity: data.equity,
-            trades_count: data.trades_count,
-          },
-        }))
-      } else if (data.job_id === activeJobId) {
-        setJobProgress((prev) => ({
-          ...prev,
-          [data.job_id]: {
-            percent: data.percent,
-            current_date: data.current_date,
-            equity: data.equity,
-            trades_count: data.trades_count,
-          },
-        }))
-      }
+      setJobProgress((prev) => ({
+        ...prev,
+        [data.job_id]: {
+          percent: data.percent,
+          current_date: data.current_date,
+          equity: data.equity,
+          trades_count: data.trades_count,
+        },
+      }))
     }
 
     socket.on('backtest_progress', handleProgress)
     return () => {
       socket.off('backtest_progress', handleProgress)
     }
-  }, [socket, activeJobId, activeBatch])
+  }, [socket])
 
   // Poll jobs while any run is active to catch terminal state
   useEffect(() => {
@@ -427,8 +441,7 @@ export default function Backtest() {
       showToast.warning('Start date is before the earliest available data')
     }
 
-    setRunning(true)
-    setJobProgress({})
+    setSubmitting(true)
     const sweep = intervals.length > 1
     try {
       const csrfToken = await fetchCSRFToken()
@@ -464,40 +477,17 @@ export default function Backtest() {
         setActiveBatch(sweep ? { batch_id: data.batch_id, jobs: data.jobs ?? [] } : null)
         showToast.success(
           sweep
-            ? `Backtest batch ${data.batch_id} submitted (${data.jobs?.length ?? intervals.length} timeframes)`
-            : `Backtest job ${data.job_id} submitted`
+            ? `Backtest batch ${data.batch_id} queued (${data.jobs?.length ?? intervals.length} timeframes)`
+            : `Backtest job enqueued successfully!`
         )
         loadJobs()
       } else {
         showToast.error(data.message || 'Failed to submit backtest job')
-        setRunning(false)
       }
     } catch {
       showToast.error('Failed to submit backtest job')
-      setRunning(false)
-    }
-  }
-
-  const handleCancel = async () => {
-    try {
-      const csrfToken = await fetchCSRFToken()
-      if (activeBatch) {
-        await fetch(`/backtest/api/batches/${activeBatch.batch_id}/cancel`, {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'X-CSRFToken': csrfToken },
-        })
-        showToast.info('Cancel request sent for the whole batch')
-      } else if (activeJobId) {
-        await fetch(`/backtest/api/cancel/${activeJobId}`, {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'X-CSRFToken': csrfToken },
-        })
-        showToast.info('Cancel request sent')
-      }
-    } catch {
-      showToast.error('Failed to cancel job')
+    } finally {
+      setSubmitting(false)
     }
   }
 
@@ -563,14 +553,12 @@ export default function Backtest() {
   // When all runs of the active batch reach a terminal state, open the
   // batch results page. Single runs keep their existing per-job behavior.
   useEffect(() => {
-    if (!running) return
     if (activeBatch?.jobs.length) {
       const batchJobs = jobs.filter((j) => activeBatch.jobs.some((bj) => bj.job_id === j.job_id))
       if (
         batchJobs.length === activeBatch.jobs.length &&
         batchJobs.every((j) => checkJobDone(j.job_id))
       ) {
-        setRunning(false)
         setActiveBatch(null)
         const allOk = batchJobs.every((j) => j.status === 'completed')
         if (allOk) {
@@ -584,13 +572,13 @@ export default function Backtest() {
     if (activeJobId && checkJobDone(activeJobId)) {
       const job = jobs.find((j) => j.job_id === activeJobId)
       if (job) {
-        setRunning(false)
+        setActiveJobId(null)
         if (job.status === 'completed') {
-          openResults(activeJobId)
+          openResults(job.job_id)
         }
       }
     }
-  }, [jobs, running, activeJobId, activeBatch, checkJobDone, openResults, openBatchResults])
+  }, [jobs, activeJobId, activeBatch, checkJobDone, openResults, openBatchResults])
 
   const applyJobParams = useCallback((job: FullJobDetails) => {
     setStrategyCode(job.strategy_code)
@@ -761,6 +749,55 @@ export default function Backtest() {
     </div>
   )
 
+  const activeAndQueuedJobs = useMemo(() => {
+    return jobs.filter((j) => j.status === 'running' || j.status === 'pending')
+  }, [jobs])
+
+  const runningJobs = useMemo(() => {
+    return activeAndQueuedJobs.filter((j) => j.status === 'running')
+  }, [activeAndQueuedJobs])
+
+  const pendingJobs = useMemo(() => {
+    return activeAndQueuedJobs.filter((j) => j.status === 'pending')
+  }, [activeAndQueuedJobs])
+
+  const handleCancelAllActive = async () => {
+    try {
+      const csrfToken = await fetchCSRFToken()
+      for (const j of activeAndQueuedJobs) {
+        await fetch(`/backtest/api/cancel/${j.job_id}`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'X-CSRFToken': csrfToken },
+        })
+      }
+      showToast.info('Cancel requests sent for queued/active jobs')
+      loadJobs()
+    } catch {
+      showToast.error('Failed to cancel active jobs')
+    }
+  }
+
+  const handleCancelJob = async (jobId: string) => {
+    try {
+      const csrfToken = await fetchCSRFToken()
+      const response = await fetch(`/backtest/api/cancel/${jobId}`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'X-CSRFToken': csrfToken },
+      })
+      const data = await response.json()
+      if (data.status === 'success') {
+        showToast.info('Job cancelled')
+        loadJobs()
+      } else {
+        showToast.error(data.message || 'Failed to cancel job')
+      }
+    } catch {
+      showToast.error('Failed to cancel job')
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Render
   // -------------------------------------------------------------------------
@@ -772,71 +809,115 @@ export default function Backtest() {
         <div>
           <h1 className="text-2xl font-bold text-foreground">Strategy Backtesting</h1>
           <p className="text-sm text-muted-foreground">
-            Configure a strategy, set the data window and risk parameters, then run the backtest.
-            Results open on a dedicated page.
+            Configure a strategy, set the data window and risk parameters, then queue backtests.
+            Multiple jobs can be queued and run in parallel/background without waiting.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {running && (
-            <Button variant="destructive" onClick={handleCancel} disabled={!activeJobId}>
-              <Square className="h-4 w-4" /> Cancel
+          {activeAndQueuedJobs.length > 0 && (
+            <Button variant="destructive" onClick={handleCancelAllActive}>
+              <Square className="h-4 w-4" /> Cancel All Active
             </Button>
           )}
           <Button variant="outline" onClick={() => setJobsOpen(true)}>
-            <History className="h-4 w-4" /> Job History
+            <History className="h-4 w-4" /> Job History ({jobs.length})
           </Button>
-          <Button onClick={handleRun} disabled={running}>
-            {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-            {running ? 'Running...' : 'Run Backtest'}
+          <Button onClick={handleRun} disabled={submitting}>
+            {submitting ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" /> Queueing...
+              </>
+            ) : (
+              <>
+                <Play className="h-4 w-4" /> Run / Queue Backtest
+              </>
+            )}
           </Button>
         </div>
       </div>
 
-      {/* Run progress */}
-      {running && activeBatch && (
-        <Card>
-          <CardContent className="p-4 space-y-3">
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">
-                Batch {activeBatch.batch_id} - {activeBatch.jobs.length} timeframes
-              </span>
-              <span className="font-medium">
-                Trades: {Object.values(jobProgress).reduce((sum, p) => sum + p.trades_count, 0)}
-              </span>
+      {/* Active & Queued Backtests */}
+      {activeAndQueuedJobs.length > 0 && (
+        <Card className="border-primary/20 bg-card/60 shadow-sm">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Activity className="h-4 w-4 text-primary animate-pulse" /> Active & Queued Backtests
+              </CardTitle>
+              <div className="flex items-center gap-2">
+                {runningJobs.length > 0 && (
+                  <Badge variant="default" className="text-xs bg-emerald-600">
+                    {runningJobs.length} Running
+                  </Badge>
+                )}
+                {pendingJobs.length > 0 && (
+                  <Badge variant="outline" className="text-xs text-amber-500 border-amber-500/40">
+                    {pendingJobs.length} Queued
+                  </Badge>
+                )}
+              </div>
             </div>
-            {activeBatch.jobs.map((j) => {
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {activeAndQueuedJobs.map((j) => {
               const p = jobProgress[j.job_id]
-              const pendingState = j.status === 'failed' ? 'failed' : 'queued'
+              const isRunningJob = j.status === 'running'
+              const symbolClean = (j.symbols?.[0] || '').replace('NSE:', '').replace('BSE:', '')
+
               return (
-                <div key={j.job_id} className="space-y-1">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-muted-foreground">
-                      {j.interval}
-                      {p ? ` - ${p.current_date}` : ` - ${pendingState}`}
-                    </span>
-                    <span className="tabular-nums">{p ? `${p.percent.toFixed(1)}%` : '0.0%'}</span>
+                <div key={j.job_id} className="p-3 rounded-lg border bg-background/80 space-y-2">
+                  <div className="flex items-center justify-between text-sm">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold">{j.name || symbolClean}</span>
+                      <Badge variant="outline" className="text-xs">
+                        {j.interval}
+                      </Badge>
+                      {isRunningJob ? (
+                        <Badge variant="default" className="text-[10px] bg-emerald-600">
+                          Running
+                        </Badge>
+                      ) : (
+                        <Badge variant="secondary" className="text-[10px] text-amber-500">
+                          Queued
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {isRunningJob && p && p.current_date && (
+                        <span className="text-xs text-muted-foreground font-mono">
+                          {p.current_date} • Equity: ₹{p.equity.toLocaleString()}
+                        </span>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-rose-500 hover:text-rose-600 hover:bg-rose-500/10"
+                        onClick={() => handleCancelJob(j.job_id)}
+                      >
+                        <Square className="h-3.5 w-3.5 mr-1" /> Cancel
+                      </Button>
+                    </div>
                   </div>
-                  <Progress value={p?.percent ?? 0} />
+
+                  {isRunningJob ? (
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-xs text-muted-foreground">
+                        <span>Trades: {p?.trades_count ?? 0}</span>
+                        <span className="font-medium text-foreground">
+                          {p ? `${p.percent.toFixed(1)}%` : '0.0%'}
+                        </span>
+                      </div>
+                      <Progress value={p?.percent ?? 0} className="h-1.5" />
+                    </div>
+                  ) : (
+                    <div className="text-xs text-muted-foreground flex items-center gap-1.5 pt-0.5">
+                      <Loader2 className="h-3 w-3 animate-spin text-amber-500" />
+                      Waiting in execution queue for next available worker thread...
+                    </div>
+                  )}
                 </div>
               )
             })}
-          </CardContent>
-        </Card>
-      )}
-      {running && !activeBatch && activeJobId && jobProgress[activeJobId] && (
-        <Card>
-          <CardContent className="p-4 space-y-2">
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">
-                Processing {jobProgress[activeJobId].current_date} - equity{' '}
-                {jobProgress[activeJobId].equity.toLocaleString()}
-              </span>
-              <span className="font-medium">Trades: {jobProgress[activeJobId].trades_count}</span>
-            </div>
-            <Progress value={jobProgress[activeJobId].percent} />
-            <div className="text-right text-xs text-muted-foreground">
-              {jobProgress[activeJobId].percent.toFixed(1)}%
-            </div>
           </CardContent>
         </Card>
       )}

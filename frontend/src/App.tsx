@@ -69,6 +69,7 @@ const OptionChain = lazy(() => import('@/pages/OptionChain'))
 const IVChart = lazy(() => import('@/pages/IVChart'))
 const Scalping = lazy(() => import('@/pages/Scalping'))
 const DepthRecorder = lazy(() => import('@/pages/DepthRecorder'))
+const Replay = lazy(() => import('@/pages/Replay'))
 const OITracker = lazy(() => import('@/pages/OITracker'))
 const OIRange = lazy(() => import('@/pages/OIRange'))
 const GammaDensity = lazy(() => import('@/pages/GammaDensity'))
@@ -136,6 +137,7 @@ const Holidays = lazy(() => import('@/pages/admin/Holidays'))
 const MarketTimings = lazy(() => import('@/pages/admin/MarketTimings'))
 const Diagnostics = lazy(() => import('@/pages/admin/Diagnostics'))
 const RemoteMcp = lazy(() => import('@/pages/admin/RemoteMcp'))
+const ReplayRecording = lazy(() => import('@/pages/admin/ReplayRecording'))
 
 // Telegram pages
 const TelegramIndex = lazy(() => import('@/pages/telegram/TelegramIndex'))
@@ -287,6 +289,7 @@ function App() {
                 <Route path="/admin/freeze" element={<FreezeQty />} />
                 <Route path="/admin/holidays" element={<Holidays />} />
                 <Route path="/admin/timings" element={<MarketTimings />} />
+                <Route path="/admin/replay" element={<ReplayRecording />} />
                 <Route path="/admin/diagnostics" element={<Diagnostics />} />
                 <Route path="/admin/remote-mcp" element={<RemoteMcp />} />
                 {/* Phase 7: Telegram */}
@@ -313,6 +316,7 @@ function App() {
               <Route element={<FullWidthLayout />}>
                 <Route path="/playground" element={<Playground />} />
                 <Route path="/trading" element={<Trading />} />
+                <Route path="/replay" element={<Replay />} />
                 <Route path="/historify" element={<Historify />} />
                 <Route path="/historify/charts" element={<HistorifyCharts />} />
                 <Route path="/historify/charts/:symbol" element={<HistorifyCharts />} />

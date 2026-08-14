@@ -2,6 +2,7 @@
 
 import json
 import math
+import os
 import sys
 import threading
 import time
@@ -51,10 +52,10 @@ _ACTIVE_JOBS: dict[str, threading.Event] = {}
 _ACTIVE_JOBS_LOCK = threading.Lock()
 
 # Shared work queue for backtest runs. A module-level singleton per the
-# FD-hygiene rule (threads and executors are shared, never per-call): a 7-TF
-# sweep enqueues 7 tasks, at most BATCK_WORKERS run concurrently, the rest
-# wait in the queue with their BacktestRun rows sitting at status "pending".
-_BACKTEST_WORKERS = 2
+# FD-hygiene rule (threads and executors are shared, never per-call): tasks
+# run concurrently up to BACKTEST_WORKERS (default 2), the rest wait in
+# the queue with their BacktestRun rows sitting at status "pending".
+_BACKTEST_WORKERS = int(os.getenv("BACKTEST_WORKERS", "2"))
 _BACKTEST_EXECUTOR = ThreadPoolExecutor(max_workers=_BACKTEST_WORKERS, thread_name_prefix="backtest-run")
 _JOB_FUTURES: dict[str, Future] = {}
 
