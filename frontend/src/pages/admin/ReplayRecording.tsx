@@ -121,6 +121,21 @@ export default function ReplayRecordingPage() {
     }
   }
 
+  const handlePrune = async () => {
+    try {
+      const res = await apiPost('/api/replay/prune', { days_to_keep: 7 })
+      if (res.ok) {
+        const data = await res.json()
+        showToast.success(`Pruned ${data.removed_files} tape archive(s) older than 7 days (weekly retention)`)
+        fetchData()
+      } else {
+        showToast.error('Failed to prune old tapes')
+      }
+    } catch {
+      showToast.error('Error pruning old tapes')
+    }
+  }
+
   return (
     <div className="py-6 space-y-6 container mx-auto px-4">
       <div className="flex items-center justify-between">
@@ -221,12 +236,19 @@ export default function ReplayRecordingPage() {
         {/* Recorded Parquet Archives */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base flex items-center gap-2">
-              <Database className="h-4 w-4 text-cyan-500" /> Recorded Tape Archives ({availableTapes.length})
-            </CardTitle>
-            <CardDescription>
-              Parquet files stored on disk available for historical replay simulation.
-            </CardDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Database className="h-4 w-4 text-cyan-500" /> Recorded Tape Archives ({availableTapes.length})
+                </CardTitle>
+                <CardDescription>
+                  Parquet files stored on disk (weekly retention: 7 days max).
+                </CardDescription>
+              </div>
+              <Button variant="outline" size="sm" className="h-8 text-xs text-amber-500 border-amber-500/30" onClick={handlePrune}>
+                Prune &gt; 7 Days
+              </Button>
+            </div>
           </CardHeader>
           <CardContent>
             {isLoading ? (
