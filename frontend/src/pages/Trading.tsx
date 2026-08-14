@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Navbar } from '@/components/layout/Navbar'
 import { ChartPane } from '@/components/trading/ChartPane'
 import { DrawingRail } from '@/components/trading/DrawingRail'
+import { RightWatchlist } from '@/components/trading/RightWatchlist'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -153,6 +154,47 @@ export default function Trading() {
     setStats(t.drawStats())
   }
 
+  /* ── right-side watchlist (TradingView style) ────────────────────────── */
+  const WATCHLIST_KEY = 'oa-watchlist'
+  const [watchlist, setWatchlist] = useState<string[]>(() => {
+    const saved = localStorage.getItem(WATCHLIST_KEY)
+    if (saved) {
+      try {
+        const arr = JSON.parse(saved) as string[]
+        if (Array.isArray(arr) && arr.length) return arr
+      } catch {
+        /* fall through to default */
+      }
+    }
+    return ['NIFTY', 'BANKNIFTY', 'RELIANCE', 'TCS', 'SBIN', 'INFY', 'HDFCBANK']
+  })
+  const [selectedWatchSymbol, setSelectedWatchSymbol] = useState('NIFTY')
+
+  useEffect(() => {
+    localStorage.setItem(WATCHLIST_KEY, JSON.stringify(watchlist))
+  }, [watchlist])
+
+  /** Click a watchlist row: switch the focused pane to that symbol. */
+  const selectWatchSymbol = useCallback(
+    async (sym: string) => {
+      setSelectedWatchSymbol(sym)
+      const t = activeRef.current
+      if (!t) return
+      const rows = await t.search(sym, undefined, 10)
+      const row = rows.find((r) => r.symbol.toUpperCase() === sym.toUpperCase())
+      if (row) t.loadSymbol(row)
+    },
+    []
+  )
+
+  const addWatchSymbol = useCallback((sym: string) => {
+    setWatchlist((prev) => (prev.some((s) => s.toUpperCase() === sym.toUpperCase()) ? prev : [...prev, sym]))
+  }, [])
+
+  const removeWatchSymbol = useCallback((sym: string) => {
+    setWatchlist((prev) => prev.filter((s) => s.toUpperCase() !== sym.toUpperCase()))
+  }, [])
+
   useEffect(() => {
     localStorage.setItem(LAYOUT_KEY, layoutId)
   }, [layoutId])
@@ -274,6 +316,16 @@ export default function Trading() {
             </div>
           )}
           </div>
+          {apiKey && (
+            <RightWatchlist
+              symbols={watchlist}
+              selectedSymbol={selectedWatchSymbol}
+              onSelectSymbol={selectWatchSymbol}
+              onAddSymbol={addWatchSymbol}
+              onRemoveSymbol={removeWatchSymbol}
+              apiKey={apiKey}
+            />
+          )}
         </main>
       </div>
     </>

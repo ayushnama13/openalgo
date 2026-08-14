@@ -1,9 +1,10 @@
 import { ChevronDown, LayoutGrid, Play, History, Eye, Layers, Database } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { Navbar } from '@/components/layout/Navbar'
 import { ChartPane } from '@/components/trading/ChartPane'
 import { DrawingRail } from '@/components/trading/DrawingRail'
+import { RightWatchlist } from '@/components/trading/RightWatchlist'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -229,6 +230,25 @@ export default function Replay() {
     setStats(t.drawStats())
   }
 
+  /* ── right-side watchlist (TradingView style, replay-sourced) ────────── */
+  const [replayMarketData, setReplayMarketData] = useState<
+    Record<string, { ltp?: number; percentChange?: number }>
+  >({})
+  const firstLtpRef = useRef<Record<string, number>>({})
+
+  /** Click a watchlist row: select it for the replay widgets and load it in the focused pane. */
+  const selectWatchSymbol = useCallback(
+    async (sym: string) => {
+      setSelectedSymbol(sym)
+      const t = activeRef.current
+      if (!t) return
+      const rows = await t.search(sym, undefined, 10)
+      const row = rows.find((r) => r.symbol.toUpperCase() === sym.toUpperCase())
+      if (row) t.loadSymbol(row)
+    },
+    []
+  )
+
   useEffect(() => {
     localStorage.setItem(LAYOUT_KEY, layoutId)
   }, [layoutId])
@@ -265,6 +285,55 @@ export default function Replay() {
   const [endTime, setEndTime] = useState('15:30:00')
   const [watchlistInput, setWatchlistInput] = useState('NIFTY, RELIANCE')
   const [autoPauseOnFill] = useState(true)
+
+  const replayWatchlist = useMemo(() => {
+    if (clock?.watchlist && clock.watchlist.length) return clock.watchlist
+    return watchlistInput
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  }, [clock, watchlistInput])
+
+  /** Poll replay state for every watchlist symbol; change is vs. session start. */
+  useEffect(() => {
+    if (replayWatchlist.length === 0) return
+    let alive = true
+    let timer: ReturnType<typeof setInterval> | undefined
+
+    const poll = async () => {
+      const rows: Record<string, { ltp?: number; percentChange?: number }> = {}
+      await Promise.all(
+        replayWatchlist.map(async (sym) => {
+          try {
+            const res = await fetch(`/api/replay/state?symbol=${encodeURIComponent(sym)}`, {
+              credentials: 'include',
+            })
+            if (!res.ok) return
+            const data = (await res.json()) as { state?: { ltp?: number } }
+            const ltp = data.state?.ltp
+            if (ltp == null) return
+            const key = sym.toUpperCase()
+            if (firstLtpRef.current[key] == null) firstLtpRef.current[key] = ltp
+            const base = firstLtpRef.current[key]
+            rows[key] = {
+              ltp,
+              percentChange: base > 0 ? ((ltp - base) / base) * 100 : undefined,
+            }
+          } catch {
+            /* next cycle */
+          }
+        })
+      )
+      if (alive) setReplayMarketData((prev) => ({ ...prev, ...rows }))
+    }
+
+    poll()
+    timer = setInterval(poll, 2000)
+    return () => {
+      alive = false
+      if (timer) clearInterval(timer)
+    }
+  }, [replayWatchlist])
 
   // Floating Widgets Toggles & Drag State
   const [showDepthDOM, setShowDepthDOM] = useState(false)
@@ -916,6 +985,13 @@ export default function Replay() {
               </div>
             )}
           </div>
+          <RightWatchlist
+            symbols={replayWatchlist}
+            selectedSymbol={selectedSymbol}
+            onSelectSymbol={selectWatchSymbol}
+            marketData={replayMarketData}
+            className="z-20"
+          />
         </main>
       </div>
     </>
