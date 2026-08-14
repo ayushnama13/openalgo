@@ -96,3 +96,31 @@ def load_day_df(symbol: str, date_str: str) -> pd.DataFrame:
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df = df.sort_values("timestamp").reset_index(drop=True)
     return df
+
+
+def prune_old_replay_data(days_to_keep: int = 7) -> int:
+    """Prune replay Parquet files and DB index rows older than days_to_keep (default 7 days / weekly retention)."""
+    from datetime import datetime, timedelta
+    import pytz
+    IST = pytz.timezone("Asia/Kolkata")
+    cutoff = datetime.now(IST).date() - timedelta(days=days_to_keep)
+    cutoff_str = cutoff.strftime("%Y-%m-%d")
+
+    db = SessionLocal()
+    removed_count = 0
+    try:
+        old_rows = db.query(SymbolDateIndex).filter(SymbolDateIndex.date < cutoff_str).all()
+        for r in old_rows:
+            if r.file_path and os.path.exists(r.file_path):
+                try:
+                    os.remove(r.file_path)
+                except Exception:
+                    pass
+            db.delete(r)
+            removed_count += 1
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+    finally:
+        db.close()
+    return removed_count

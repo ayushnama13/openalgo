@@ -17,7 +17,7 @@ from replay.recorder import (
     list_recording_targets,
     remove_recording_targets,
 )
-from replay.storage import list_available
+from replay.storage import list_available, prune_old_replay_data
 from utils.logging import get_logger
 from utils.session import check_session_validity
 
@@ -45,6 +45,12 @@ def api_replay_session():
     watchlist = expand_nifty_options(session_date, watchlist)
 
     clock_instance.configure(session_date, start_time, end_time, watchlist)
+
+    # Automatically prune replay data older than 7 days (weekly retention) to prevent storage overload
+    try:
+        prune_old_replay_data(7)
+    except Exception as exc:
+        logger.error(f"[api_replay_session] Automatic pruning error: {exc}")
 
     # Always automatically record all watchlist symbols second-by-second for this session date
     try:
@@ -207,3 +213,12 @@ def api_replay_simulate_order():
     dt = datetime.fromisoformat(ts_str) if ts_str else clock_instance.current_time
     result = simulate_order_fill(symbol, dt, action, quantity, price_type, limit_price)
     return jsonify(result), 200
+
+
+@replay_bp.route("/api/replay/prune", methods=["POST"])
+@check_session_validity
+def api_replay_prune():
+    data = request.get_json(silent=True) or {}
+    days = int(data.get("days_to_keep", 7))
+    removed = prune_old_replay_data(days)
+    return jsonify({"status": "success", "removed_files": removed, "days_retained": days}), 200
