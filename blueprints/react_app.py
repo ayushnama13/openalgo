@@ -163,6 +163,12 @@ def react_depth_recorder():
     return serve_react_app()
 
 
+# Replay Mode (global market clock & historical tape playback)
+@react_bp.route("/replay", strict_slashes=False)
+def react_replay():
+    return serve_react_app()
+
+
 # Search pages
 @react_bp.route("/search/token")
 def react_search_token():
@@ -447,6 +453,12 @@ def react_admin_holidays():
 # Admin - Market Timings
 @react_bp.route("/admin/timings", strict_slashes=False)
 def react_admin_timings():
+    return serve_react_app()
+
+
+# Admin - Replay Recording
+@react_bp.route("/admin/replay", strict_slashes=False)
+def react_admin_replay():
     return serve_react_app()
 
 

@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from sqlalchemy import text
 
 from database.auth_db import get_broker_name, verify_api_key
+from replay.recorder import maybe_record_tick
 from services.market_data_service import get_market_data_service
 from utils.logging import get_logger, highlight_url
 
@@ -1927,6 +1928,14 @@ class WebSocketProxy:
                 except Exception as mds_error:
                     # Don't block WebSocket delivery if MarketDataService has issues
                     logger.debug(f"MarketDataService processing error: {mds_error}")
+
+                # Feed Replay Mode's recorder, if this symbol/exchange has an
+                # active recording target for today. No-op (cheap set lookup,
+                # cached DB read) unless replay recording is actually running.
+                try:
+                    maybe_record_tick(symbol, exchange, market_data)
+                except Exception as replay_error:
+                    logger.debug(f"Replay recorder processing error: {replay_error}")
 
                 # OPTIMIZATION 2: O(1) lookup using subscription index
                 # Higher modes include all lower-mode data (Depth > Quote > LTP),
