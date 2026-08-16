@@ -749,3 +749,79 @@ def test_cancel_batch_marks_queued_runs_cancelled(monkeypatch):
     statuses = _wait_for_terminal(session, batch["batch_id"], 4)
     assert all(s == "cancelled" for s in statuses)
     db_session.remove()
+
+
+def test_signal_dsl_with_buy_sell_signals_and_preinitialized_signal_col():
+    code = """
+df['signal'] = 0
+df['buy_signal'] = df['close'] > 105
+df['sell_signal'] = df['close'] <= 105
+"""
+    bars = pd.DataFrame({
+        "timestamp": [1000, 2000, 3000],
+        "close": [100.0, 110.0, 100.0]
+    })
+    res = svc.execute_strategy_dsl(code, bars)
+    assert res["signal"].iloc[1] == 1
+    assert res["signal"].iloc[2] == -1
+
+
+def test_compare_jobs_returns_parsed_symbols_list(monkeypatch):
+    from app import app
+    from blueprints.backtest import compare_jobs
+    session = db_session()
+    run = BacktestRun(
+        job_id="bt_compare_test",
+        name="Compare Test",
+        status="completed",
+        strategy_code=SIMPLE_CODE,
+        symbols=json.dumps(["NSE:SBIN", "NSE:INFY"]),
+        exchange="NSE",
+        interval="1m",
+        metrics_json=json.dumps({"total_return_pct": 5.0}),
+    )
+    session.add(run)
+    session.commit()
+
+    with app.test_request_context("/backtest/api/compare", method="POST", json={"job_ids": ["bt_compare_test"]}):
+        resp = compare_jobs.__wrapped__()
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "success"
+        assert isinstance(data["comparison"][0]["symbols"], list)
+        assert data["comparison"][0]["symbols"] == ["NSE:SBIN", "NSE:INFY"]
+
+    session.query(BacktestRun).filter_by(job_id="bt_compare_test").delete()
+    session.commit()
+    db_session.remove()
+
+    session.query(BacktestRun).filter_by(job_id="bt_compare_test").delete()
+    session.commit()
+    db_session.remove()
+
+
+def test_end_of_backtest_auto_closes_open_position(monkeypatch):
+    # Strategy that buys on bar 1 and never sells
+    code = "df['signal'] = 0\ndf.loc[1, 'signal'] = 1"
+    bars = make_bars(10)
+    monkeypatch.setattr(svc, "get_ohlcv", lambda *a, **kw: bars.reset_index(drop=True))
+    monkeypatch.setattr(
+        svc,
+        "get_data_range",
+        lambda *a, **kw: {"first_timestamp": 0, "last_timestamp": 0, "record_count": 10},
+    )
+
+    job_id = svc.start_backtest_job(
+        name="Auto Close Test",
+        strategy_code=code,
+        symbols=["NSE:TEST"],
+        interval="1m",
+    )
+    session = db_session()
+    statuses = _wait_for_terminal(session, job_id, 1)
+    assert statuses[0] == "completed"
+
+    trades = session.query(BacktestTrade).filter_by(job_id=job_id).all()
+    assert len(trades) == 1
+    assert trades[0].exit_reason == "End of Backtest"
+    db_session.remove()

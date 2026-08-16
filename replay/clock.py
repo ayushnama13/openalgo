@@ -27,7 +27,32 @@ class ReplayClock:
         self.watchlist: list[str] = []
         self.session_date: str = "2026-08-10"
         self._thread: threading.Thread | None = None
+        self._thread_lock = threading.Lock()
+        self._stop_event = threading.Event()
         self._listeners: list = []
+
+    def start_ticker(self):
+        """
+        Start the background ticker. Called lazily on the first play() so that
+        merely importing replay.* (a CLI script, a test, a migration) does not
+        leave a spinning thread behind.
+        """
+        with self._thread_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop_event.clear()
+            self._thread = threading.Thread(
+                target=self.tick_loop, daemon=True, name="ReplayClockTicker"
+            )
+            self._thread.start()
+
+    def stop_ticker(self):
+        self._stop_event.set()
+        with self._thread_lock:
+            thread = self._thread
+            self._thread = None
+        if thread:
+            thread.join(timeout=1.0)
 
     def configure(self, session_date: str, start_time: str, end_time: str, watchlist: list[str]):
         with self._lock:
@@ -41,6 +66,7 @@ class ReplayClock:
                 self.current_time = self.start_time
             except Exception as exc:
                 logger.error(f"[ReplayClock] Configure error: {exc}")
+                raise ValueError(f"Invalid session date or time configuration: {exc}") from exc
             self.watchlist = [w.upper() for w in watchlist]
 
     def play(self):
@@ -48,6 +74,7 @@ class ReplayClock:
             if self.is_playing:
                 return
             self.is_playing = True
+        self.start_ticker()
         logger.info(f"[ReplayClock] Playing from {self.current_time} at {self.speed}x")
 
     def pause(self):
@@ -63,14 +90,15 @@ class ReplayClock:
                 dt = timestamp
             if dt.tzinfo is None:
                 dt = IST.localize(dt)
-            self.current_time = dt
+            # Clamp into the configured session so a seek cannot park the clock
+            # on a timestamp the tape has no data for.
+            self.current_time = min(max(dt, self.start_time), self.end_time)
         logger.info(f"[ReplayClock] Seeked to {self.current_time}")
 
     def step(self, seconds: int = 1):
         with self._lock:
-            self.current_time += timedelta(seconds=seconds)
-            if self.current_time > self.end_time:
-                self.current_time = self.end_time
+            stepped = self.current_time + timedelta(seconds=seconds)
+            self.current_time = min(max(stepped, self.start_time), self.end_time)
 
     def set_speed(self, speed: float):
         with self._lock:
@@ -95,8 +123,10 @@ class ReplayClock:
 
     def tick_loop(self):
         last_real = time.time()
-        while True:
-            time.sleep(0.1)
+        while not self._stop_event.is_set():
+            self._stop_event.wait(0.1)
+            if self._stop_event.is_set():
+                break
             now_real = time.time()
             real_delta = now_real - last_real
             last_real = now_real
@@ -124,13 +154,10 @@ class ReplayClock:
                 for cb in listeners:
                     try:
                         cb(curr)
-                    except Exception as exc:
-                        logger.error(f"[ReplayClock] Listener error: {exc}")
+                    except Exception:
+                        logger.exception("[ReplayClock] Listener error")
 
 
-# Global clock instance
+# Global clock instance. Its ticker thread starts lazily on the first play(),
+# not at import time.
 clock_instance = ReplayClock()
-
-# Start background ticker thread
-_ticker_thread = threading.Thread(target=clock_instance.tick_loop, daemon=True, name="ReplayClockTicker")
-_ticker_thread.start()
