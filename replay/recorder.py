@@ -302,6 +302,95 @@ def _active_target_keys(date_str: str) -> set:
     return keys
 
 
+# ── Persistent auto-record list ─────────────────────────────────────────
+# A one-time "always record these" list (no date), re-armed into today's
+# RecordingTarget rows automatically so the user doesn't have to push Start
+# Recording every trading day.
+
+_auto_ensure_cache = {"date": None}
+_auto_ensure_lock = threading.Lock()
+
+
+def add_auto_record_symbols(symbols: list[dict]) -> dict:
+    """symbols: list of {"symbol": str, "exchange": str}. Persists forever."""
+    from replay.metadata_db import AutoRecordSymbol, SessionLocal
+
+    db = SessionLocal()
+    try:
+        added = 0
+        for item in symbols:
+            sym = item["symbol"].upper()
+            ex = item["exchange"].upper()
+            exists = db.query(AutoRecordSymbol).filter_by(symbol=sym, exchange=ex).first()
+            if not exists:
+                db.add(AutoRecordSymbol(symbol=sym, exchange=ex))
+                added += 1
+        db.commit()
+    finally:
+        db.close()
+
+    with _auto_ensure_lock:
+        _auto_ensure_cache["date"] = None  # force re-arm on next tick
+
+    return {"status": "ok", "added": added}
+
+
+def remove_auto_record_symbols(symbols: list[dict] | None = None) -> dict:
+    """symbols: list of {"symbol","exchange"}; omit to clear the whole list."""
+    from replay.metadata_db import AutoRecordSymbol, SessionLocal
+
+    db = SessionLocal()
+    try:
+        q = db.query(AutoRecordSymbol)
+        if symbols:
+            keys = {f"{s['exchange'].upper()}:{s['symbol'].upper()}" for s in symbols}
+            rows = [r for r in q.all() if f"{r.exchange}:{r.symbol}" in keys]
+        else:
+            rows = q.all()
+        removed = len(rows)
+        for r in rows:
+            db.delete(r)
+        db.commit()
+    finally:
+        db.close()
+
+    return {"status": "ok", "removed": removed}
+
+
+def list_auto_record_symbols() -> list[dict]:
+    from replay.metadata_db import AutoRecordSymbol, SessionLocal
+
+    db = SessionLocal()
+    try:
+        rows = db.query(AutoRecordSymbol).all()
+        return [{"symbol": r.symbol, "exchange": r.exchange} for r in rows]
+    finally:
+        db.close()
+
+
+def ensure_auto_targets_for_today() -> None:
+    """
+    Idempotent, self-throttled to once per calendar date: arms a
+    RecordingTarget row for today for every symbol on the persistent
+    auto-record list. Called from the proxy's recording-sync loop, so it
+    must never raise and must be cheap to call repeatedly.
+    """
+    date_str = datetime.now(IST).strftime("%Y-%m-%d")
+    with _auto_ensure_lock:
+        if _auto_ensure_cache["date"] == date_str:
+            return
+        _auto_ensure_cache["date"] = date_str
+
+    try:
+        symbols = list_auto_record_symbols()
+        if symbols:
+            add_recording_targets(symbols, date_str)
+    except Exception:
+        logger.exception("[ReplayRecorder] Error arming auto-record targets for today")
+        with _auto_ensure_lock:
+            _auto_ensure_cache["date"] = None  # retry on next call
+
+
 def _normalize_tick_event(market_data: dict) -> dict | None:
     ltp = market_data.get("ltp")
     if ltp is None:

@@ -1,4 +1,4 @@
-import { ArrowLeft, Database, History, Play, Square } from 'lucide-react'
+import { ArrowLeft, Database, History, Pin, X } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import { Button } from '@/components/ui/button'
@@ -21,16 +21,15 @@ import {
 } from '@/components/ui/table'
 import { showToast } from '@/utils/toast'
 
-interface RecordingTarget {
-  symbol: string
-  exchange: string
-  date: string
-}
-
 interface AvailableEntry {
   symbol: string
   date: string
   row_count: number
+}
+
+interface AutoRecordSymbol {
+  symbol: string
+  exchange: string
 }
 
 async function fetchCSRF(): Promise<string> {
@@ -49,41 +48,42 @@ async function apiPost(path: string, body: object): Promise<Response> {
 }
 
 export default function ReplayRecordingPage() {
-  const [sessionDate, setSessionDate] = useState(() => new Date().toISOString().split('T')[0])
-  const [symbolInput, setSymbolInput] = useState('')
-  const [exchange, setExchange] = useState('NSE')
-  const [targets, setTargets] = useState<RecordingTarget[]>([])
   const [availableTapes, setAvailableTapes] = useState<AvailableEntry[]>([])
+  const [autoSymbols, setAutoSymbols] = useState<AutoRecordSymbol[]>([])
+  const [autoSymbolInput, setAutoSymbolInput] = useState('')
+  const [autoExchange, setAutoExchange] = useState('NSE')
   const [isLoading, setIsLoading] = useState(false)
 
   const fetchData = useCallback(async () => {
     setIsLoading(true)
     try {
-      const [tRes, aRes] = await Promise.all([
-        fetch(`/api/replay/record/status?date=${encodeURIComponent(sessionDate)}`, { credentials: 'include' }),
+      const [aRes, arRes] = await Promise.all([
         fetch('/api/replay/available', { credentials: 'include' }),
+        fetch('/api/replay/auto_record/list', { credentials: 'include' }),
       ])
-      if (tRes.ok) {
-        const tData = await tRes.json()
-        setTargets(tData.targets || [])
-      }
       if (aRes.ok) {
         const aData = await aRes.json()
         setAvailableTapes(aData.data || [])
+      }
+      if (arRes.ok) {
+        const arData = await arRes.json()
+        setAutoSymbols(arData.symbols || [])
+      } else {
+        showToast.error(`Failed to load always-record list (${arRes.status})`)
       }
     } catch (_err) {
       showToast.error('Failed to load recording data')
     } finally {
       setIsLoading(false)
     }
-  }, [sessionDate])
+  }, [])
 
   useEffect(() => {
     fetchData()
   }, [fetchData])
 
-  const handleStartRecording = async () => {
-    const syms = symbolInput
+  const handleAddAutoSymbols = async () => {
+    const syms = autoSymbolInput
       .split(',')
       .map((s) => s.trim().toUpperCase())
       .filter(Boolean)
@@ -92,32 +92,31 @@ export default function ReplayRecordingPage() {
       return
     }
     try {
-      const symbols = syms.map((symbol) => ({ symbol, exchange }))
-      const res = await apiPost('/api/replay/record/start', { symbols, date: sessionDate })
+      const symbols = syms.map((symbol) => ({ symbol, exchange: autoExchange }))
+      const res = await apiPost('/api/replay/auto_record/add', { symbols })
       if (res.ok) {
-        const data = await res.json()
-        showToast.success(`Started recording ${data.count} symbol(s) for ${data.date}`)
-        setSymbolInput('')
+        showToast.success('Added to always-record list')
+        setAutoSymbolInput('')
         fetchData()
       } else {
-        showToast.error('Failed to start recording')
+        const text = await res.text()
+        showToast.error(`Failed to update always-record list (${res.status}): ${text.slice(0, 200)}`)
       }
-    } catch {
-      showToast.error('Error starting recording')
+    } catch (err) {
+      showToast.error(`Error updating always-record list: ${err}`)
     }
   }
 
-  const handleStopRecording = async () => {
+  const handleRemoveAutoSymbol = async (s: AutoRecordSymbol) => {
     try {
-      const res = await apiPost('/api/replay/record/stop', { date: sessionDate })
+      const res = await apiPost('/api/replay/auto_record/remove', { symbols: [s] })
       if (res.ok) {
-        showToast.info('Stopped all active recordings for date')
         fetchData()
       } else {
-        showToast.error('Failed to stop recording')
+        showToast.error('Failed to remove symbol')
       }
     } catch {
-      showToast.error('Error stopping recording')
+      showToast.error('Error removing symbol')
     }
   }
 
@@ -150,138 +149,127 @@ export default function ReplayRecordingPage() {
               <History className="h-6 w-6 text-primary" /> Replay Tape Recording Management
             </h1>
             <p className="text-muted-foreground mt-1">
-              Configure active second-by-second live market tick recording targets and view recorded Parquet tape archives.
+              Manage the always-record symbol list and view recorded Parquet tape archives.
             </p>
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Active Recording Target Control */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base flex items-center gap-2">
-              <Play className="h-4 w-4 text-emerald-500" /> Active Recording Targets
-            </CardTitle>
-            <CardDescription>
-              Symbols added here are recorded tick-by-tick in real-time as market data arrives.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-xs text-muted-foreground">Recording Date</label>
-              <Input
-                type="date"
-                value={sessionDate}
-                onChange={(e) => setSessionDate(e.target.value)}
-                className="font-mono"
-              />
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Pin className="h-4 w-4 text-amber-500" /> Always-Record List
+          </CardTitle>
+          <CardDescription>
+            Symbols saved here are re-armed automatically every trading day — no need to push Start
+            Recording each morning. Managed once, applies forever until removed.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex gap-2">
+            <Select value={autoExchange} onValueChange={setAutoExchange}>
+              <SelectTrigger className="w-28">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="NSE">NSE</SelectItem>
+                <SelectItem value="BSE">BSE</SelectItem>
+                <SelectItem value="NFO">NFO</SelectItem>
+                <SelectItem value="NSE_INDEX">NSE_INDEX</SelectItem>
+                <SelectItem value="MCX">MCX</SelectItem>
+              </SelectContent>
+            </Select>
+            <Input
+              placeholder="e.g. NIFTY, RELIANCE, SBIN"
+              value={autoSymbolInput}
+              onChange={(e) => setAutoSymbolInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleAddAutoSymbols()
+              }}
+              className="font-mono flex-1"
+            />
+            <Button onClick={handleAddAutoSymbols} className="bg-amber-600 hover:bg-amber-700">
+              Add
+            </Button>
+          </div>
+          {isLoading ? (
+            <div className="flex justify-center py-4">
+              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary" />
             </div>
+          ) : autoSymbols.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {autoSymbols.map((s) => (
+                <span
+                  key={`${s.exchange}:${s.symbol}`}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-muted font-mono text-xs border"
+                >
+                  <span className="font-bold text-primary">{s.exchange}</span>:{s.symbol}
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveAutoSymbol(s)}
+                    className="ml-1 text-muted-foreground hover:text-destructive"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              No always-record symbols set. Add some above.
+            </p>
+          )}
+        </CardContent>
+      </Card>
 
-            <div className="space-y-2">
-              <label className="text-xs text-muted-foreground">Add Symbols (Comma separated)</label>
-              <div className="flex gap-2">
-                <Select value={exchange} onValueChange={setExchange}>
-                  <SelectTrigger className="w-28">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="NSE">NSE</SelectItem>
-                    <SelectItem value="BSE">BSE</SelectItem>
-                    <SelectItem value="NFO">NFO</SelectItem>
-                    <SelectItem value="NSE_INDEX">NSE_INDEX</SelectItem>
-                    <SelectItem value="MCX">MCX</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Input
-                  placeholder="e.g. NIFTY, RELIANCE, SBIN"
-                  value={symbolInput}
-                  onChange={(e) => setSymbolInput(e.target.value)}
-                  className="font-mono flex-1"
-                />
-              </div>
+      {/* Recorded Parquet Archives */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2">
+                <Database className="h-4 w-4 text-cyan-500" /> Recorded Tape Archives ({availableTapes.length})
+              </CardTitle>
+              <CardDescription>
+                Parquet files stored on disk (weekly retention: 7 days max).
+              </CardDescription>
             </div>
-
-            <div className="flex gap-2 pt-2">
-              <Button onClick={handleStartRecording} className="flex-1 bg-emerald-600 hover:bg-emerald-700">
-                Start Recording
-              </Button>
-              <Button variant="destructive" onClick={handleStopRecording} className="gap-1.5">
-                <Square className="h-3.5 w-3.5" /> Stop All
-              </Button>
+            <Button variant="outline" size="sm" className="h-8 text-xs text-amber-500 border-amber-500/30" onClick={handlePrune}>
+              Prune &gt; 7 Days
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="flex justify-center py-8">
+              <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary" />
             </div>
-
-            <div className="border-t pt-4 space-y-2">
-              <div className="text-xs font-semibold text-muted-foreground">
-                Currently Active Targets for {sessionDate} ({targets.length}):
-              </div>
-              {targets.length > 0 ? (
-                <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto">
-                  {targets.map((t) => (
-                    <span
-                      key={`${t.exchange}:${t.symbol}`}
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded bg-muted font-mono text-xs border"
-                    >
-                      <span className="font-bold text-primary">{t.exchange}</span>:{t.symbol}
-                    </span>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-xs text-muted-foreground">No active recording targets for this date.</p>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Recorded Parquet Archives */}
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <div>
-                <CardTitle className="text-base flex items-center gap-2">
-                  <Database className="h-4 w-4 text-cyan-500" /> Recorded Tape Archives ({availableTapes.length})
-                </CardTitle>
-                <CardDescription>
-                  Parquet files stored on disk (weekly retention: 7 days max).
-                </CardDescription>
-              </div>
-              <Button variant="outline" size="sm" className="h-8 text-xs text-amber-500 border-amber-500/30" onClick={handlePrune}>
-                Prune &gt; 7 Days
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <div className="flex justify-center py-8">
-                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary" />
-              </div>
-            ) : availableTapes.length > 0 ? (
-              <div className="max-h-80 overflow-y-auto rounded-md border border-slate-800">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Symbol</TableHead>
-                      <TableHead>Date</TableHead>
-                      <TableHead className="text-right">Rows</TableHead>
+          ) : availableTapes.length > 0 ? (
+            <div className="max-h-80 overflow-y-auto rounded-md border border-slate-800">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Symbol</TableHead>
+                    <TableHead>Date</TableHead>
+                    <TableHead className="text-right">Rows</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {availableTapes.map((entry) => (
+                    <TableRow key={`${entry.symbol}:${entry.date}`}>
+                      <TableCell className="font-mono font-medium">{entry.symbol}</TableCell>
+                      <TableCell className="font-mono text-xs text-muted-foreground">{entry.date}</TableCell>
+                      <TableCell className="font-mono text-right">{entry.row_count.toLocaleString()}</TableCell>
                     </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {availableTapes.map((entry) => (
-                      <TableRow key={`${entry.symbol}:${entry.date}`}>
-                        <TableCell className="font-mono font-medium">{entry.symbol}</TableCell>
-                        <TableCell className="font-mono text-xs text-muted-foreground">{entry.date}</TableCell>
-                        <TableCell className="font-mono text-right">{entry.row_count.toLocaleString()}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground py-8 text-center">No recorded tape archives found.</p>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground py-8 text-center">No recorded tape archives found.</p>
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }
