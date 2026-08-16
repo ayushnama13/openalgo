@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from sqlalchemy import text
 
 from database.auth_db import get_broker_name, verify_api_key
-from replay.recorder import maybe_record_tick
+from replay.recorder import list_recording_targets, maybe_record_tick
 from services.market_data_service import get_market_data_service
 from utils.logging import get_logger, highlight_url
 
@@ -162,6 +162,11 @@ class WebSocketProxy:
             # proxy runs in its own process, so utils/health_monitor.py cannot
             # read the in-process pools; it falls back to this file (#1301).
             stats_task = aio.create_task(self._stats_file_writer())
+
+            # Auto-subscribe the broker feed to today's replay recording
+            # targets, so tape keeps recording even when no chart client is
+            # watching that symbol (see replay/recorder.py).
+            replay_sync_task = loop.create_task(self._replay_recorder_sync())
 
             # Handle graceful shutdown
             # Windows doesn't support add_signal_handler, so we'll use a simpler approach
@@ -390,6 +395,60 @@ class WebSocketProxy:
                 # Never let stats writing affect the feed path.
                 logger.debug(f"Stats snapshot write failed: {e}")
             await aio.sleep(self.STATS_FILE_INTERVAL)
+
+    async def _replay_recorder_sync(self):
+        """
+        Keep the broker feed subscribed to today's replay recording targets.
+
+        Recording in `replay/recorder.py` is tick-driven: a symbol is only
+        captured while its ticks flow through this proxy, and ticks only flow
+        for symbols someone subscribed. Arming targets from the admin page
+        inserts DB rows but nothing watched the symbols, so nothing was
+        recorded. This task reconciles broker subscriptions against the target
+        list every few seconds, subscribing new targets and unsubscribing
+        removed ones. Never raises; the feed path must not break.
+        """
+        subscribed: Dict[str, str] = {}  # "EXCHANGE:SYMBOL" -> "EXCHANGE:SYMBOL"
+        while self.running:
+            try:
+                targets = list_recording_targets()
+                want: Dict[str, dict] = {}
+                for t in targets:
+                    key = f"{t['exchange'].upper()}:{t['symbol'].upper()}"
+                    want[key] = t
+
+                for key, t in want.items():
+                    if key in subscribed:
+                        continue
+                    for user_id, adapter in list(self.broker_adapters.items()):
+                        try:
+                            resp = adapter.subscribe(t["symbol"], t["exchange"], mode=2, depth_level=5)
+                            if resp.get("status") == "success":
+                                subscribed[key] = key
+                                logger.info(
+                                    f"[ReplayRecorder] Auto-subscribed recording target {t['exchange']}:{t['symbol']}"
+                                )
+                            else:
+                                logger.debug(
+                                    f"[ReplayRecorder] Subscribe failed for {t['exchange']}:{t['symbol']}: {resp.get('message')}"
+                                )
+                        except Exception as e:
+                            logger.debug(f"[ReplayRecorder] Subscribe error for {t['exchange']}:{t['symbol']}: {e}")
+
+                for key in list(subscribed):
+                    if key in want:
+                        continue
+                    ex, sym = key.split(":", 1)
+                    for user_id, adapter in list(self.broker_adapters.items()):
+                        try:
+                            adapter.unsubscribe(sym, ex, mode=2)
+                        except Exception:
+                            pass
+                    subscribed.pop(key, None)
+                    logger.info(f"[ReplayRecorder] Unsubscribed removed target {ex}:{sym}")
+            except Exception as e:
+                logger.debug(f"[ReplayRecorder] Sync error: {e}")
+            await aio.sleep(10)
 
     def get_health_stats(self) -> dict:
         """
