@@ -63,6 +63,20 @@ class RecordingTarget(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(IST))
 
 
+class AutoRecordSymbol(Base):
+    """
+    Persistent (no date column) "always record this symbol" list. Unlike
+    RecordingTarget, these rows never expire — `ensure_auto_targets_for_today`
+    re-arms a RecordingTarget row for each of these every trading day so the
+    user does not have to re-push Start Recording every morning.
+    """
+    __tablename__ = "replay_auto_record_symbols"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(50), nullable=False)
+    exchange = Column(String(20), nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(IST))
+
+
 def init_replay_db():
     os.makedirs("data/replay", exist_ok=True)
     Base.metadata.create_all(engine)

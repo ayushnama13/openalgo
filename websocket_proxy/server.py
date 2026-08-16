@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from sqlalchemy import text
 
 from database.auth_db import get_broker_name, verify_api_key
-from replay.recorder import list_recording_targets, maybe_record_tick
+from replay.recorder import ensure_auto_targets_for_today, list_recording_targets, maybe_record_tick
 from services.market_data_service import get_market_data_service
 from utils.logging import get_logger, highlight_url
 
@@ -411,6 +411,7 @@ class WebSocketProxy:
         subscribed: Dict[str, str] = {}  # "EXCHANGE:SYMBOL" -> "EXCHANGE:SYMBOL"
         while self.running:
             try:
+                ensure_auto_targets_for_today()
                 targets = list_recording_targets()
                 want: Dict[str, dict] = {}
                 for t in targets:
@@ -422,7 +423,7 @@ class WebSocketProxy:
                         continue
                     for user_id, adapter in list(self.broker_adapters.items()):
                         try:
-                            resp = adapter.subscribe(t["symbol"], t["exchange"], mode=2, depth_level=5)
+                            resp = adapter.subscribe(t["symbol"], t["exchange"], mode=3, depth_level=20)
                             if resp.get("status") == "success":
                                 subscribed[key] = key
                                 logger.info(
@@ -441,7 +442,7 @@ class WebSocketProxy:
                     ex, sym = key.split(":", 1)
                     for user_id, adapter in list(self.broker_adapters.items()):
                         try:
-                            adapter.unsubscribe(sym, ex, mode=2)
+                            adapter.unsubscribe(sym, ex, mode=3)
                         except Exception:
                             pass
                     subscribed.pop(key, None)

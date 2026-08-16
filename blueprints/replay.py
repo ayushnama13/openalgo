@@ -13,9 +13,9 @@ from replay.dal import expand_nifty_options, get_range, get_state
 from replay.fill_simulator import simulate_order_fill
 from replay.patterns import detect_patterns
 from replay.recorder import (
-    add_recording_targets,
-    list_recording_targets,
-    remove_recording_targets,
+    add_auto_record_symbols,
+    list_auto_record_symbols,
+    remove_auto_record_symbols,
 )
 from replay.storage import list_available, prune_old_replay_data
 from utils.logging import get_logger
@@ -51,16 +51,6 @@ def api_replay_session():
         prune_old_replay_data(7)
     except Exception as exc:
         logger.error(f"[api_replay_session] Automatic pruning error: {exc}")
-
-    # Always automatically record all watchlist symbols second-by-second for this session date
-    try:
-        symbols_to_record = [
-            {"symbol": sym, "exchange": "NSE" if sym.upper() in ["NIFTY", "RELIANCE", "BANKNIFTY", "SENSEX"] else "NFO"}
-            for sym in watchlist
-        ]
-        add_recording_targets(symbols_to_record, session_date)
-    except Exception as exc:
-        logger.error(f"[api_replay_session] Auto-recording setup error: {exc}")
 
     return jsonify({"status": "configured", **clock_instance.get_state()}), 200
 
@@ -163,37 +153,30 @@ def api_replay_available():
     return jsonify({"count": len(entries), "data": entries}), 200
 
 
-@replay_bp.route("/api/replay/record/start", methods=["POST"])
+@replay_bp.route("/api/replay/auto_record/list", methods=["GET"])
 @check_session_validity
-def api_replay_record_start():
+def api_replay_auto_record_list():
+    return jsonify({"symbols": list_auto_record_symbols()}), 200
+
+
+@replay_bp.route("/api/replay/auto_record/add", methods=["POST"])
+@check_session_validity
+def api_replay_auto_record_add():
     data = request.get_json(silent=True) or {}
     symbols = data.get("symbols")
-    date_str = data.get("date")
-
     if not symbols or not isinstance(symbols, list):
         return jsonify({"status": "error", "message": "symbols (list of {symbol, exchange}) is required"}), 400
-
-    result = add_recording_targets(symbols, date_str)
+    result = add_auto_record_symbols(symbols)
     return jsonify(result), 200
 
 
-@replay_bp.route("/api/replay/record/stop", methods=["POST"])
+@replay_bp.route("/api/replay/auto_record/remove", methods=["POST"])
 @check_session_validity
-def api_replay_record_stop():
+def api_replay_auto_record_remove():
     data = request.get_json(silent=True) or {}
-    symbols = data.get("symbols")  # optional; omit to stop everything for the date
-    date_str = data.get("date")
-
-    result = remove_recording_targets(symbols, date_str)
+    symbols = data.get("symbols")  # optional; omit to clear the whole list
+    result = remove_auto_record_symbols(symbols)
     return jsonify(result), 200
-
-
-@replay_bp.route("/api/replay/record/status", methods=["GET"])
-@check_session_validity
-def api_replay_record_status():
-    date_str = request.args.get("date")
-    targets = list_recording_targets(date_str)
-    return jsonify({"count": len(targets), "targets": targets}), 200
 
 
 @replay_bp.route("/api/replay/simulate_order", methods=["POST"])
