@@ -184,11 +184,12 @@ def execute_strategy_dsl(strategy_code: str, df: pd.DataFrame) -> pd.DataFrame:
             df = res
 
     # Standardize signal column
-    if "signal" not in df.columns:
+    if "buy_signal" in df.columns and "sell_signal" in df.columns:
         df["signal"] = 0
-        if "buy_signal" in df.columns and "sell_signal" in df.columns:
-            df.loc[df["buy_signal"], "signal"] = 1
-            df.loc[df["sell_signal"], "signal"] = -1
+        df.loc[df["buy_signal"].astype(bool), "signal"] = 1
+        df.loc[df["sell_signal"].astype(bool), "signal"] = -1
+    elif "signal" not in df.columns:
+        df["signal"] = 0
 
     return df
 
@@ -445,16 +446,18 @@ def run_backtest_pipeline(
             # the sign of pnl_pct_current flips relative to the long case)
             if position_qty != 0 and entry_price > 0:
                 if position_qty > 0:
-                    pnl_pct_current = ((b_close - entry_price) / entry_price) * 100.0
+                    sl_pnl_pct = ((b_low - entry_price) / entry_price) * 100.0
+                    tp_pnl_pct = ((b_high - entry_price) / entry_price) * 100.0
                 else:
-                    pnl_pct_current = ((entry_price - b_close) / entry_price) * 100.0
+                    sl_pnl_pct = ((entry_price - b_high) / entry_price) * 100.0
+                    tp_pnl_pct = ((entry_price - b_low) / entry_price) * 100.0
                 exit_triggered = False
                 exit_reason = ""
 
-                if stop_loss_pct and pnl_pct_current <= -abs(stop_loss_pct):
+                if stop_loss_pct and sl_pnl_pct <= -abs(stop_loss_pct):
                     exit_triggered = True
                     exit_reason = "Stop Loss"
-                elif take_profit_pct and pnl_pct_current >= abs(take_profit_pct):
+                elif take_profit_pct and tp_pnl_pct >= abs(take_profit_pct):
                     exit_triggered = True
                     exit_reason = "Take Profit"
 
@@ -677,6 +680,57 @@ def run_backtest_pipeline(
             if i % max(1, total_bars // 50) == 0 or i == total_bars - 1:
                 progress_pct = ((i + 1) / total_bars) * 100.0
                 _emit_progress(job_id, progress_pct, bar_time, current_equity, len(trades_list), **emit_kwargs)
+
+        # Auto-close open position on the final bar at backtest completion
+        if position_qty != 0:
+            last_bar = df.iloc[-1]
+            last_time = str(last_bar["timestamp"])
+            last_open = float(last_bar["open"])
+            last_high = float(last_bar["high"])
+            last_low = float(last_bar["low"])
+            last_close = float(last_bar["close"])
+            last_vol = float(last_bar.get("volume", 0))
+            filled, exec_price, cost = simulate_order_fill(
+                action="SELL" if position_qty > 0 else "BUY",
+                price_type="MARKET",
+                limit_price=0.0,
+                trigger_price=0.0,
+                bar_open=last_open,
+                bar_high=last_high,
+                bar_low=last_low,
+                bar_close=last_close,
+                volume=last_vol,
+                slippage_bps=slippage_bps,
+                brokerage_bps=brokerage_bps,
+                quantity=abs(position_qty),
+            )
+            if filled:
+                pnl = (exec_price - entry_price) * position_qty - cost
+                pnl_pct = (pnl / (entry_price * abs(position_qty))) * 100.0 if entry_price > 0 else 0.0
+                cash += (position_qty * exec_price) - cost
+                trades_list.append({
+                    "job_id": job_id,
+                    "symbol": symbol_clean,
+                    "exchange": exchange,
+                    "action": "BUY" if position_qty > 0 else "SELL",
+                    "entry_time": entry_time,
+                    "entry_price": round(entry_price, 2),
+                    "exit_time": last_time,
+                    "exit_price": round(exec_price, 2),
+                    "quantity": abs(position_qty),
+                    "pnl": round(pnl, 2),
+                    "pnl_pct": round(pnl_pct, 2),
+                    "holding_period_bars": (total_bars - 1) - entry_bar_idx,
+                    "entry_reason": "Signal",
+                    "exit_reason": "End of Backtest",
+                    "costs": round(cost, 2),
+                })
+                position_qty = 0.0
+                current_equity = cash
+                if equity_records:
+                    equity_records[-1]["equity"] = round(current_equity, 2)
+                    equity_records[-1]["cash"] = round(cash, 2)
+                    equity_records[-1]["positions_value"] = 0.0
 
         # Save Trade and Equity Records to DB
         equity_series = pd.Series(

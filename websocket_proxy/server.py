@@ -237,6 +237,23 @@ class WebSocketProxy:
                 except aio.CancelledError:
                     pass
 
+                # The ZMQ listener and the replay sync loop were left running at
+                # shutdown, holding their sockets and DB sessions until the
+                # process died. Cancel them explicitly.
+                for task in (replay_sync_task, zmq_task):
+                    task.cancel()
+                    try:
+                        await task
+                    except (aio.CancelledError, Exception):
+                        pass
+
+                # Drain any buffered replay ticks to disk before exiting.
+                try:
+                    from replay.recorder import stop_flusher
+                    stop_flusher()
+                except Exception:
+                    logger.exception("Error stopping replay recorder flusher")
+
                 # Properly stop the server and release the port.
                 # This calls server.wait_closed() which ensures the socket
                 # is fully released before the event loop shuts down.
@@ -408,12 +425,19 @@ class WebSocketProxy:
         list every few seconds, subscribing new targets and unsubscribing
         removed ones. Never raises; the feed path must not break.
         """
-        subscribed: Dict[str, str] = {}  # "EXCHANGE:SYMBOL" -> "EXCHANGE:SYMBOL"
+        # key -> the (mode, depth_level) that actually worked, so the matching
+        # unsubscribe uses the same mode the subscription was made with.
+        subscribed: dict[str, tuple] = {}
+        # Keys whose subscribe has already failed on every attempt, with the
+        # number of consecutive failures. Prevents a permanently invalid symbol
+        # from re-logging every 10 seconds forever.
+        failed: dict[str, int] = {}
+
         while self.running:
             try:
                 ensure_auto_targets_for_today()
                 targets = list_recording_targets()
-                want: Dict[str, dict] = {}
+                want: dict[str, dict] = {}
                 for t in targets:
                     key = f"{t['exchange'].upper()}:{t['symbol'].upper()}"
                     want[key] = t
@@ -421,35 +445,84 @@ class WebSocketProxy:
                 for key, t in want.items():
                     if key in subscribed:
                         continue
-                    for user_id, adapter in list(self.broker_adapters.items()):
-                        try:
-                            resp = adapter.subscribe(t["symbol"], t["exchange"], mode=3, depth_level=20)
-                            if resp.get("status") == "success":
-                                subscribed[key] = key
-                                logger.info(
-                                    f"[ReplayRecorder] Auto-subscribed recording target {t['exchange']}:{t['symbol']}"
-                                )
-                            else:
-                                logger.debug(
-                                    f"[ReplayRecorder] Subscribe failed for {t['exchange']}:{t['symbol']}: {resp.get('message')}"
-                                )
-                        except Exception as e:
-                            logger.debug(f"[ReplayRecorder] Subscribe error for {t['exchange']}:{t['symbol']}: {e}")
+                    if failed.get(key, 0) >= 5:
+                        continue
+                    attempt = self._subscribe_recording_target(t["symbol"], t["exchange"])
+                    if attempt is not None:
+                        subscribed[key] = attempt
+                        failed.pop(key, None)
+                    else:
+                        failures = failed.get(key, 0) + 1
+                        failed[key] = failures
+                        # Log the first failure loudly, then back off to debug.
+                        if failures == 1:
+                            logger.warning(
+                                f"[ReplayRecorder] Could not subscribe recording target "
+                                f"{t['exchange']}:{t['symbol']} - it will not be recorded"
+                            )
 
                 for key in list(subscribed):
                     if key in want:
                         continue
                     ex, sym = key.split(":", 1)
-                    for user_id, adapter in list(self.broker_adapters.items()):
+                    mode, _depth = subscribed[key]
+                    for _user_id, adapter in list(self.broker_adapters.items()):
                         try:
-                            adapter.unsubscribe(sym, ex, mode=3)
+                            adapter.unsubscribe(sym, ex, mode=mode)
                         except Exception:
-                            pass
+                            logger.debug(f"[ReplayRecorder] Unsubscribe error for {ex}:{sym}", exc_info=True)
                     subscribed.pop(key, None)
                     logger.info(f"[ReplayRecorder] Unsubscribed removed target {ex}:{sym}")
-            except Exception as e:
-                logger.debug(f"[ReplayRecorder] Sync error: {e}")
+
+                # Forget failures for symbols no longer armed.
+                for key in list(failed):
+                    if key not in want:
+                        failed.pop(key, None)
+            except Exception:
+                logger.exception("[ReplayRecorder] Sync error")
             await aio.sleep(10)
+
+    def _subscribe_recording_target(self, symbol: str, exchange: str):
+        """
+        Subscribe one recording target, degrading gracefully.
+
+        Only Depth mode (3) carries the order book the recorder and the fill
+        simulator need, but 20-level depth is broker- and exchange-specific -
+        most NSE equity feeds top out at 5. Requesting 20 unconditionally meant
+        a broker that rejects it recorded nothing at all, silently. Try the
+        deepest book first, then 5 levels, then fall back to Quote (2) so at
+        least LTP and volume are captured.
+
+        Returns the (mode, depth_level) that succeeded, or None.
+        """
+        attempts = ((3, 20), (3, 5), (2, None))
+        for mode, depth_level in attempts:
+            for _user_id, adapter in list(self.broker_adapters.items()):
+                try:
+                    if depth_level is None:
+                        resp = adapter.subscribe(symbol, exchange, mode=mode)
+                    else:
+                        resp = adapter.subscribe(symbol, exchange, mode=mode, depth_level=depth_level)
+                except Exception:
+                    logger.debug(
+                        f"[ReplayRecorder] Subscribe error for {exchange}:{symbol} "
+                        f"mode={mode} depth={depth_level}",
+                        exc_info=True,
+                    )
+                    continue
+
+                if (resp or {}).get("status") == "success":
+                    logger.info(
+                        f"[ReplayRecorder] Auto-subscribed recording target {exchange}:{symbol} "
+                        f"(mode={mode}, depth={depth_level or 'n/a'})"
+                    )
+                    return (mode, depth_level)
+
+                logger.debug(
+                    f"[ReplayRecorder] Subscribe rejected for {exchange}:{symbol} "
+                    f"mode={mode} depth={depth_level}: {(resp or {}).get('message')}"
+                )
+        return None
 
     def get_health_stats(self) -> dict:
         """

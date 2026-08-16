@@ -601,7 +601,7 @@ def compare_jobs():
             comparison_results.append({
                 "job_id": jid,
                 "name": run.name,
-                "symbol": run.symbols,
+                "symbols": json.loads(run.symbols) if run.symbols else [],
                 "interval": run.interval,
                 "metrics": metrics,
                 "equity_curve": equity_curve,

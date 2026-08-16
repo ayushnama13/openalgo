@@ -9,21 +9,25 @@ from datetime import datetime
 from flask import Blueprint, jsonify, request
 
 from replay.clock import clock_instance
-from replay.dal import expand_nifty_options, get_range, get_state
+from replay.dal import DEFAULT_RANGE_LIMIT, expand_nifty_options, get_range, get_state
 from replay.fill_simulator import simulate_order_fill
 from replay.patterns import detect_patterns
 from replay.recorder import (
     add_auto_record_symbols,
     list_auto_record_symbols,
+    prune_recording_targets,
     remove_auto_record_symbols,
 )
-from replay.storage import list_available, prune_old_replay_data
+from replay.storage import compact_day, list_available, prune_old_replay_data
 from utils.logging import get_logger
 from utils.session import check_session_validity
 
 logger = get_logger(__name__)
 
 replay_bp = Blueprint("replay_bp", __name__, url_prefix="/")
+
+# Hard ceiling on /api/replay/range regardless of what the caller asks for.
+MAX_RANGE_LIMIT = 100000
 
 
 @replay_bp.route("/api/replay/status", methods=["GET"])
@@ -41,10 +45,18 @@ def api_replay_session():
     end_time = data.get("end_time", "15:30:00")
     watchlist = data.get("watchlist", ["NIFTY", "RELIANCE"])
 
+    if isinstance(watchlist, str):
+        watchlist = [watchlist]
+    elif not isinstance(watchlist, list):
+        return jsonify({"status": "error", "message": "watchlist must be a list"}), 400
+
     # Expand Nifty options dynamically if requested
     watchlist = expand_nifty_options(session_date, watchlist)
 
-    clock_instance.configure(session_date, start_time, end_time, watchlist)
+    try:
+        clock_instance.configure(session_date, start_time, end_time, watchlist)
+    except ValueError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
 
     # Automatically prune replay data older than 7 days (weekly retention) to prevent storage overload
     try:
@@ -68,7 +80,10 @@ def api_replay_control():
     elif action == "seek":
         ts = data.get("timestamp")
         if ts:
-            clock_instance.seek(ts)
+            try:
+                clock_instance.seek(ts)
+            except ValueError:
+                return jsonify({"status": "error", "message": f"invalid timestamp: {ts}"}), 400
     elif action == "speed":
         spd = data.get("speed", 1.0)
         clock_instance.set_speed(spd)
@@ -93,8 +108,10 @@ def api_replay_state():
     if ts_str:
         try:
             dt = datetime.fromisoformat(ts_str)
-        except Exception:
-            dt = datetime.now()
+        except ValueError:
+            # Falling back to "now" here silently answered a different question
+            # than the one asked, and mixed a naive datetime into tz-aware code.
+            return jsonify({"status": "error", "message": f"invalid timestamp: {ts_str}"}), 400
     else:
         dt = clock_instance.current_time
 
@@ -118,8 +135,22 @@ def api_replay_range():
     except Exception as exc:
         return jsonify({"status": "error", "message": f"invalid timestamp format: {exc}"}), 400
 
-    range_data = get_range(symbol, t_start, t_end)
-    return jsonify({"symbol": symbol.upper(), "count": len(range_data), "data": range_data}), 200
+    # A full session for one symbol is ~100k rows x 84 columns. Cap the response
+    # (and evenly downsample past the cap) so a wide window cannot return
+    # hundreds of megabytes of JSON in one shot.
+    try:
+        limit = int(request.args.get("limit", DEFAULT_RANGE_LIMIT))
+    except ValueError:
+        return jsonify({"status": "error", "message": "limit must be an integer"}), 400
+    limit = None if limit <= 0 else min(limit, MAX_RANGE_LIMIT)
+
+    range_data = get_range(symbol, t_start, t_end, limit=limit)
+    return jsonify({
+        "symbol": symbol.upper(),
+        "count": len(range_data),
+        "limit": limit,
+        "data": range_data,
+    }), 200
 
 
 @replay_bp.route("/api/replay/patterns", methods=["GET"])
@@ -193,7 +224,14 @@ def api_replay_simulate_order():
     if not symbol:
         return jsonify({"status": "error", "message": "symbol is required"}), 400
 
-    dt = datetime.fromisoformat(ts_str) if ts_str else clock_instance.current_time
+    if ts_str:
+        try:
+            dt = datetime.fromisoformat(ts_str)
+        except ValueError:
+            return jsonify({"status": "error", "message": f"invalid timestamp: {ts_str}"}), 400
+    else:
+        dt = clock_instance.current_time
+
     result = simulate_order_fill(symbol, dt, action, quantity, price_type, limit_price)
     return jsonify(result), 200
 
@@ -202,6 +240,49 @@ def api_replay_simulate_order():
 @check_session_validity
 def api_replay_prune():
     data = request.get_json(silent=True) or {}
-    days = int(data.get("days_to_keep", 7))
+    try:
+        days = int(data.get("days_to_keep", 7))
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "days_to_keep must be an integer"}), 400
+    if days < 1:
+        return jsonify({"status": "error", "message": "days_to_keep must be at least 1"}), 400
+
     removed = prune_old_replay_data(days)
-    return jsonify({"status": "success", "removed_files": removed, "days_retained": days}), 200
+    # RecordingTarget rows are re-armed daily from the auto-record list, so past
+    # dates are dead weight on a table the tick path reads every few seconds.
+    removed_targets = prune_recording_targets(days)
+    return jsonify({
+        "status": "success",
+        "removed_files": removed,
+        "removed_targets": removed_targets,
+        "days_retained": days,
+    }), 200
+
+
+@replay_bp.route("/api/replay/compact", methods=["POST"])
+@check_session_validity
+def api_replay_compact():
+    """
+    Fold a recorded day's append-only part files into a single Parquet file.
+    Intended for end-of-day housekeeping; safe on a live day.
+    """
+    data = request.get_json(silent=True) or {}
+    date_str = data.get("date")
+    symbols = data.get("symbols")
+
+    entries = list_available(date_str)
+    if symbols:
+        wanted = {str(s).upper() for s in symbols}
+        entries = [e for e in entries if e["symbol"] in wanted]
+
+    compacted = []
+    for entry in entries:
+        try:
+            rows = compact_day(entry["symbol"], entry["date"])
+        except Exception:
+            logger.exception(f"[api_replay_compact] Failed to compact {entry['symbol']} {entry['date']}")
+            continue
+        if rows >= 0:
+            compacted.append({"symbol": entry["symbol"], "date": entry["date"], "rows": rows})
+
+    return jsonify({"status": "success", "compacted": compacted, "count": len(compacted)}), 200
