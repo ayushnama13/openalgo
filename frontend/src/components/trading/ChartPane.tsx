@@ -1,4 +1,4 @@
-import { ChevronDown, RefreshCw, Search } from 'lucide-react'
+import { ChevronDown, Layers, RefreshCw, Search } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
@@ -23,6 +23,7 @@ import {
 import { cn } from '@/lib/utils'
 import { useThemeStore } from '@/stores/themeStore'
 import { showToast } from '@/utils/toast'
+import { Depth20Panel } from './Depth20Panel'
 import { DrawingStyleBar } from './DrawingStyleBar'
 import { DrawingTextDialog, type TextRequest } from './DrawingTextDialog'
 import { IndicatorSettingsDialog } from './IndicatorSettingsDialog'
@@ -187,6 +188,7 @@ export function ChartPane({
   const [drawSel, setDrawSel] = useState<DrawSelection | null>(null)
   const [indSettings, setIndSettings] = useState<IndicatorSettingsRequest | null>(null)
   const [textReq, setTextReq] = useState<TextRequest | null>(null)
+  const [showDepth, setShowDepth] = useState(false)
 
   // right-click menu: order entry, then the view actions
   const [ctx, setCtx] = useState<{ x: number; y: number; items: CtxItem[] } | null>(null)
@@ -579,6 +581,18 @@ export function ChartPane({
           </DropdownMenuContent>
         </DropdownMenu>
 
+        {/* 20-Level Depth button */}
+        <Button
+          variant={showDepth ? 'secondary' : 'outline'}
+          size="sm"
+          className="h-8 shrink-0 gap-1 font-medium"
+          onClick={() => setShowDepth((v) => !v)}
+          title="Toggle 20-level Market Depth"
+        >
+          <Layers className="h-4 w-4 text-primary" />
+          <span className="hidden sm:inline">Depth</span>
+        </Button>
+
         {/* Right side: connection LED + actions */}
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
           <span
@@ -638,6 +652,18 @@ export function ChartPane({
             <span className="text-[10px] text-muted-foreground">{lotInfoText(sym, qty)}</span>
           )}
         </div>
+
+        {showDepth && (
+          <div className="absolute right-3 top-3 z-30 w-80 max-w-[calc(100%-1.5rem)]">
+            <Depth20Panel
+              symbol={sym?.symbol ?? 'RELIANCE'}
+              exchange={sym?.exchange ?? 'NSE'}
+              apiKey={apiKey}
+              wsUrl={wsUrl}
+              onClose={() => setShowDepth(false)}
+            />
+          </div>
+        )}
         <div
           ref={chartRef}
           className="absolute inset-0"

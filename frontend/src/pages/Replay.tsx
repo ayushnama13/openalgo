@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { Navbar } from '@/components/layout/Navbar'
 import { ChartPane } from '@/components/trading/ChartPane'
+import { Depth20Panel } from '@/components/trading/Depth20Panel'
 import { DrawingRail } from '@/components/trading/DrawingRail'
 import { RightWatchlist } from '@/components/trading/RightWatchlist'
 import { Badge } from '@/components/ui/badge'
@@ -914,74 +915,18 @@ export default function Replay() {
             {/* Floating Market Depth / DOM Widget */}
             {showDepthDOM && (
               <div
-                className="absolute z-30 w-64 rounded-lg border bg-background/95 p-3 shadow-xl backdrop-blur-sm space-y-2 text-xs font-mono select-none"
+                className="absolute z-30 w-80 max-w-[calc(100%-1.5rem)] select-none"
                 style={{
                   left: `${depthPos.x}px`,
                   top: `${depthPos.y}px`,
-                  cursor: isDraggingDepth ? 'grabbing' : 'default',
                 }}
               >
-                <div
-                  className="flex items-center justify-between border-b pb-1.5 font-sans cursor-grab active:cursor-grabbing"
-                  onMouseDown={(e) => {
-                    setIsDraggingDepth(true)
-                    dragRef.current = {
-                      startX: e.clientX,
-                      startY: e.clientY,
-                      initialX: depthPos.x,
-                      initialY: depthPos.y,
-                    }
-                  }}
-                >
-                  <div className="font-bold flex items-center gap-1.5 text-xs pointer-events-none">
-                    <Eye className="h-3.5 w-3.5 text-primary" /> Market Depth ({selectedSymbol}) ⠿
-                  </div>
-                  <Button variant="ghost" size="sm" className="h-5 w-5 p-0" onClick={() => setShowDepthDOM(false)}>
-                    ✕
-                  </Button>
-                </div>
-
-                {symbolState ? (
-                  <div className="space-y-2">
-                    <div className="grid grid-cols-3 gap-1 text-center border p-1 rounded bg-muted/20 text-[11px]">
-                      <div>
-                        <div className="text-[9px] text-muted-foreground">LTP</div>
-                        <div className="font-bold">{symbolState.ltp ?? '—'}</div>
-                      </div>
-                      <div>
-                        <div className="text-[9px] text-muted-foreground">Vol</div>
-                        <div>{symbolState.volume ?? '—'}</div>
-                      </div>
-                      <div>
-                        <div className="text-[9px] text-muted-foreground">OI</div>
-                        <div>{symbolState.oi ?? '—'}</div>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-1.5 text-[10px]">
-                      <div className="border rounded p-1 space-y-0.5 bg-emerald-500/5 max-h-48 overflow-y-auto">
-                        <div className="font-bold text-emerald-500 border-b pb-0.5 sticky top-0 bg-background">Bids (20 Lvl)</div>
-                        {Array.from({ length: 20 }, (_, i) => i + 1).map((i) => (
-                          <div key={i} className="flex justify-between">
-                            <span>{(symbolState as any)[`bid_${i}`] ?? '—'}</span>
-                            <span className="text-muted-foreground">{(symbolState as any)[`bid_qty_${i}`] ?? ''}</span>
-                          </div>
-                        ))}
-                      </div>
-                      <div className="border rounded p-1 space-y-0.5 bg-rose-500/5 max-h-48 overflow-y-auto">
-                        <div className="font-bold text-rose-500 border-b pb-0.5 sticky top-0 bg-background">Asks (20 Lvl)</div>
-                        {Array.from({ length: 20 }, (_, i) => i + 1).map((i) => (
-                          <div key={i} className="flex justify-between">
-                            <span>{(symbolState as any)[`ask_${i}`] ?? '—'}</span>
-                            <span className="text-muted-foreground">{(symbolState as any)[`ask_qty_${i}`] ?? ''}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="text-muted-foreground text-center py-4 font-sans">No depth data</p>
-                )}
+                <Depth20Panel
+                  symbol={selectedSymbol}
+                  exchange="NSE"
+                  replayData={symbolState}
+                  onClose={() => setShowDepthDOM(false)}
+                />
               </div>
             )}
           </div>
