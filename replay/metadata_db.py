@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 
 import pytz
-from sqlalchemy import Column, DateTime, Float, Integer, String, Text
+from sqlalchemy import Column, DateTime, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from database.engine_factory import create_db_engine
@@ -42,6 +42,10 @@ class WatchlistSymbol(Base):
 
 class SymbolDateIndex(Base):
     __tablename__ = "replay_symbol_date_index"
+    __table_args__ = (
+        UniqueConstraint("symbol", "date", name="uq_replay_index_symbol_date"),
+        Index("ix_replay_index_date", "date"),
+    )
     id = Column(Integer, primary_key=True, autoincrement=True)
     symbol = Column(String(50), nullable=False)
     date = Column(String(20), nullable=False)  # YYYY-MM-DD
@@ -56,6 +60,13 @@ class RecordingTarget(Base):
     makes this safe to read/write from either process.
     """
     __tablename__ = "replay_recording_targets"
+    __table_args__ = (
+        # Two processes arm targets (the blueprint and the proxy's daily
+        # re-arm), so uniqueness has to be enforced by the DB, not by a
+        # read-then-insert check that races.
+        UniqueConstraint("symbol", "exchange", "date", name="uq_replay_target"),
+        Index("ix_replay_target_date", "date"),
+    )
     id = Column(Integer, primary_key=True, autoincrement=True)
     symbol = Column(String(50), nullable=False)
     exchange = Column(String(20), nullable=False)
@@ -71,6 +82,9 @@ class AutoRecordSymbol(Base):
     user does not have to re-push Start Recording every morning.
     """
     __tablename__ = "replay_auto_record_symbols"
+    __table_args__ = (
+        UniqueConstraint("symbol", "exchange", name="uq_replay_auto_record"),
+    )
     id = Column(Integer, primary_key=True, autoincrement=True)
     symbol = Column(String(50), nullable=False)
     exchange = Column(String(20), nullable=False)

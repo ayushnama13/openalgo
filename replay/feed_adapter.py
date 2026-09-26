@@ -9,6 +9,7 @@ from datetime import datetime
 
 from replay.clock import clock_instance
 from replay.dal import get_state
+from replay.storage import MAX_DEPTH_LEVELS
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -54,13 +55,18 @@ class ReplayFeedAdapter:
                 depth_data = {
                     "symbol": symbol,
                     "timestamp": state.get("timestamp"),
+                    # Emit every level the tape holds. The recorder captures up
+                    # to 20 and the fill simulator walks 20, so truncating to 5
+                    # here made the adapter disagree with both.
                     "bids": [
                         {"price": state.get(f"bid_{i}"), "quantity": state.get(f"bid_qty_{i}")}
-                        for i in range(1, 6)
+                        for i in range(1, MAX_DEPTH_LEVELS + 1)
+                        if state.get(f"bid_{i}") is not None
                     ],
                     "asks": [
                         {"price": state.get(f"ask_{i}"), "quantity": state.get(f"ask_qty_{i}")}
-                        for i in range(1, 6)
+                        for i in range(1, MAX_DEPTH_LEVELS + 1)
+                        if state.get(f"ask_{i}") is not None
                     ],
                 }
                 for cb in list(self._depth_callbacks):

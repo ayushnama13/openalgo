@@ -160,6 +160,8 @@ interface FillResult {
   unfilled_qty?: number
   slippage?: number
   reason?: string
+  /** False when the tape held no order book at that instant and the fill fell back to LTP. */
+  depth_used?: boolean
 }
 
 interface DemoTrade {
@@ -510,7 +512,7 @@ export default function Replay() {
       })
       if (res.ok) {
         const data: FillResult = await res.json()
-        if (data.status === 'filled') {
+        if (data.status === 'filled' || data.status === 'partial') {
           const newTrade: DemoTrade = {
             id: Math.random().toString(36).substring(2, 9),
             symbol: selectedSymbol,
@@ -522,7 +524,10 @@ export default function Replay() {
             pnl: 0,
           }
           setDemoTrades((prev) => [newTrade, ...prev])
-          showToast.success(`Demo ${action} filled @ ${data.fill_price}`)
+          const qtyNote =
+            data.status === 'partial' ? ` (partial ${data.filled_qty}, ${data.unfilled_qty} unfilled)` : ''
+          const depthNote = data.depth_used === false ? ' - no depth on tape, LTP used' : ''
+          showToast.success(`Demo ${action} filled @ ${data.fill_price}${qtyNote}${depthNote}`)
           if (autoPauseOnFill && clock?.is_playing) {
             handleControl('pause')
           }

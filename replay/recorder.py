@@ -2,38 +2,76 @@
 openalgo/replay/recorder.py
 ───────────────────────────
 Records live market ticks and depth into Parquet storage for replay.
+
+Recording is tick-driven: `maybe_record_tick` is called from the websocket_proxy
+tick loop for every live tick and buffers the ones belonging to an armed symbol.
+A single shared flusher thread drains every buffer to disk — never one thread per
+symbol (see `.claude/rules/backend.md`: threads are shared module-level singletons).
 """
 
+import os
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
+from datetime import time as dtime
 
 import pytz
 
-from replay.storage import save_events
+from replay.dal import (
+    find_nearest_nifty_expiry,
+    nearest_thursday_expiry,
+    nifty_option_symbols,
+)
+from replay.storage import MAX_DEPTH_LEVELS, save_events
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
 IST = pytz.timezone("Asia/Kolkata")
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 _active_recorders: dict[str, dict] = {}
 
 # Cache of RecordingTarget rows so the per-tick hot path (websocket_proxy's
 # zmq_listener, potentially a different process than the Flask blueprint that
 # writes targets) doesn't hit SQLite on every tick.
 _targets_cache: dict = {"loaded_at": 0.0, "date": None, "keys": set()}
+_targets_cache_lock = threading.Lock()
 _TARGETS_CACHE_TTL_SECONDS = 2.0
+
+# Flush interval. The old 0.5s was paired with a full-file rewrite per flush;
+# storage is append-only now, but a larger window still means fewer, fatter
+# part files, which read back faster.
+FLUSH_INTERVAL_SECONDS = float(os.getenv("REPLAY_FLUSH_INTERVAL", "3.0"))
+
+# Recording is gated to the trading session so an idle overnight feed cannot
+# pad the tape with stale repeats. Widened slightly on both sides to catch
+# pre-open and the post-close settlement prints.
+SESSION_START = dtime(9, 0)
+SESSION_END = dtime(15, 45)
+RECORD_ALL_HOURS = os.getenv("REPLAY_RECORD_ALL_HOURS", "false").lower() == "true"
+
+
+def is_market_hours(now: datetime | None = None) -> bool:
+    """True during the IST trading session on a weekday."""
+    if RECORD_ALL_HOURS:
+        return True
+    now = now or datetime.now(IST)
+    if now.weekday() >= 5:  # Saturday, Sunday
+        return False
+    return SESSION_START <= now.time() <= SESSION_END
 
 
 class ReplayRecorder:
+    """
+    Per symbol-day buffer. Owns no thread: `_flusher_loop` drains it.
+    """
+
     def __init__(self, symbol: str, exchange: str, date_str: str | None = None):
         self.symbol = symbol.upper()
         self.exchange = exchange.upper()
         self.date_str = date_str or datetime.now(IST).strftime("%Y-%m-%d")
         self.buffer: list[dict] = []
         self.running = False
-        self.thread: threading.Thread | None = None
         self._buf_lock = threading.Lock()
 
     def start(self):
@@ -41,153 +79,149 @@ class ReplayRecorder:
             if self.running:
                 return
             self.running = True
-        self.thread = threading.Thread(target=self._flush_loop, daemon=True, name=f"ReplayRecorder-{self.symbol}")
-        self.thread.start()
-        logger.info(f"[ReplayRecorder] Started recording {self.exchange}:{self.symbol} for date {self.date_str}")
+        _ensure_flusher_running()
+        logger.info(
+            f"[ReplayRecorder] Started recording {self.exchange}:{self.symbol} for date {self.date_str}"
+        )
 
     def push_event(self, event_dict: dict):
-        """
-        Push a normalized tick/depth event into the buffer.
-        Expected keys: timestamp, ltp, bid_1..5, bid_qty_1..5, ask_1..5, ask_qty_1..5, volume, oi
-        """
+        """Push a normalized tick/depth event into the buffer."""
         with self._buf_lock:
             self.buffer.append(event_dict)
-
-    def _flush_loop(self):
-        while self.running:
-            time.sleep(0.5)
-            self.flush()
 
     def flush(self):
         with self._buf_lock:
             if not self.buffer:
                 return
-            events_to_save = list(self.buffer)
-            self.buffer.clear()
+            events_to_save = self.buffer
+            self.buffer = []
         try:
             save_events(self.symbol, self.date_str, events_to_save)
-        except Exception as exc:
-            logger.error(f"[ReplayRecorder] Error flushing events for {self.symbol}: {exc}")
+        except Exception:
+            logger.exception(f"[ReplayRecorder] Error flushing events for {self.symbol}")
 
     def stop(self):
         with self._buf_lock:
             self.running = False
-        if self.thread:
-            self.thread.join(timeout=2.0)
         self.flush()
         logger.info(f"[ReplayRecorder] Stopped recording {self.exchange}:{self.symbol}")
 
 
-def _nearest_thursday_expiry(target_dt: datetime) -> str:
-    """Nearest Thursday on/after target_dt, formatted like NSE weekly expiries (e.g. 21AUG26)."""
-    days_ahead = (3 - target_dt.weekday()) % 7  # Monday=0 .. Thursday=3 .. Sunday=6
-    expiry_dt = target_dt + timedelta(days=days_ahead)
-    return expiry_dt.strftime("%d%b%y").upper()
+# ── Single shared flusher thread ────────────────────────────────────────
+# One thread drains every recorder. The previous design started a thread per
+# symbol, so an armed NIFTY chain meant ~90 threads each waking twice a second.
+
+_flusher_thread: threading.Thread | None = None
+_flusher_lock = threading.Lock()
+_flusher_stop = threading.Event()
+
+
+def _flusher_loop():
+    while not _flusher_stop.is_set():
+        _flusher_stop.wait(FLUSH_INTERVAL_SECONDS)
+        if _flusher_stop.is_set():
+            break
+        try:
+            with _lock:
+                recorders = [info["recorder"] for info in _active_recorders.values()]
+            for rec in recorders:
+                try:
+                    rec.flush()
+                except Exception:
+                    logger.exception(f"[ReplayRecorder] Flush failed for {rec.symbol}")
+        except Exception:
+            logger.exception("[ReplayRecorder] Flusher loop error")
+
+
+def _ensure_flusher_running():
+    global _flusher_thread
+    with _flusher_lock:
+        if _flusher_thread is not None and _flusher_thread.is_alive():
+            return
+        _flusher_stop.clear()
+        _flusher_thread = threading.Thread(
+            target=_flusher_loop, daemon=True, name="ReplayRecorderFlusher"
+        )
+        _flusher_thread.start()
+
+
+def stop_flusher():
+    """Stop the shared flusher thread after draining every buffer."""
+    global _flusher_thread
+    _flusher_stop.set()
+    with _flusher_lock:
+        thread = _flusher_thread
+        _flusher_thread = None
+    if thread:
+        thread.join(timeout=FLUSH_INTERVAL_SECONDS + 2.0)
+    with _lock:
+        recorders = [info["recorder"] for info in _active_recorders.values()]
+    for rec in recorders:
+        try:
+            rec.flush()
+        except Exception:
+            logger.exception(f"[ReplayRecorder] Final flush failed for {rec.symbol}")
 
 
 def expand_live_nifty_options(symbols: list[dict], date_str: str) -> list[dict]:
     """
-    If 'NIFTY' is in symbols, automatically find the Nifty ATM strike from live quote,
-    find the nearest active option expiry from database, and construct option symbols
-    for all strikes within +-500 points (inclusive, step 50) and append them as NFO contracts.
+    If 'NIFTY' is in symbols, resolve the live ATM strike and the nearest listed
+    expiry, then append the surrounding option contracts as NFO entries.
     """
     expanded = list(symbols)
-    has_nifty = any(item["symbol"].upper() == "NIFTY" for item in symbols)
-    if not has_nifty:
+    if not any(item["symbol"].upper() == "NIFTY" for item in symbols):
         return expanded
 
-    # Step 1: Detect live Nifty spot price to determine ATM
+    try:
+        target_dt = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        logger.error(f"[expand_live_nifty_options] Invalid date: {date_str}")
+        return expanded
+
     atm_strike = 24000.0  # fallback
     try:
         from services.quotes_service import get_quotes
         quote = get_quotes("NIFTY", "NSE_INDEX")
-        if quote and "ltp" in quote:
-            first_ltp = quote["ltp"]
-            if first_ltp > 0:
-                atm_strike = round(first_ltp / 50.0) * 50
-    except Exception as exc:
-        logger.error(f"[expand_live_nifty_options] Error fetching Nifty live quote: {exc}")
+        ltp = (quote or {}).get("ltp")
+        if ltp and float(ltp) > 0:
+            atm_strike = round(float(ltp) / 50.0) * 50
+    except Exception:
+        logger.exception("[expand_live_nifty_options] Error fetching Nifty live quote")
 
-    # Step 2: Query database for nearest option expiry on or after current date
-    import re
+    expiry_str = find_nearest_nifty_expiry(target_dt) or nearest_thursday_expiry(target_dt)
 
-    from database.symbol import SymToken
-    expiry_str = None
-    try:
-        target_dt = datetime.strptime(date_str, "%Y-%m-%d")
-        q = SymToken.query.filter(SymToken.symbol.like('NIFTY%'), SymToken.instrumenttype == 'CE').all()
-        n_opt = [s for s in q if re.match(r'^NIFTY\d{2}[A-Z]{3}\d{2}\d+CE$', s.symbol)]
-
-        min_diff = None
-        for row in n_opt:
-            if not row.expiry:
-                continue
-            try:
-                exp_dt = datetime.strptime(row.expiry.upper(), "%d-%b-%y")
-                diff = (exp_dt - target_dt).days
-                if diff >= 0:
-                    if min_diff is None or diff < min_diff:
-                        min_diff = diff
-                        expiry_str = row.expiry.upper().replace("-", "")
-            except Exception:
-                continue
-    except Exception as exc:
-        logger.error(f"[expand_live_nifty_options] Error finding nearest expiry: {exc}")
-
-    if not expiry_str:
-        expiry_str = _nearest_thursday_expiry(target_dt)
-
-    # Step 3: Generate CE/PE symbols ±500 points
-    strikes = [atm_strike + i for i in range(-500, 501, 50)]
-    for strike in strikes:
-        ce_sym = f"NIFTY{expiry_str}{int(strike)}CE"
-        pe_sym = f"NIFTY{expiry_str}{int(strike)}PE"
-
-        # Add to expanded symbols
-        if not any(item["symbol"].upper() == ce_sym for item in expanded):
-            expanded.append({"symbol": ce_sym, "exchange": "NFO"})
-        if not any(item["symbol"].upper() == pe_sym for item in expanded):
-            expanded.append({"symbol": pe_sym, "exchange": "NFO"})
-
+    seen = {item["symbol"].upper() for item in expanded}
+    for sym in nifty_option_symbols(atm_strike, expiry_str):
+        if sym not in seen:
+            expanded.append({"symbol": sym, "exchange": "NFO"})
+            seen.add(sym)
     return expanded
-
-
-def start_session_recording(symbols: list[dict], date_str: str | None = None) -> dict:
-    """
-    Start recording a watchlist of symbols.
-    symbols: list of {"symbol": str, "exchange": str}
-    """
-    d_str = date_str or datetime.now(IST).strftime("%Y-%m-%d")
-    expanded_symbols = expand_live_nifty_options(symbols, d_str)
-    with _lock:
-        for item in expanded_symbols:
-            sym = item["symbol"].upper()
-            ex = item["exchange"].upper()
-            key = f"{ex}:{sym}"
-            if key not in _active_recorders:
-                rec = ReplayRecorder(sym, ex, d_str)
-                rec.start()
-                _active_recorders[key] = {"recorder": rec, "date": d_str}
-    return {"status": "started", "count": len(expanded_symbols), "date": d_str}
-
-
-def stop_session_recording() -> dict:
-    with _lock:
-        for _key, info in _active_recorders.items():
-            try:
-                info["recorder"].stop()
-            except Exception:
-                pass
-        _active_recorders.clear()
-    return {"status": "stopped"}
 
 
 def push_live_event_to_recorders(symbol: str, exchange: str, event_dict: dict):
     key = f"{exchange.upper()}:{symbol.upper()}"
     with _lock:
         rec_info = _active_recorders.get(key)
-        if rec_info:
-            rec_info["recorder"].push_event(event_dict)
+    if rec_info:
+        rec_info["recorder"].push_event(event_dict)
+
+
+def _stop_recorder(key: str):
+    with _lock:
+        info = _active_recorders.pop(key, None)
+    if info:
+        try:
+            info["recorder"].stop()
+        except Exception:
+            logger.exception(f"[ReplayRecorder] Error stopping recorder for {key}")
+
+
+def stop_session_recording() -> dict:
+    with _lock:
+        keys = list(_active_recorders)
+    for key in keys:
+        _stop_recorder(key)
+    return {"status": "stopped"}
 
 
 # ── Cross-process recording targets ─────────────────────────────────────
@@ -202,6 +236,8 @@ def add_recording_targets(symbols: list[dict], date_str: str | None = None) -> d
     Register a watchlist of symbols to record for date_str (today by default).
     symbols: list of {"symbol": str, "exchange": str}
     """
+    from sqlalchemy.exc import IntegrityError
+
     from replay.metadata_db import RecordingTarget, SessionLocal
 
     d_str = date_str or datetime.now(IST).strftime("%Y-%m-%d")
@@ -209,15 +245,27 @@ def add_recording_targets(symbols: list[dict], date_str: str | None = None) -> d
 
     db = SessionLocal()
     try:
+        existing = {
+            f"{r.exchange}:{r.symbol}"
+            for r in db.query(RecordingTarget).filter_by(date=d_str).all()
+        }
         added = 0
         for item in expanded_symbols:
             sym = item["symbol"].upper()
             ex = item["exchange"].upper()
-            exists = db.query(RecordingTarget).filter_by(symbol=sym, exchange=ex, date=d_str).first()
-            if not exists:
-                db.add(RecordingTarget(symbol=sym, exchange=ex, date=d_str))
-                added += 1
-        db.commit()
+            key = f"{ex}:{sym}"
+            if key in existing:
+                continue
+            db.add(RecordingTarget(symbol=sym, exchange=ex, date=d_str))
+            existing.add(key)
+            added += 1
+        try:
+            db.commit()
+        except IntegrityError:
+            # The unique index caught a row another process inserted between our
+            # read and our commit. The end state is the same either way.
+            db.rollback()
+            added = 0
     finally:
         db.close()
 
@@ -256,13 +304,7 @@ def remove_recording_targets(symbols: list[dict] | None = None, date_str: str | 
         _targets_cache["loaded_at"] = 0.0
 
     for key in removed_keys:
-        with _lock:
-            info = _active_recorders.pop(key, None)
-        if info:
-            try:
-                info["recorder"].stop()
-            except Exception:
-                logger.exception(f"[ReplayRecorder] Error stopping recorder for {key}")
+        _stop_recorder(key)
 
     return {"status": "stopped", "count": len(removed_keys), "date": d_str}
 
@@ -279,7 +321,30 @@ def list_recording_targets(date_str: str | None = None) -> list[dict]:
         db.close()
 
 
-_targets_cache_lock = threading.Lock()
+def prune_recording_targets(days_to_keep: int = 7) -> int:
+    """
+    Drop RecordingTarget rows for past dates. They are re-armed daily from the
+    auto-record list, so without this the table grows without bound and every
+    date-filtered read scans more dead rows.
+    """
+    from datetime import timedelta
+
+    from replay.metadata_db import RecordingTarget, SessionLocal
+
+    cutoff = (datetime.now(IST).date() - timedelta(days=days_to_keep)).strftime("%Y-%m-%d")
+    db = SessionLocal()
+    try:
+        removed = db.query(RecordingTarget).filter(RecordingTarget.date < cutoff).delete(
+            synchronize_session=False
+        )
+        db.commit()
+        return removed or 0
+    except Exception:
+        db.rollback()
+        logger.exception("[ReplayRecorder] Error pruning old recording targets")
+        return 0
+    finally:
+        db.close()
 
 
 def _active_target_keys(date_str: str) -> set:
@@ -292,8 +357,12 @@ def _active_target_keys(date_str: str) -> set:
 
     db = SessionLocal()
     try:
-        rows = db.query(RecordingTarget).filter_by(date=date_str).all()
-        keys = {f"{r.exchange}:{r.symbol}" for r in rows}
+        rows = (
+            db.query(RecordingTarget.symbol, RecordingTarget.exchange)
+            .filter_by(date=date_str)
+            .all()
+        )
+        keys = {f"{ex}:{sym}" for sym, ex in rows}
     finally:
         db.close()
 
@@ -313,19 +382,32 @@ _auto_ensure_lock = threading.Lock()
 
 def add_auto_record_symbols(symbols: list[dict]) -> dict:
     """symbols: list of {"symbol": str, "exchange": str}. Persists forever."""
+    from sqlalchemy.exc import IntegrityError
+
     from replay.metadata_db import AutoRecordSymbol, SessionLocal
 
     db = SessionLocal()
     try:
+        existing = {
+            f"{r.exchange}:{r.symbol}" for r in db.query(AutoRecordSymbol).all()
+        }
         added = 0
         for item in symbols:
-            sym = item["symbol"].upper()
-            ex = item["exchange"].upper()
-            exists = db.query(AutoRecordSymbol).filter_by(symbol=sym, exchange=ex).first()
-            if not exists:
-                db.add(AutoRecordSymbol(symbol=sym, exchange=ex))
-                added += 1
-        db.commit()
+            sym = str(item.get("symbol", "")).upper().strip()
+            ex = str(item.get("exchange", "")).upper().strip()
+            if not sym or not ex:
+                continue
+            key = f"{ex}:{sym}"
+            if key in existing:
+                continue
+            db.add(AutoRecordSymbol(symbol=sym, exchange=ex))
+            existing.add(key)
+            added += 1
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            added = 0
     finally:
         db.close()
 
@@ -354,6 +436,14 @@ def remove_auto_record_symbols(symbols: list[dict] | None = None) -> dict:
     finally:
         db.close()
 
+    # Removing from the persistent list also disarms today, otherwise the symbol
+    # keeps recording until midnight.
+    if removed:
+        try:
+            remove_recording_targets(symbols)
+        except Exception:
+            logger.exception("[ReplayRecorder] Error disarming removed auto-record symbols")
+
     return {"status": "ok", "removed": removed}
 
 
@@ -362,7 +452,9 @@ def list_auto_record_symbols() -> list[dict]:
 
     db = SessionLocal()
     try:
-        rows = db.query(AutoRecordSymbol).all()
+        rows = db.query(AutoRecordSymbol).order_by(
+            AutoRecordSymbol.exchange, AutoRecordSymbol.symbol
+        ).all()
         return [{"symbol": r.symbol, "exchange": r.exchange} for r in rows]
     finally:
         db.close()
@@ -370,10 +462,14 @@ def list_auto_record_symbols() -> list[dict]:
 
 def ensure_auto_targets_for_today() -> None:
     """
-    Idempotent, self-throttled to once per calendar date: arms a
-    RecordingTarget row for today for every symbol on the persistent
-    auto-record list. Called from the proxy's recording-sync loop, so it
-    must never raise and must be cheap to call repeatedly.
+    Idempotent, self-throttled to once per calendar date: reconciles today's
+    RecordingTarget rows against the persistent auto-record list, and prunes
+    stale rows from past dates. Called from the proxy's recording-sync loop, so
+    it must never raise and must be cheap to call repeatedly.
+
+    Reconcile, not just add. The auto-record list is the only arming mechanism,
+    so a target with no entry behind it is a leftover that keeps consuming a
+    broker subscription slot for a symbol nobody asked to record.
     """
     date_str = datetime.now(IST).strftime("%Y-%m-%d")
     with _auto_ensure_lock:
@@ -385,6 +481,26 @@ def ensure_auto_targets_for_today() -> None:
         symbols = list_auto_record_symbols()
         if symbols:
             add_recording_targets(symbols, date_str)
+
+        # Drop anything armed today that the auto-record list no longer covers.
+        # The list is compared post-expansion, since arming NIFTY legitimately
+        # creates option-chain targets that are not themselves list entries.
+        wanted = {
+            f"{item['exchange'].upper()}:{item['symbol'].upper()}"
+            for item in (expand_live_nifty_options(symbols, date_str) if symbols else [])
+        }
+        stale = [
+            {"symbol": row["symbol"], "exchange": row["exchange"]}
+            for row in list_recording_targets(date_str)
+            if f"{row['exchange']}:{row['symbol']}" not in wanted
+        ]
+        if stale:
+            logger.info(
+                f"[ReplayRecorder] Disarming {len(stale)} target(s) no longer on the auto-record list"
+            )
+            remove_recording_targets(stale, date_str)
+
+        prune_recording_targets()
     except Exception:
         logger.exception("[ReplayRecorder] Error arming auto-record targets for today")
         with _auto_ensure_lock:
@@ -400,7 +516,7 @@ def _normalize_tick_event(market_data: dict) -> dict | None:
     if ts_ms:
         try:
             ts = datetime.fromtimestamp(int(ts_ms) / 1000, tz=IST)
-        except Exception:
+        except (TypeError, ValueError, OSError, OverflowError):
             ts = datetime.now(IST)
     else:
         ts = datetime.now(IST)
@@ -415,7 +531,13 @@ def _normalize_tick_event(market_data: dict) -> dict | None:
     depth = market_data.get("depth") or {}
     buys = depth.get("buy") or []
     sells = depth.get("sell") or []
-    for i in range(20):
+
+    # Emit only the levels the broker actually sent. Writing a fixed 20 levels
+    # for a 5-level feed quadrupled file size with all-null columns; the reader
+    # aligns frames by column name, so parts with different level counts merge
+    # cleanly.
+    levels = min(MAX_DEPTH_LEVELS, max(len(buys), len(sells)))
+    for i in range(levels):
         b = buys[i] if i < len(buys) else {}
         s = sells[i] if i < len(sells) else {}
         event[f"bid_{i + 1}"] = b.get("price")
@@ -430,31 +552,41 @@ def maybe_record_tick(symbol: str, exchange: str, market_data: dict):
     """
     Called from the websocket_proxy tick loop for every live tick. Cheap
     no-op unless this symbol/exchange has an active RecordingTarget for
-    today; reconciles start/stop against the target list as it goes.
+    today; reconciles start/stop/date-rollover against the target list as it goes.
     """
-    date_str = datetime.now(IST).strftime("%Y-%m-%d")
+    now = datetime.now(IST)
+    date_str = now.strftime("%Y-%m-%d")
     key = f"{exchange.upper()}:{symbol.upper()}"
-    active_keys = _active_target_keys(date_str)
 
     with _lock:
-        is_recording = key in _active_recorders
+        info = _active_recorders.get(key)
 
-    if key not in active_keys:
-        if is_recording:
-            with _lock:
-                info = _active_recorders.pop(key, None)
-            if info:
-                try:
-                    info["recorder"].stop()
-                except Exception:
-                    logger.exception(f"[ReplayRecorder] Error stopping recorder for {key}")
+    # Roll over at midnight. Without this the recorder keeps its construction-time
+    # date forever and day two of a session appends into day one's file.
+    if info is not None and info["date"] != date_str:
+        _stop_recorder(key)
+        info = None
+
+    if not is_market_hours(now):
+        if info is not None:
+            _stop_recorder(key)
         return
 
-    if not is_recording:
+    if key not in _active_target_keys(date_str):
+        if info is not None:
+            _stop_recorder(key)
+        return
+
+    if info is None:
         rec = ReplayRecorder(symbol, exchange, date_str)
         rec.start()
         with _lock:
-            _active_recorders[key] = {"recorder": rec, "date": date_str}
+            # Another thread may have created it while we were outside the lock.
+            existing = _active_recorders.get(key)
+            if existing is None:
+                _active_recorders[key] = {"recorder": rec, "date": date_str}
+            else:
+                rec.stop()
 
     event = _normalize_tick_event(market_data)
     if event is not None:
