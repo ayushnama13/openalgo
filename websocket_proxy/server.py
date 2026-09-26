@@ -428,12 +428,19 @@ class WebSocketProxy:
         # key -> the (mode, depth_level) that actually worked, so the matching
         # unsubscribe uses the same mode the subscription was made with.
         subscribed: dict[str, tuple] = {}
-        # Keys whose subscribe has already failed on every attempt, with the
-        # number of consecutive failures. Prevents a permanently invalid symbol
-        # from re-logging every 10 seconds forever.
-        failed: dict[str, int] = {}
+        # Keys whose subscribe failed, as {key: [failure_count, next_eligible_tick]}.
+        # A target that can never resolve -- NIFTY armed on NSE instead of
+        # NSE_INDEX, a delisted contract -- was retried every 10 seconds
+        # indefinitely, hammering the broker's token-lookup endpoint until the
+        # whole instance got rate limited. Back off exponentially (1, 2, 4, ...
+        # ticks, capped) so a permanently bad target costs almost nothing while
+        # a transient failure at startup still recovers on its own.
+        failed: dict[str, list[int]] = {}
+        tick = 0
+        max_backoff_ticks = 360  # 10s tick -> retry at most hourly once settled
 
         while self.running:
+            tick += 1
             try:
                 ensure_auto_targets_for_today()
                 targets = list_recording_targets()
@@ -445,20 +452,35 @@ class WebSocketProxy:
                 for key, t in want.items():
                     if key in subscribed:
                         continue
-                    if failed.get(key, 0) >= 5:
+                    state = failed.get(key)
+                    if state is not None and tick < state[1]:
                         continue
+
                     attempt = self._subscribe_recording_target(t["symbol"], t["exchange"])
                     if attempt is not None:
+                        if key in failed:
+                            logger.info(
+                                f"[ReplayRecorder] Recovered recording target {t['exchange']}:{t['symbol']}"
+                            )
                         subscribed[key] = attempt
                         failed.pop(key, None)
                     else:
-                        failures = failed.get(key, 0) + 1
-                        failed[key] = failures
-                        # Log the first failure loudly, then back off to debug.
+                        failures = (state[0] if state else 0) + 1
+                        backoff = min(2 ** (failures - 1), max_backoff_ticks)
+                        failed[key] = [failures, tick + backoff]
+                        # Log the first failure loudly, then stay quiet - the
+                        # backoff is what keeps this from flooding the log.
                         if failures == 1:
                             logger.warning(
                                 f"[ReplayRecorder] Could not subscribe recording target "
-                                f"{t['exchange']}:{t['symbol']} - it will not be recorded"
+                                f"{t['exchange']}:{t['symbol']} - it will not be recorded. "
+                                f"Check that the exchange is right (indices are NSE_INDEX, not NSE)."
+                            )
+                        else:
+                            logger.debug(
+                                f"[ReplayRecorder] Subscribe still failing for "
+                                f"{t['exchange']}:{t['symbol']} (attempt {failures}), "
+                                f"next retry in {backoff} tick(s)"
                             )
 
                 for key in list(subscribed):
@@ -489,13 +511,19 @@ class WebSocketProxy:
         Only Depth mode (3) carries the order book the recorder and the fill
         simulator need, but 20-level depth is broker- and exchange-specific -
         most NSE equity feeds top out at 5. Requesting 20 unconditionally meant
-        a broker that rejects it recorded nothing at all, silently. Try the
-        deepest book first, then 5 levels, then fall back to Quote (2) so at
-        least LTP and volume are captured.
+        a broker that rejects it recorded nothing at all, silently.
+
+        5 levels is the default rather than 20 because 20-level depth is a
+        scarce, globally-capped resource (Dhan allows 50 instruments in total
+        across the whole instance). A recording list of a few dozen option
+        contracts would consume the entire budget and starve the interactive
+        depth panel on /trading, which is what a person is actually looking at.
+        Set REPLAY_DEPTH_LEVEL=20 to prefer the deeper book anyway.
 
         Returns the (mode, depth_level) that succeeded, or None.
         """
-        attempts = ((3, 20), (3, 5), (2, None))
+        preferred = int(os.getenv("REPLAY_DEPTH_LEVEL", "5"))
+        attempts = ((3, 20), (3, 5), (2, None)) if preferred == 20 else ((3, 5), (2, None))
         for mode, depth_level in attempts:
             for _user_id, adapter in list(self.broker_adapters.items()):
                 try:
