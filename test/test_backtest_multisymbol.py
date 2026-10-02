@@ -240,3 +240,33 @@ def test_missing_lot_size_is_noted(monkeypatch):
     assert status == "completed", run.error_message
     assert any("lot size unknown" in n for n in json.loads(run.metrics_json)["notes"])
     db_session.remove()
+
+
+def test_analytics_and_chart_endpoints(monkeypatch, three_symbols):
+    """Bypass the session gate by calling the view functions inside a request context."""
+    from flask import Flask
+
+    import blueprints.backtest as bp
+
+    job_id, status, run = run_job(
+        strategy_code=DSL_ALWAYS_LONG, symbols=["NSE:AAA", "NSE:BBB"], max_positions=2,
+        sizing_type="fixed_qty", sizing_value=1,
+    )
+    assert status == "completed", run.error_message
+    db_session.remove()
+
+    app = Flask(__name__)
+    with app.test_request_context(f"/backtest/api/analytics/{job_id}"):
+        raw = bp.get_analytics.__wrapped__(job_id) if hasattr(bp.get_analytics, "__wrapped__") else None
+    assert raw is not None, "view must expose __wrapped__ to be testable without a session"
+    body = raw.get_json()
+    assert body["status"] == "success"
+    assert {r["symbol"] for r in body["trades"]["by_symbol"]} == {"AAA", "BBB"}
+    assert body["exposure"]["time_in_market_pct"] > 0
+    assert body["trades"]["excursion"] is not None
+
+    with app.test_request_context(f"/backtest/api/chart/{job_id}?symbol=NSE:AAA&max_bars=100"):
+        resp = bp.get_trade_chart.__wrapped__(job_id)
+    chart = resp.get_json()
+    assert chart["status"] == "success" and len(chart["candles"]) == 100
+    assert chart["total_trades"] == 1
