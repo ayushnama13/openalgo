@@ -28,11 +28,12 @@ from services.backtest_analytics import (
     generate_monthly_returns_heatmap,
     get_benchmark_comparison,
 )
-from services.backtest_fill_engine import (
-    is_mis_square_off_bar,
-    simulate_order_fill,
+from services.backtest_engine import calculate_position_qty  # noqa: F401 (re-exported)
+from services.strategy_sandbox import (
+    BacktestCancelled,
+    run_backtest_sandboxed,
+    run_strategy_sandboxed,
 )
-from services.strategy_sandbox import run_strategy_sandboxed
 from utils.logging import get_logger
 
 # Import openalgo.ta (Rust-backed indicator library pinned in pyproject.toml).
@@ -66,6 +67,15 @@ _JOB_FUTURES: dict[str, Future] = {}
 # back every N bars — cheap on the dev server's real threads, essential in
 # production.
 _YIELD_EVERY_BARS = 2000
+
+# Hard cap on symbols per run (memory: all frames live in the sandbox child)
+_MAX_SYMBOLS = int(os.getenv("BACKTEST_MAX_SYMBOLS", "50"))
+
+_TRADE_COLUMNS = {
+    "job_id", "symbol", "exchange", "action", "entry_time", "entry_price", "exit_time",
+    "exit_price", "quantity", "pnl", "pnl_pct", "holding_period_bars", "entry_reason",
+    "exit_reason", "costs",
+}
 
 
 def _cooperative_yield():
@@ -177,35 +187,6 @@ def execute_strategy_dsl(strategy_code: str, df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def calculate_position_qty(
-    sizing_type: str,
-    sizing_value: float,
-    current_equity: float,
-    current_price: float,
-    capital_allocation: float,
-) -> float:
-    """Calculates trade quantity based on position sizing rules."""
-    if current_price <= 0:
-        return 0.0
-
-    if sizing_type == "fixed_qty":
-        return float(sizing_value)
-
-    elif sizing_type == "pct_equity":
-        allocated_val = current_equity * (sizing_value / 100.0)
-        return float(math.floor(allocated_val / current_price))
-
-    elif sizing_type == "fixed_capital":
-        return float(math.floor(sizing_value / current_price))
-
-    elif sizing_type == "kelly_vol":
-        # Volatility-adjusted sizing
-        vol_adj_capital = current_equity * min(0.25, max(0.02, sizing_value))
-        return float(math.floor(vol_adj_capital / current_price))
-
-    return 1.0
-
-
 def run_backtest_pipeline(
     job_id: str,
     name: str,
@@ -226,6 +207,7 @@ def run_backtest_pipeline(
     take_profit_pct: float | None,
     daily_loss_limit: float | None,
     max_positions: int,
+    strategy_params: dict | None = None,
 ):
     """
     Main background execution function for running a backtest job.
@@ -255,465 +237,105 @@ def run_backtest_pipeline(
         start_ts = int(pd.to_datetime(start_date).timestamp()) if start_date else None
         end_ts = int(pd.to_datetime(end_date).timestamp()) if end_date else None
 
-        # Primary symbol data
-        primary_symbol = symbols[0] if symbols else "SBIN"
-        if ":" in primary_symbol:
-            parts = primary_symbol.split(":")
-            exchange = parts[0]
-            symbol_clean = parts[1]
-        else:
-            symbol_clean = primary_symbol
+        # Load every requested symbol from the Historify DB
+        keys: list[str] = []
+        for raw in symbols or ["SBIN"]:
+            sym_clean, exch = _split_symbol(raw, exchange)
+            key = f"{exch}:{sym_clean}"
+            if key not in keys:
+                keys.append(key)
+        if len(keys) > _MAX_SYMBOLS:
+            raise ValueError(f"Too many symbols ({len(keys)}); the limit is {_MAX_SYMBOLS}.")
 
-        # Fetch OHLCV data from Historify DB
-        df = get_ohlcv(
-            symbol=symbol_clean,
-            exchange=exchange,
-            interval=interval,
-            start_timestamp=start_ts,
-            end_timestamp=end_ts,
-        )
-
-        if df.empty or len(df) < 2:
-            raise ValueError(f"No historical data available for {symbol_clean} ({exchange}) interval {interval} in selected range.")
-
-        # get_ohlcv() returns raw epoch seconds (UTC) in the timestamp column on
-        # every code path (raw, intraday-aggregated, daily-aggregated) - convert
-        # once here. Everything downstream (day-boundary detection for the daily
-        # loss limit, MIS square-off time matching, the final equity-curve index)
-        # assumes a "YYYY-MM-DD HH:MM:SS" string and silently misbehaves on a raw
-        # epoch value instead of raising.
-        df["timestamp"] = (
-            pd.to_datetime(df["timestamp"], unit="s", utc=True)
-            .dt.tz_convert("Asia/Kolkata")
-            .dt.tz_localize(None)
-            .astype(str)
-        )
-
-        # Handle missing data policy
-        if missing_data_policy == "skip":
-            df = df.dropna(subset=["open", "high", "low", "close"])
-        elif missing_data_policy == "forward_fill":
-            df = df.ffill().bfill()
-        elif missing_data_policy == "abort":
-            if df[["open", "high", "low", "close"]].isnull().any().any():
-                raise ValueError("Missing bar data detected and policy is set to abort.")
-
-        if df.empty:
-            raise ValueError("DataFrame is empty after applying missing data policy.")
-
-        # Run signal DSL code
-        df = execute_strategy_dsl(strategy_code, df)
-
-        # The engine tracks a single position on a single symbol at a time -
-        # there is no pyramiding and no multi-symbol book. A max_positions
-        # value above 1 cannot be honored; note it rather than silently
-        # accepting a config that implies concurrency the engine doesn't have.
         run_notes: list[str] = []
-        if max_positions and max_positions > 1:
-            run_notes.append(
-                f"max_positions={max_positions} was requested, but this engine runs one "
-                "symbol with at most one open position at a time; the setting was not enforced."
+        bars_by_symbol: dict[str, pd.DataFrame] = {}
+        for key in keys:
+            exch, sym_clean = key.split(":", 1)
+            df = get_ohlcv(
+                symbol=sym_clean,
+                exchange=exch,
+                interval=interval,
+                start_timestamp=start_ts,
+                end_timestamp=end_ts,
+            )
+            if df.empty or len(df) < 2:
+                if len(keys) == 1:
+                    raise ValueError(
+                        f"No historical data available for {sym_clean} ({exch}) interval {interval} in selected range."
+                    )
+                run_notes.append(f"{key} skipped: no historical data in the selected range.")
+                continue
+
+            # get_ohlcv() returns raw epoch seconds (UTC) in the timestamp column on
+            # every code path (raw, intraday-aggregated, daily-aggregated) - convert
+            # once here. Everything downstream (day-boundary detection for the daily
+            # loss limit, MIS square-off time matching, the final equity-curve index)
+            # assumes a "YYYY-MM-DD HH:MM:SS" string and silently misbehaves on a raw
+            # epoch value instead of raising.
+            df["timestamp"] = (
+                pd.to_datetime(df["timestamp"], unit="s", utc=True)
+                .dt.tz_convert("Asia/Kolkata")
+                .dt.tz_localize(None)
+                .astype(str)
             )
 
-        # Simulation loop state variables
-        current_equity = initial_capital
-        cash = initial_capital
-        position_qty = 0.0
-        entry_price = 0.0
-        entry_time = ""
-        entry_bar_idx = 0
-        trades_list: list[dict[str, Any]] = []
-        equity_records: list[dict[str, Any]] = []
-
-        daily_start_equity = initial_capital
-        current_day_str = ""
-
-        total_bars = len(df)
-
-        # Next-bar-open execution. A signal on bar i is normally derived from
-        # bar i's close, so acting on it within bar i - which fills at bar i's
-        # OPEN - would fill at a price that printed before the signal existed.
-        # Bar i therefore trades the signal raised by bar i-1; bar 0 has none.
-        signal_values = (
-            pd.to_numeric(df["signal"], errors="coerce").fillna(0).astype(int).to_numpy()
-        )
-
-        for i in range(total_bars):
-            if cancel_event.is_set():
-                run_record.status = "cancelled"
-                run_record.completed_at = datetime.now(pytz.timezone("Asia/Kolkata"))
-                session.commit()
-                _emit_progress(job_id, 100.0, "Cancelled", current_equity, len(trades_list), **emit_kwargs)
-                return
-
-            bar = df.iloc[i]
-            bar_time = str(bar["timestamp"])
-            b_open = float(bar["open"])
-            b_high = float(bar["high"])
-            b_low = float(bar["low"])
-            b_close = float(bar["close"])
-            b_vol = float(bar.get("volume", 0))
-            signal = int(signal_values[i - 1]) if i > 0 else 0
-
-            if i % _YIELD_EVERY_BARS == 0:
-                _cooperative_yield()
-
-            # Track day changes for daily loss limit
-            day_str = bar_time.split(" ")[0] if " " in bar_time else bar_time.split("T")[0]
-            if day_str != current_day_str:
-                current_day_str = day_str
-                daily_start_equity = current_equity
-
-            # Calculate current market value of positions
-            pos_value = position_qty * b_close
-            current_equity = cash + pos_value
-
-            # Daily loss limit check
-            if daily_loss_limit and daily_loss_limit > 0:
-                daily_loss = daily_start_equity - current_equity
-                if daily_loss >= daily_loss_limit:
-                    # Force exit open position due to daily loss limit
-                    if position_qty != 0:
-                        filled, exec_price, cost = simulate_order_fill(
-                            action="SELL" if position_qty > 0 else "BUY",
-                            price_type="MARKET",
-                            limit_price=0.0,
-                            trigger_price=0.0,
-                            bar_open=b_open,
-                            bar_high=b_high,
-                            bar_low=b_low,
-                            bar_close=b_close,
-                            volume=b_vol,
-                            slippage_bps=slippage_bps,
-                            brokerage_bps=brokerage_bps,
-                            quantity=abs(position_qty),
-                        )
-                        if filled:
-                            pnl = (exec_price - entry_price) * position_qty - cost
-                            pnl_pct = (pnl / (entry_price * abs(position_qty))) * 100.0 if entry_price > 0 else 0.0
-                            cash += (position_qty * exec_price) - cost
-                            trades_list.append({
-                                "job_id": job_id,
-                                "symbol": symbol_clean,
-                                "exchange": exchange,
-                                "action": "BUY" if position_qty > 0 else "SELL",
-                                "entry_time": entry_time,
-                                "entry_price": round(entry_price, 2),
-                                "exit_time": bar_time,
-                                "exit_price": round(exec_price, 2),
-                                "quantity": abs(position_qty),
-                                "pnl": round(pnl, 2),
-                                "pnl_pct": round(pnl_pct, 2),
-                                "holding_period_bars": i - entry_bar_idx,
-                                "entry_reason": "Signal",
-                                "exit_reason": "Daily Loss Limit",
-                                "costs": round(cost, 2),
-                            })
-                            position_qty = 0.0
-                    # Trading is halted for the rest of the day, but the bar
-                    # still has to appear on the equity curve — skipping the
-                    # snapshot here left a hole from the breach to midnight and
-                    # made the curve's timestamps disagree with the bar series.
-                    current_equity = cash + (position_qty * b_close)
-                    equity_records.append({
-                        "job_id": job_id,
-                        "timestamp": bar_time,
-                        "equity": round(current_equity, 2),
-                        "cash": round(cash, 2),
-                        "positions_value": round(position_qty * b_close, 2),
-                    })
-                    continue
-
-            # Check Stop-Loss % and Take-Profit % rules on active positions
-            # (mirrored for shorts: price falling is the profit direction, so
-            # the sign of pnl_pct_current flips relative to the long case)
-            if position_qty != 0 and entry_price > 0:
-                if position_qty > 0:
-                    sl_pnl_pct = ((b_low - entry_price) / entry_price) * 100.0
-                    tp_pnl_pct = ((b_high - entry_price) / entry_price) * 100.0
-                else:
-                    sl_pnl_pct = ((entry_price - b_high) / entry_price) * 100.0
-                    tp_pnl_pct = ((entry_price - b_low) / entry_price) * 100.0
-                exit_triggered = False
-                exit_reason = ""
-
-                if stop_loss_pct and sl_pnl_pct <= -abs(stop_loss_pct):
-                    exit_triggered = True
-                    exit_reason = "Stop Loss"
-                elif take_profit_pct and tp_pnl_pct >= abs(take_profit_pct):
-                    exit_triggered = True
-                    exit_reason = "Take Profit"
-
-                if exit_triggered:
-                    filled, exec_price, cost = simulate_order_fill(
-                        action="SELL" if position_qty > 0 else "BUY",
-                        price_type="MARKET",
-                        limit_price=0.0,
-                        trigger_price=0.0,
-                        bar_open=b_open,
-                        bar_high=b_high,
-                        bar_low=b_low,
-                        bar_close=b_close,
-                        volume=b_vol,
-                        slippage_bps=slippage_bps,
-                        brokerage_bps=brokerage_bps,
-                        quantity=abs(position_qty),
+            # Handle missing data policy
+            if missing_data_policy == "skip":
+                df = df.dropna(subset=["open", "high", "low", "close"])
+            elif missing_data_policy == "forward_fill":
+                df = df.ffill().bfill()
+            elif missing_data_policy == "abort":
+                if df[["open", "high", "low", "close"]].isnull().any().any():
+                    raise ValueError(
+                        f"Missing bar data detected in {key} and policy is set to abort."
                     )
-                    if filled:
-                        pnl = (exec_price - entry_price) * position_qty - cost
-                        pnl_pct = (pnl / (entry_price * abs(position_qty))) * 100.0
-                        cash += (position_qty * exec_price) - cost
-                        trades_list.append({
-                            "job_id": job_id,
-                            "symbol": symbol_clean,
-                            "exchange": exchange,
-                            "action": "BUY" if position_qty > 0 else "SELL",
-                            "entry_time": entry_time,
-                            "entry_price": round(entry_price, 2),
-                            "exit_time": bar_time,
-                            "exit_price": round(exec_price, 2),
-                            "quantity": abs(position_qty),
-                            "pnl": round(pnl, 2),
-                            "pnl_pct": round(pnl_pct, 2),
-                            "holding_period_bars": i - entry_bar_idx,
-                            "entry_reason": "Signal",
-                            "exit_reason": exit_reason,
-                            "costs": round(cost, 2),
-                        })
-                        position_qty = 0.0
+            df = df.drop_duplicates(subset="timestamp", keep="last").reset_index(drop=True)
+            if df.empty:
+                raise ValueError(f"{key}: DataFrame is empty after applying missing data policy.")
+            bars_by_symbol[key] = df[
+                [c for c in ("timestamp", "open", "high", "low", "close", "volume") if c in df.columns]
+            ]
 
-            # MIS Auto Square-off Check
-            if product_type == "MIS" and position_qty != 0:
-                if is_mis_square_off_bar(bar_time, exchange):
-                    filled, exec_price, cost = simulate_order_fill(
-                        action="SELL" if position_qty > 0 else "BUY",
-                        price_type="MARKET",
-                        limit_price=0.0,
-                        trigger_price=0.0,
-                        bar_open=b_open,
-                        bar_high=b_high,
-                        bar_low=b_low,
-                        bar_close=b_close,
-                        volume=b_vol,
-                        slippage_bps=slippage_bps,
-                        brokerage_bps=brokerage_bps,
-                        quantity=abs(position_qty),
-                    )
-                    if filled:
-                        pnl = (exec_price - entry_price) * position_qty - cost
-                        pnl_pct = (pnl / (entry_price * abs(position_qty))) * 100.0 if entry_price > 0 else 0.0
-                        cash += (position_qty * exec_price) - cost
-                        trades_list.append({
-                            "job_id": job_id,
-                            "symbol": symbol_clean,
-                            "exchange": exchange,
-                            "action": "BUY" if position_qty > 0 else "SELL",
-                            "entry_time": entry_time,
-                            "entry_price": round(entry_price, 2),
-                            "exit_time": bar_time,
-                            "exit_price": round(exec_price, 2),
-                            "quantity": abs(position_qty),
-                            "pnl": round(pnl, 2),
-                            "pnl_pct": round(pnl_pct, 2),
-                            "holding_period_bars": i - entry_bar_idx,
-                            "entry_reason": "Signal",
-                            "exit_reason": "MIS Auto Squareoff",
-                            "costs": round(cost, 2),
-                        })
-                        position_qty = 0.0
+        if not bars_by_symbol:
+            raise ValueError("No historical data available for any requested symbol.")
 
-            # Process Strategy Signals
-            # signal: 1 = BUY (open long), -1 = SELL (close long),
-            #         2 = SHORT (open short), -2 = COVER (close short)
-            if signal == 1 and position_qty == 0:  # BUY Signal
-                qty = calculate_position_qty(sizing_type, sizing_value, current_equity, b_close, initial_capital)
-                if qty > 0:
-                    filled, exec_price, cost = simulate_order_fill(
-                        action="BUY",
-                        price_type="MARKET",
-                        limit_price=0.0,
-                        trigger_price=0.0,
-                        bar_open=b_open,
-                        bar_high=b_high,
-                        bar_low=b_low,
-                        bar_close=b_close,
-                        volume=b_vol,
-                        slippage_bps=slippage_bps,
-                        brokerage_bps=brokerage_bps,
-                        quantity=qty,
-                    )
-                    if filled:
-                        cash -= (qty * exec_price) + cost
-                        position_qty = qty
-                        entry_price = exec_price
-                        entry_time = bar_time
-                        entry_bar_idx = i
+        engine_cfg = {
+            "initial_capital": initial_capital,
+            "sizing_type": sizing_type,
+            "sizing_value": sizing_value,
+            "slippage_bps": slippage_bps,
+            "brokerage_bps": brokerage_bps,
+            "product_type": product_type,
+            "stop_loss_pct": stop_loss_pct,
+            "take_profit_pct": take_profit_pct,
+            "daily_loss_limit": daily_loss_limit,
+            "max_positions": max_positions or 1,
+            "interval": interval,
+            "params": strategy_params or {},
+        }
 
-            elif signal == -1 and position_qty > 0:  # SELL / EXIT Long Signal
-                filled, exec_price, cost = simulate_order_fill(
-                    action="SELL",
-                    price_type="MARKET",
-                    limit_price=0.0,
-                    trigger_price=0.0,
-                    bar_open=b_open,
-                    bar_high=b_high,
-                    bar_low=b_low,
-                    bar_close=b_close,
-                    volume=b_vol,
-                    slippage_bps=slippage_bps,
-                    brokerage_bps=brokerage_bps,
-                    quantity=position_qty,
-                )
-                if filled:
-                    pnl = (exec_price - entry_price) * position_qty - cost
-                    pnl_pct = (pnl / (entry_price * position_qty)) * 100.0
-                    cash += (position_qty * exec_price) - cost
-                    trades_list.append({
-                        "job_id": job_id,
-                        "symbol": symbol_clean,
-                        "exchange": exchange,
-                        "action": "BUY",
-                        "entry_time": entry_time,
-                        "entry_price": round(entry_price, 2),
-                        "exit_time": bar_time,
-                        "exit_price": round(exec_price, 2),
-                        "quantity": abs(position_qty),
-                        "pnl": round(pnl, 2),
-                        "pnl_pct": round(pnl_pct, 2),
-                        "holding_period_bars": i - entry_bar_idx,
-                        "entry_reason": "Signal",
-                        "exit_reason": "Signal Exit",
-                        "costs": round(cost, 2),
-                    })
-                    position_qty = 0.0
+        def _on_progress(pct: float, ts: str, eq: float, n_trades: int) -> None:
+            _emit_progress(job_id, pct, ts, eq, n_trades, **emit_kwargs)
 
-            elif signal == 2 and position_qty == 0:  # SHORT Signal (open)
-                qty = calculate_position_qty(sizing_type, sizing_value, current_equity, b_close, initial_capital)
-                if qty > 0:
-                    filled, exec_price, cost = simulate_order_fill(
-                        action="SELL",
-                        price_type="MARKET",
-                        limit_price=0.0,
-                        trigger_price=0.0,
-                        bar_open=b_open,
-                        bar_high=b_high,
-                        bar_low=b_low,
-                        bar_close=b_close,
-                        volume=b_vol,
-                        slippage_bps=slippage_bps,
-                        brokerage_bps=brokerage_bps,
-                        quantity=qty,
-                    )
-                    if filled:
-                        cash += (qty * exec_price) - cost
-                        position_qty = -qty
-                        entry_price = exec_price
-                        entry_time = bar_time
-                        entry_bar_idx = i
-
-            elif signal == -2 and position_qty < 0:  # COVER Signal (close short)
-                filled, exec_price, cost = simulate_order_fill(
-                    action="BUY",
-                    price_type="MARKET",
-                    limit_price=0.0,
-                    trigger_price=0.0,
-                    bar_open=b_open,
-                    bar_high=b_high,
-                    bar_low=b_low,
-                    bar_close=b_close,
-                    volume=b_vol,
-                    slippage_bps=slippage_bps,
-                    brokerage_bps=brokerage_bps,
-                    quantity=abs(position_qty),
-                )
-                if filled:
-                    pnl = (exec_price - entry_price) * position_qty - cost
-                    pnl_pct = (pnl / (entry_price * abs(position_qty))) * 100.0
-                    cash += (position_qty * exec_price) - cost
-                    trades_list.append({
-                        "job_id": job_id,
-                        "symbol": symbol_clean,
-                        "exchange": exchange,
-                        "action": "SELL",
-                        "entry_time": entry_time,
-                        "entry_price": round(entry_price, 2),
-                        "exit_time": bar_time,
-                        "exit_price": round(exec_price, 2),
-                        "quantity": abs(position_qty),
-                        "pnl": round(pnl, 2),
-                        "pnl_pct": round(pnl_pct, 2),
-                        "holding_period_bars": i - entry_bar_idx,
-                        "entry_reason": "Signal",
-                        "exit_reason": "Signal Exit",
-                        "costs": round(cost, 2),
-                    })
-                    position_qty = 0.0
-
-            # Record equity snapshot
-            current_equity = cash + (position_qty * b_close)
-            equity_records.append({
-                "job_id": job_id,
-                "timestamp": bar_time,
-                "equity": round(current_equity, 2),
-                "cash": round(cash, 2),
-                "positions_value": round(position_qty * b_close, 2),
-            })
-
-            # Emit progress periodically
-            if i % max(1, total_bars // 50) == 0 or i == total_bars - 1:
-                progress_pct = ((i + 1) / total_bars) * 100.0
-                _emit_progress(job_id, progress_pct, bar_time, current_equity, len(trades_list), **emit_kwargs)
-
-        # Auto-close open position on the final bar at backtest completion
-        if position_qty != 0:
-            last_bar = df.iloc[-1]
-            last_time = str(last_bar["timestamp"])
-            last_open = float(last_bar["open"])
-            last_high = float(last_bar["high"])
-            last_low = float(last_bar["low"])
-            last_close = float(last_bar["close"])
-            last_vol = float(last_bar.get("volume", 0))
-            filled, exec_price, cost = simulate_order_fill(
-                action="SELL" if position_qty > 0 else "BUY",
-                price_type="MARKET",
-                limit_price=0.0,
-                trigger_price=0.0,
-                bar_open=last_open,
-                bar_high=last_high,
-                bar_low=last_low,
-                bar_close=last_close,
-                volume=last_vol,
-                slippage_bps=slippage_bps,
-                brokerage_bps=brokerage_bps,
-                quantity=abs(position_qty),
+        try:
+            out = run_backtest_sandboxed(
+                strategy_code,
+                bars_by_symbol,
+                engine_cfg,
+                cancel_event=cancel_event,
+                progress_cb=_on_progress,
             )
-            if filled:
-                pnl = (exec_price - entry_price) * position_qty - cost
-                pnl_pct = (pnl / (entry_price * abs(position_qty))) * 100.0 if entry_price > 0 else 0.0
-                cash += (position_qty * exec_price) - cost
-                trades_list.append({
-                    "job_id": job_id,
-                    "symbol": symbol_clean,
-                    "exchange": exchange,
-                    "action": "BUY" if position_qty > 0 else "SELL",
-                    "entry_time": entry_time,
-                    "entry_price": round(entry_price, 2),
-                    "exit_time": last_time,
-                    "exit_price": round(exec_price, 2),
-                    "quantity": abs(position_qty),
-                    "pnl": round(pnl, 2),
-                    "pnl_pct": round(pnl_pct, 2),
-                    "holding_period_bars": (total_bars - 1) - entry_bar_idx,
-                    "entry_reason": "Signal",
-                    "exit_reason": "End of Backtest",
-                    "costs": round(cost, 2),
-                })
-                position_qty = 0.0
-                current_equity = cash
-                if equity_records:
-                    equity_records[-1]["equity"] = round(current_equity, 2)
-                    equity_records[-1]["cash"] = round(cash, 2)
-                    equity_records[-1]["positions_value"] = 0.0
+        except BacktestCancelled:
+            run_record.status = "cancelled"
+            run_record.completed_at = datetime.now(pytz.timezone("Asia/Kolkata"))
+            session.commit()
+            _emit_progress(job_id, 100.0, "Cancelled", initial_capital, 0, **emit_kwargs)
+            return
+
+        run_notes.extend(out["notes"])
+        trades_list: list[dict[str, Any]] = [{"job_id": job_id, **t} for t in out["trades"]]
+        equity_records: list[dict[str, Any]] = [{"job_id": job_id, **e} for e in out["equity"]]
+        current_equity = equity_records[-1]["equity"]
 
         # Save Trade and Equity Records to DB
         equity_series = pd.Series(
@@ -743,7 +365,9 @@ def run_backtest_pipeline(
                 positions_value=eq_rec["positions_value"],
             ))
 
-        trade_objs = [BacktestTrade(**t) for t in trades_list]
+        trade_objs = [
+            BacktestTrade(**{k: v for k, v in t.items() if k in _TRADE_COLUMNS}) for t in trades_list
+        ]
 
         session.bulk_save_objects(equity_objs)
         session.bulk_save_objects(trade_objs)

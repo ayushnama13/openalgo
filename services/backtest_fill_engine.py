@@ -3,13 +3,9 @@
 """
 Shared Fill Simulation Engine.
 Extracts order matching logic from sandbox/execution_engine.py:345-473
-and integrates cost models (Costs from portfolio.engine) and exchange MIS square-off rules.
+and exchange MIS square-off rules. Pure (numpy-free, no OpenAlgo imports) so the
+sandboxed backtest child process can import it.
 """
-
-from portfolio.engine import Costs
-from utils.logging import get_logger
-
-logger = get_logger(__name__)
 
 # Exchange-aligned MIS auto square-off times (HH:MM string / minute of day)
 MIS_SQUARE_OFF_TIMES = {
@@ -140,8 +136,7 @@ def simulate_order_fill(
     else:  # SELL
         effective_price = max(0.0, raw_fill_price - slippage_adj)
 
-    # Brokerage / tax cost amount - reuses portfolio.engine.Costs (bps fraction of traded value)
-    cost_model = Costs(bps=brokerage_bps)
-    brokerage_cost = effective_price * quantity * cost_model.total
+    # Brokerage / tax cost amount: bps fraction of traded value
+    brokerage_cost = effective_price * quantity * (brokerage_bps / 10_000.0)
 
     return True, effective_price, brokerage_cost
