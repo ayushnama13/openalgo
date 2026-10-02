@@ -195,6 +195,117 @@ def india_delivery(exchange: str = "NSE") -> CostSchedule:
     )
 
 
+def _exchange_txn(exchange: str, nse: float, bse: float) -> float:
+    return bse if exchange.upper() in ("BSE", "BFO") else nse
+
+
+def india_intraday(exchange: str = "NSE") -> CostSchedule:
+    """
+    NSE/BSE cash intraday (MIS).
+
+    Rates are the published statutory schedule at the time of writing; override
+    any line with ``cost_overrides`` when the exchange or government revises it.
+    """
+    return CostSchedule(
+        name=f"India intraday ({exchange.upper()})",
+        currency="INR",
+        tax_label="GST",
+        tax_rate=0.18,
+        charges=(
+            Charge(
+                key="brokerage", label="Brokerage", basis="order",
+                rate=0.0003, cap=20.0, taxed=True,
+                note="0.03% of order value, capped at Rs 20 per order",
+            ),
+            Charge(
+                key="stt", label="STT", basis="sell", rate=0.00025,
+                note="0.025% on the sell leg of an intraday trade",
+            ),
+            Charge(
+                key="exchange_txn", label="Exchange txn charge", basis="turnover",
+                rate=_exchange_txn(exchange, 0.0000307, 0.0000375), taxed=True,
+            ),
+            Charge(
+                key="sebi", label="SEBI charges", basis="turnover",
+                rate=10.0 / 1_00_00_000, taxed=True,
+            ),
+            Charge(
+                key="stamp_duty", label="Stamp duty", basis="buy", rate=0.00003,
+                note="0.003% on the buy leg only",
+            ),
+        ),
+    )
+
+
+def india_futures(exchange: str = "NFO") -> CostSchedule:
+    """NSE/BSE index and stock futures."""
+    return CostSchedule(
+        name=f"India futures ({exchange.upper()})",
+        currency="INR",
+        tax_label="GST",
+        tax_rate=0.18,
+        charges=(
+            Charge(
+                key="brokerage", label="Brokerage", basis="order",
+                rate=0.0003, cap=20.0, taxed=True,
+                note="0.03% of order value, capped at Rs 20 per order",
+            ),
+            Charge(
+                key="stt", label="STT", basis="sell", rate=0.0002,
+                note="0.02% on the sell leg",
+            ),
+            Charge(
+                key="exchange_txn", label="Exchange txn charge", basis="turnover",
+                rate=_exchange_txn(exchange, 0.0000183, 0.0), taxed=True,
+            ),
+            Charge(
+                key="sebi", label="SEBI charges", basis="turnover",
+                rate=10.0 / 1_00_00_000, taxed=True,
+            ),
+            Charge(
+                key="stamp_duty", label="Stamp duty", basis="buy", rate=0.00002,
+                note="0.002% on the buy leg only",
+            ),
+        ),
+    )
+
+
+def india_options(exchange: str = "NFO") -> CostSchedule:
+    """
+    NSE/BSE index and stock options. Charges apply to premium turnover, not to
+    the notional value of the underlying.
+    """
+    return CostSchedule(
+        name=f"India options ({exchange.upper()})",
+        currency="INR",
+        tax_label="GST",
+        tax_rate=0.18,
+        charges=(
+            Charge(
+                key="brokerage", label="Brokerage", basis="order",
+                flat=20.0, taxed=True, note="Flat Rs 20 per executed order",
+            ),
+            Charge(
+                key="stt", label="STT", basis="sell", rate=0.001,
+                note="0.1% of premium on the sell leg",
+            ),
+            Charge(
+                key="exchange_txn", label="Exchange txn charge", basis="turnover",
+                rate=_exchange_txn(exchange, 0.0003503, 0.0), taxed=True,
+                note="0.03503% of premium on NSE",
+            ),
+            Charge(
+                key="sebi", label="SEBI charges", basis="turnover",
+                rate=10.0 / 1_00_00_000, taxed=True,
+            ),
+            Charge(
+                key="stamp_duty", label="Stamp duty", basis="buy", rate=0.00003,
+                note="0.003% of premium on the buy leg only",
+            ),
+        ),
+    )
+
+
 def us_equity() -> CostSchedule:
     """
     US cash equity, as a second market to prove the shape generalises.
@@ -224,6 +335,10 @@ def us_equity() -> CostSchedule:
 PRESETS = {
     "india_delivery_nse": lambda: india_delivery("NSE"),
     "india_delivery_bse": lambda: india_delivery("BSE"),
+    "india_intraday_nse": lambda: india_intraday("NSE"),
+    "india_intraday_bse": lambda: india_intraday("BSE"),
+    "india_futures_nse": lambda: india_futures("NFO"),
+    "india_options_nse": lambda: india_options("NFO"),
     "us_equity": us_equity,
 }
 
@@ -270,3 +385,16 @@ class EquityCosts:
 
     def effective_rate(self, buy_value: float, sell_value: float, orders: int = 0) -> float:
         return self.schedule.effective_rate(buy_value, sell_value, orders)
+
+
+def auto_preset(product_type: str, exchange: str, instrument: str = "EQ") -> str:
+    """Pick the preset name that matches how a trade is actually taxed."""
+    exch = exchange.upper()
+    if exch in ("NFO", "BFO"):
+        return "india_options_nse" if instrument.upper() in ("CE", "PE", "OPT") else "india_futures_nse"
+    if exch in ("NSE", "BSE"):
+        suffix = "bse" if exch == "BSE" else "nse"
+        if product_type.upper() == "MIS":
+            return f"india_intraday_{suffix}"
+        return f"india_delivery_{suffix}"
+    return "india_delivery_nse"

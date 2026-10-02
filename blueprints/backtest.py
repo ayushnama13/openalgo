@@ -143,6 +143,7 @@ def submit_run():
         take_profit_pct = float(data["take_profit_pct"]) if data.get("take_profit_pct") is not None else None
         daily_loss_limit = float(data["daily_loss_limit"]) if data.get("daily_loss_limit") is not None else None
         max_positions = int(data.get("max_positions", 5))
+        engine_options = data.get("engine_options")
 
         if not strategy_code:
             return jsonify({"status": "error", "message": "strategy_code is required"}), 400
@@ -166,6 +167,7 @@ def submit_run():
             take_profit_pct=take_profit_pct,
             daily_loss_limit=daily_loss_limit,
             max_positions=max_positions,
+            engine_options=engine_options,
         )
         first_job = batch["jobs"][0]["job_id"]
         return jsonify({
@@ -175,6 +177,8 @@ def submit_run():
             "jobs": batch["jobs"],
             "message": f"Backtest batch of {len(batch['jobs'])} timeframe(s) submitted successfully",
         })
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
     except Exception as e:
         logger.exception(f"Error submitting backtest run: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -460,6 +464,9 @@ def get_job_details(job_id):
                 "take_profit_pct": run.take_profit_pct,
                 "daily_loss_limit": run.daily_loss_limit,
                 "max_positions": run.max_positions,
+                "engine_options": json.loads(run.engine_options) if run.engine_options else {},
+                "code_hash": run.code_hash,
+                "data_fingerprint": json.loads(run.data_fingerprint) if run.data_fingerprint else None,
                 "created_at": run.created_at.isoformat() if run.created_at else "",
                 "completed_at": run.completed_at.isoformat() if run.completed_at else "",
                 "metrics": metrics,
@@ -549,6 +556,8 @@ def get_results(job_id):
             "entry_reason": t.entry_reason,
             "exit_reason": t.exit_reason,
             "costs": t.costs,
+            "mae_pct": t.mae_pct,
+            "mfe_pct": t.mfe_pct,
         } for t in trade_rows]
 
         # Fetch Benchmark Comparison (NIFTY 50)

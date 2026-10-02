@@ -73,6 +73,7 @@ MIGRATIONS = [
     ("migrate_gtt_sandbox.py", "Sandbox GTT Support & CAS F&O Close (15:40)"),
     ("migrate_depth_recorder.py", "Depth Recorder Order-Count & LTT Columns"),
     ("migrate_backtest_batch.py", "Backtest Batch Multi-Timeframe Grouping"),
+    ("migrate_backtest_engine_v2.py", "Backtest Engine Reproducibility & MAE/MFE Columns"),
     ("migrate_replay_storage.py", "Replay Mode Storage Indexes & Auto-Record List"),
 ]
 
