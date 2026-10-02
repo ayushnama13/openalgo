@@ -1,0 +1,1 @@
+{"nodes": [{"id": "migration_flask_to_fastapi_migration_plan", "label": "Flask to FastAPI Migration Plan", "file_type": "document", "source_file": "migration/flask-to-fastapi-migration-plan.md", "rationale": "Core migration strategy document outlining the transition from Flask/Gunicorn/eventlet to FastAPI/Uvicorn/asyncio."}], "edges": [], "hyperedges": []}

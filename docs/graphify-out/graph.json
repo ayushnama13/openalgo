@@ -1,0 +1,3912 @@
+{
+  "directed": false,
+  "multigraph": false,
+  "graph": {
+    "hyperedges": [
+      {
+        "id": "cache_concurrency_risks",
+        "label": "Cache Concurrency & Thread Safety Risks",
+        "nodes": [
+          "database_auth_db_auth_cache",
+          "database_token_db_enhanced_broker_symbol_cache",
+          "websocket_proxy_server_last_message_time"
+        ],
+        "relation": "form",
+        "confidence": "EXTRACTED",
+        "confidence_score": 0.85,
+        "source_file": "audit/CACHE_AUDIT.md"
+      },
+      {
+        "id": "critical_security_vulnerabilities",
+        "label": "Critical Security Vulnerabilities",
+        "nodes": [
+          "database_historify_db_copy_query",
+          "database_auth_db_broker_cache",
+          "broker_dhan_sandbox_adapter"
+        ],
+        "relation": "participate_in",
+        "confidence": "EXTRACTED",
+        "confidence_score": 0.9,
+        "source_file": "audit/DEEP_SECURITY_AUDIT_REPORT.md"
+      },
+      {
+        "id": "gtt_order_lifecycle",
+        "label": "GTT Order Lifecycle",
+        "nodes": [
+          "sandbox_gtt_manager",
+          "database_gtt_db",
+          "broker_zerodha_api_gtt_api",
+          "broker_dhan_api_gtt_api"
+        ],
+        "relation": "form",
+        "confidence": "EXTRACTED",
+        "confidence_score": 0.9,
+        "source_file": "plans/2026-04-22-gtt-orders-implementation-plan.md"
+      },
+      {
+        "id": "monitoring_and_logs_flow",
+        "label": "Monitoring and Logs Flow",
+        "nodes": [
+          "userguide_25_latency_monitor_readme",
+          "userguide_26_traffic_logs_readme",
+          "userguide_27_security_settings_readme"
+        ],
+        "relation": "participate_in",
+        "confidence": "EXTRACTED",
+        "confidence_score": 0.9,
+        "source_file": "userguide/26-traffic-logs/README.md"
+      },
+      {
+        "id": "order_execution_flow",
+        "label": "Order Execution Pipeline",
+        "nodes": [
+          "userguide_10_placing_first_order_readme",
+          "userguide_15_analyzer_mode_readme",
+          "userguide_22_action_center_readme"
+        ],
+        "relation": "participate_in",
+        "confidence": "EXTRACTED",
+        "confidence_score": 0.9,
+        "source_file": "userguide/10-placing-first-order/README.md"
+      },
+      {
+        "id": "order_management_flow",
+        "label": "Order Management Flow",
+        "nodes": [
+          "api_order_management_placeorder",
+          "api_order_management_modifyorder",
+          "api_order_management_cancelorder",
+          "api_order_information_orderstatus"
+        ],
+        "relation": "participate_in",
+        "confidence": "EXTRACTED",
+        "confidence_score": 0.9,
+        "source_file": "api/README.md"
+      },
+      {
+        "id": "volume_analysis_suite",
+        "label": "Volume Analysis Suite",
+        "nodes": [
+          "ta_obv",
+          "ta_vwap",
+          "ta_mfi",
+          "ta_adl",
+          "ta_cmf",
+          "ta_kvo"
+        ],
+        "relation": "participate_in",
+        "confidence": "EXTRACTED",
+        "confidence_score": 0.9,
+        "source_file": "prompt/indicators/volume - openalgo indicators.md"
+      },
+      {
+        "id": "analyzer_sandbox_mode",
+        "label": "Analyzer (Sandbox) Mode",
+        "nodes": [
+          "api_analyzer_services_analyzerstatus",
+          "api_analyzer_services_analyzertoggle",
+          "api_analyzer_services_pnlsymbols"
+        ],
+        "relation": "form",
+        "confidence": "EXTRACTED",
+        "confidence_score": 0.95,
+        "source_file": "api/analyzer-services/analyzerstatus.md"
+      },
+      {
+        "id": "market_data_flow",
+        "label": "Market Data Streaming Flow",
+        "nodes": [
+          "websocket_proxy_server",
+          "websocket_proxy_connection_manager",
+          "services_websocket_service",
+          "frontend_lib_marketdatamanager"
+        ],
+        "relation": "participate_in",
+        "confidence": "EXTRACTED",
+        "confidence_score": 0.95,
+        "source_file": "design/06-websockets/README.md"
+      },
+      {
+        "id": "security_and_auth_stack",
+        "label": "Security and Authentication Stack",
+        "nodes": [
+          "userguide_27_security_settings_readme",
+          "userguide_28_two_factor_auth_readme"
+        ],
+        "relation": "form",
+        "confidence": "EXTRACTED",
+        "confidence_score": 0.95,
+        "source_file": "userguide/28-two-factor-auth/README.md"
+      },
+      {
+        "id": "strategy_risk_management_flow",
+        "label": "Strategy Risk Management Flow",
+        "nodes": [
+          "services_strategy_risk_engine",
+          "services_strategy_position_tracker",
+          "services_strategy_order_poller",
+          "database_strategy_position_db"
+        ],
+        "relation": "participate_in",
+        "confidence": "EXTRACTED",
+        "confidence_score": 0.95,
+        "source_file": "plans/2026-02-06-strategy-risk-management-prd.md"
+      },
+      {
+        "id": "broker_interface_pattern",
+        "label": "Standardized Broker Interface",
+        "nodes": [
+          "design_33_broker_api_auth",
+          "design_33_broker_api_order",
+          "design_33_broker_api_data",
+          "design_33_broker_mapping_transform",
+          "design_33_broker_streaming_websocket"
+        ],
+        "relation": "implement",
+        "confidence": "EXTRACTED",
+        "confidence_score": 1.0,
+        "source_file": "design/33-broker-folder/README.md"
+      },
+      {
+        "id": "external_integrations",
+        "label": "External Platform Integrations",
+        "nodes": [
+          "userguide_16_tradingview_integration_readme"
+        ],
+        "relation": "form",
+        "confidence": "EXTRACTED",
+        "confidence_score": 1.0,
+        "source_file": "userguide/02-why-build-with-openalgo/README.md"
+      },
+      {
+        "id": "global_expansion_architecture",
+        "label": "Global Expansion Architecture Framework",
+        "nodes": [
+          "superpowers_decisions_adr_0001",
+          "superpowers_decisions_adr_0002",
+          "superpowers_decisions_adr_0003",
+          "superpowers_specs_global_market_architecture",
+          "superpowers_roadmap_phased_roadmap"
+        ],
+        "relation": "participate_in",
+        "confidence": "EXTRACTED",
+        "confidence_score": 1.0,
+        "source_file": "superpowers/specs/2026-07-13-global-market-architecture-design.md"
+      },
+      {
+        "id": "sandbox_subsystem",
+        "label": "Sandbox/Analyzer Mode Components",
+        "nodes": [
+          "sandbox_fund_manager_fundmanager",
+          "sandbox_execution_engine_executionengine",
+          "sandbox_position_manager_positionmanager",
+          "sandbox_order_manager_ordermanager",
+          "database_sandbox_db_sandboxorders"
+        ],
+        "relation": "participate_in",
+        "confidence": "EXTRACTED",
+        "confidence_score": 1.0,
+        "source_file": "design/07-sandbox/README.md"
+      },
+      {
+        "id": "websocket_streaming_modes",
+        "label": "WebSocket Streaming Modes",
+        "nodes": [
+          "api_websocket_streaming_ltp",
+          "api_websocket_streaming_quote",
+          "api_websocket_streaming_depth",
+          "api_websocket_streaming_order_updates"
+        ],
+        "relation": "implement",
+        "confidence": "EXTRACTED",
+        "confidence_score": 1.0,
+        "source_file": "api/README.md"
+      },
+      {
+        "id": "health_monitoring_system",
+        "label": "Health Monitoring System",
+        "nodes": [
+          "database_health_db",
+          "utils_health_monitor",
+          "blueprints_health",
+          "frontend_src_api_health",
+          "frontend_src_pages_healthmonitor"
+        ],
+        "relation": "participate_in",
+        "confidence": "EXTRACTED"
+      },
+      {
+        "id": "websocket_infrastructure",
+        "label": "WebSocket Infrastructure",
+        "nodes": [
+          "websocket_proxy_server",
+          "websocket_proxy_broker_factory",
+          "websocket_proxy_connection_manager",
+          "services_market_data_service"
+        ],
+        "relation": "form",
+        "confidence": "EXTRACTED"
+      },
+      {
+        "id": "v2_major_features",
+        "label": "OpenAlgo V2 Major Features",
+        "nodes": [
+          "remote_mcp",
+          "whatsapp_bot",
+          "scalping_terminal"
+        ],
+        "relation": "form",
+        "confidence": "INFERRED",
+        "confidence_score": 0.8,
+        "source_file": "releases/version-2.0.1.4-released.md"
+      },
+      {
+        "id": "automation_services",
+        "label": "Automation and Workflow Services",
+        "nodes": [
+          "services_flow_executor_service",
+          "design_10_flow_architecture_readme",
+          "design_13_chartink_readme"
+        ],
+        "relation": "form",
+        "confidence": "INFERRED",
+        "confidence_score": 0.85,
+        "source_file": "design/10-flow-architecture/README.md"
+      },
+      {
+        "id": "external_integration_mcp",
+        "label": "External AI and Tool Integration",
+        "nodes": [
+          "design_41_mcp_architecture",
+          "design_37_apikey_architecture",
+          "design_36_rate_limiting_architecture"
+        ],
+        "relation": "form",
+        "confidence": "INFERRED",
+        "confidence_score": 0.85,
+        "source_file": "design/41-mcp-architecture/README.md"
+      },
+      {
+        "id": "lifecycle_management",
+        "label": "WebSocket Lifecycle & Recovery",
+        "nodes": [
+          "concept_3am_cycle",
+          "audit_websocket_token_refresh_audit_md",
+          "database_master_contract_cache_hook"
+        ],
+        "relation": "form",
+        "confidence": "INFERRED",
+        "confidence_score": 0.85,
+        "source_file": "audit/websocket-broker-priority.md"
+      },
+      {
+        "id": "options_trading_suite",
+        "label": "Options Trading Suite",
+        "nodes": [
+          "userguide_31_tools_readme",
+          "userguide_symbol_format_readme",
+          "userguide_24_pnl_tracker_readme"
+        ],
+        "relation": "participate_in",
+        "confidence": "INFERRED",
+        "confidence_score": 0.85,
+        "source_file": "userguide/31-tools/README.md"
+      },
+      {
+        "id": "monitoring_and_logging",
+        "label": "System Monitoring and Telemetry",
+        "nodes": [
+          "design_16_centralized_logging_readme",
+          "utils_logging"
+        ],
+        "relation": "participate_in",
+        "confidence": "INFERRED",
+        "confidence_score": 0.9,
+        "source_file": "design/16-centralized-logging/README.md"
+      },
+      {
+        "id": "order_execution_flow",
+        "label": "Order Execution and Approval Flow",
+        "nodes": [
+          "design_39_strategy_module_architecture",
+          "design_42_action_center_architecture",
+          "design_53_event_bus"
+        ],
+        "relation": "participate_in",
+        "confidence": "INFERRED",
+        "confidence_score": 0.9,
+        "source_file": "design/42-action-center/README.md"
+      },
+      {
+        "id": "portfolio_hardening_flow",
+        "label": "Portfolio Backtester Hardening Workflow",
+        "nodes": [
+          "superpowers_plans_portfolio_hardening",
+          "portfolio_engine"
+        ],
+        "relation": "form",
+        "confidence": "INFERRED",
+        "confidence_score": 0.9,
+        "source_file": "superpowers/plans/2026-07-31-portfolio-backtester-release-hardening.md"
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "label": "main()",
+      "file_type": "code",
+      "source_file": "superpowers/audit/coupling_inventory.py",
+      "source_location": "L62",
+      "_callable": true,
+      "_origin": "ast",
+      "id": "superpowers_audit_coupling_inventory_main",
+      "community": 13,
+      "norm_label": "main()"
+    },
+    {
+      "label": "scan()",
+      "file_type": "code",
+      "source_file": "superpowers/audit/coupling_inventory.py",
+      "source_location": "L44",
+      "_callable": true,
+      "_origin": "ast",
+      "id": "superpowers_audit_coupling_inventory_scan",
+      "community": 13,
+      "norm_label": "scan()"
+    },
+    {
+      "label": "coupling_inventory.py",
+      "file_type": "code",
+      "source_file": "superpowers/audit/coupling_inventory.py",
+      "source_location": "L1",
+      "_origin": "ast",
+      "id": "superpowers_audit_coupling_inventory",
+      "community": 13,
+      "norm_label": "coupling_inventory.py"
+    },
+    {
+      "label": "Funds API",
+      "file_type": "document",
+      "source_file": "api/account-services/funds.md",
+      "id": "api_account_services_funds",
+      "community": 0,
+      "norm_label": "funds api"
+    },
+    {
+      "label": "Holdings API",
+      "file_type": "document",
+      "source_file": "api/account-services/holdings.md",
+      "id": "api_account_services_holdings",
+      "community": 0,
+      "norm_label": "holdings api"
+    },
+    {
+      "label": "Margin API",
+      "file_type": "document",
+      "source_file": "api/account-services/margin.md",
+      "id": "api_account_services_margin",
+      "community": 0,
+      "norm_label": "margin api"
+    },
+    {
+      "label": "OrderBook API",
+      "file_type": "document",
+      "source_file": "api/account-services/orderbook.md",
+      "id": "api_account_services_orderbook",
+      "community": 0,
+      "norm_label": "orderbook api"
+    },
+    {
+      "label": "PositionBook API",
+      "file_type": "document",
+      "source_file": "api/account-services/positionbook.md",
+      "id": "api_account_services_positionbook",
+      "community": 0,
+      "norm_label": "positionbook api"
+    },
+    {
+      "label": "TradeBook API",
+      "file_type": "document",
+      "source_file": "api/account-services/tradebook.md",
+      "id": "api_account_services_tradebook",
+      "community": 0,
+      "norm_label": "tradebook api"
+    },
+    {
+      "label": "AnalyzerStatus API",
+      "file_type": "document",
+      "source_file": "api/analyzer-services/analyzerstatus.md",
+      "id": "api_analyzer_services_analyzerstatus",
+      "community": 0,
+      "norm_label": "analyzerstatus api"
+    },
+    {
+      "label": "AnalyzerToggle API",
+      "file_type": "document",
+      "source_file": "api/analyzer-services/analyzertoggle.md",
+      "id": "api_analyzer_services_analyzertoggle",
+      "community": 0,
+      "norm_label": "analyzertoggle api"
+    },
+    {
+      "label": "Sandbox P&L By Symbol API",
+      "file_type": "document",
+      "source_file": "api/analyzer-services/pnlsymbols.md",
+      "id": "api_analyzer_services_pnlsymbols",
+      "community": 0,
+      "norm_label": "sandbox p&l by symbol api"
+    },
+    {
+      "label": "Chart Preferences API",
+      "file_type": "document",
+      "source_file": "api/chart-services/chart.md",
+      "id": "api_chart_services_chart",
+      "community": 0,
+      "norm_label": "chart preferences api"
+    },
+    {
+      "label": "Holidays API",
+      "file_type": "document",
+      "source_file": "api/market-calendar/holidays.md",
+      "id": "api_market_calendar_holidays",
+      "community": 0,
+      "norm_label": "holidays api"
+    },
+    {
+      "label": "Timings API",
+      "file_type": "document",
+      "source_file": "api/market-calendar/timings.md",
+      "id": "api_market_calendar_timings",
+      "community": 0,
+      "norm_label": "timings api"
+    },
+    {
+      "label": "Depth API",
+      "file_type": "document",
+      "source_file": "api/market-data/depth.md",
+      "id": "api_market_data_depth",
+      "community": 0,
+      "norm_label": "depth api"
+    },
+    {
+      "label": "History API",
+      "file_type": "document",
+      "source_file": "api/market-data/history.md",
+      "id": "api_market_data_history",
+      "community": 0,
+      "norm_label": "history api"
+    },
+    {
+      "label": "Intervals API",
+      "file_type": "document",
+      "source_file": "api/market-data/intervals.md",
+      "id": "api_market_data_intervals",
+      "community": 0,
+      "norm_label": "intervals api"
+    },
+    {
+      "label": "MultiQuotes API",
+      "file_type": "document",
+      "source_file": "api/market-data/multiquotes.md",
+      "id": "api_market_data_multiquotes",
+      "community": 0,
+      "norm_label": "multiquotes api"
+    },
+    {
+      "label": "Quotes API",
+      "file_type": "document",
+      "source_file": "api/market-data/quotes.md",
+      "id": "api_market_data_quotes",
+      "community": 0,
+      "norm_label": "quotes api"
+    },
+    {
+      "label": "Ticker-Compatible History API",
+      "file_type": "document",
+      "source_file": "api/market-data/ticker.md",
+      "id": "api_market_data_ticker",
+      "community": 0,
+      "norm_label": "ticker-compatible history api"
+    },
+    {
+      "label": "Multi Option Greeks API",
+      "file_type": "document",
+      "source_file": "api/options-services/multioptiongreeks.md",
+      "id": "api_options_services_multioptiongreeks",
+      "community": 0,
+      "norm_label": "multi option greeks api"
+    },
+    {
+      "label": "OptionChain API",
+      "file_type": "document",
+      "source_file": "api/options-services/optionchain.md",
+      "id": "api_options_services_optionchain",
+      "community": 0,
+      "norm_label": "optionchain api"
+    },
+    {
+      "label": "OptionGreeks API",
+      "file_type": "document",
+      "source_file": "api/options-services/optiongreeks.md",
+      "id": "api_options_services_optiongreeks",
+      "community": 0,
+      "norm_label": "optiongreeks api"
+    },
+    {
+      "label": "OptionSymbol API",
+      "file_type": "document",
+      "source_file": "api/options-services/optionsymbol.md",
+      "id": "api_options_services_optionsymbol",
+      "community": 0,
+      "norm_label": "optionsymbol api"
+    },
+    {
+      "label": "SyntheticFuture API",
+      "file_type": "document",
+      "source_file": "api/options-services/syntheticfuture.md",
+      "id": "api_options_services_syntheticfuture",
+      "community": 0,
+      "norm_label": "syntheticfuture api"
+    },
+    {
+      "label": "OpenPosition API",
+      "file_type": "document",
+      "source_file": "api/order-information/openposition.md",
+      "id": "api_order_information_openposition",
+      "community": 0,
+      "norm_label": "openposition api"
+    },
+    {
+      "label": "OrderStatus API",
+      "file_type": "document",
+      "source_file": "api/order-information/orderstatus.md",
+      "id": "api_order_information_orderstatus",
+      "community": 0,
+      "norm_label": "orderstatus api"
+    },
+    {
+      "label": "BasketOrder API",
+      "file_type": "document",
+      "source_file": "api/order-management/basketorder.md",
+      "id": "api_order_management_basketorder",
+      "community": 0,
+      "norm_label": "basketorder api"
+    },
+    {
+      "label": "CancelAllOrder API",
+      "file_type": "document",
+      "source_file": "api/order-management/cancelallorder.md",
+      "id": "api_order_management_cancelallorder",
+      "community": 0,
+      "norm_label": "cancelallorder api"
+    },
+    {
+      "label": "CancelGTTOrder API",
+      "file_type": "document",
+      "source_file": "api/order-management/cancelgttorder.md",
+      "id": "api_order_management_cancelgttorder",
+      "community": 0,
+      "norm_label": "cancelgttorder api"
+    },
+    {
+      "label": "CancelOrder API",
+      "file_type": "document",
+      "source_file": "api/order-management/cancelorder.md",
+      "id": "api_order_management_cancelorder",
+      "community": 0,
+      "norm_label": "cancelorder api"
+    },
+    {
+      "label": "ClosePosition API",
+      "file_type": "document",
+      "source_file": "api/order-management/closeposition.md",
+      "id": "api_order_management_closeposition",
+      "community": 0,
+      "norm_label": "closeposition api"
+    },
+    {
+      "label": "GTTOrderBook API",
+      "file_type": "document",
+      "source_file": "api/order-management/gttorderbook.md",
+      "id": "api_order_management_gttorderbook",
+      "community": 0,
+      "norm_label": "gttorderbook api"
+    },
+    {
+      "label": "ModifyGTTOrder API",
+      "file_type": "document",
+      "source_file": "api/order-management/modifygttorder.md",
+      "id": "api_order_management_modifygttorder",
+      "community": 0,
+      "norm_label": "modifygttorder api"
+    },
+    {
+      "label": "ModifyOrder API",
+      "file_type": "document",
+      "source_file": "api/order-management/modifyorder.md",
+      "id": "api_order_management_modifyorder",
+      "community": 0,
+      "norm_label": "modifyorder api"
+    },
+    {
+      "label": "OptionsMultiOrder API",
+      "file_type": "document",
+      "source_file": "api/order-management/optionsmultiorder.md",
+      "id": "api_order_management_optionsmultiorder",
+      "community": 0,
+      "norm_label": "optionsmultiorder api"
+    },
+    {
+      "label": "OptionsOrder API",
+      "file_type": "document",
+      "source_file": "api/order-management/optionsorder.md",
+      "id": "api_order_management_optionsorder",
+      "community": 0,
+      "norm_label": "optionsorder api"
+    },
+    {
+      "label": "PlaceGTTOrder API",
+      "file_type": "document",
+      "source_file": "api/order-management/placegttorder.md",
+      "id": "api_order_management_placegttorder",
+      "community": 0,
+      "norm_label": "placegttorder api"
+    },
+    {
+      "label": "PlaceOrder API",
+      "file_type": "document",
+      "source_file": "api/order-management/placeorder.md",
+      "id": "api_order_management_placeorder",
+      "community": 0,
+      "norm_label": "placeorder api"
+    },
+    {
+      "label": "PlaceSmartOrder API",
+      "file_type": "document",
+      "source_file": "api/order-management/placesmartorder.md",
+      "id": "api_order_management_placesmartorder",
+      "community": 0,
+      "norm_label": "placesmartorder api"
+    },
+    {
+      "label": "SplitOrder API",
+      "file_type": "document",
+      "source_file": "api/order-management/splitorder.md",
+      "id": "api_order_management_splitorder",
+      "community": 0,
+      "norm_label": "splitorder api"
+    },
+    {
+      "label": "Rate Limiting",
+      "file_type": "document",
+      "source_file": "api/rate-limiting.md",
+      "id": "api_rate_limiting",
+      "community": 0,
+      "norm_label": "rate limiting"
+    },
+    {
+      "label": "OpenAlgo API Documentation",
+      "file_type": "document",
+      "source_file": "api/README.md",
+      "id": "api_readme",
+      "community": 0,
+      "norm_label": "openalgo api documentation"
+    },
+    {
+      "label": "Expiry API",
+      "file_type": "document",
+      "source_file": "api/symbol-services/expiry.md",
+      "id": "api_symbol_services_expiry",
+      "community": 0,
+      "norm_label": "expiry api"
+    },
+    {
+      "label": "Instruments API",
+      "file_type": "document",
+      "source_file": "api/symbol-services/instruments.md",
+      "id": "api_symbol_services_instruments",
+      "community": 0,
+      "norm_label": "instruments api"
+    },
+    {
+      "label": "Search API",
+      "file_type": "document",
+      "source_file": "api/symbol-services/search.md",
+      "id": "api_symbol_services_search",
+      "community": 0,
+      "norm_label": "search api"
+    },
+    {
+      "label": "Symbol API",
+      "file_type": "document",
+      "source_file": "api/symbol-services/symbol.md",
+      "id": "api_symbol_services_symbol",
+      "community": 0,
+      "norm_label": "symbol api"
+    },
+    {
+      "label": "Telegram REST API",
+      "file_type": "document",
+      "source_file": "api/telegram-services/README.md",
+      "id": "api_telegram_services_readme",
+      "community": 0,
+      "norm_label": "telegram rest api"
+    },
+    {
+      "label": "Authenticated Ping API",
+      "file_type": "document",
+      "source_file": "api/utility-services/ping.md",
+      "id": "api_utility_services_ping",
+      "community": 0,
+      "norm_label": "authenticated ping api"
+    },
+    {
+      "label": "Depth (WebSocket)",
+      "file_type": "document",
+      "source_file": "api/websocket-streaming/depth.md",
+      "id": "api_websocket_streaming_depth",
+      "community": 0,
+      "norm_label": "depth (websocket)"
+    },
+    {
+      "label": "Order Updates (WebSocket)",
+      "file_type": "document",
+      "source_file": "api/websocket-streaming/order-updates.md",
+      "id": "api_websocket_streaming_order_updates",
+      "community": 0,
+      "norm_label": "order updates (websocket)"
+    },
+    {
+      "label": "Quote (WebSocket)",
+      "file_type": "document",
+      "source_file": "api/websocket-streaming/quote.md",
+      "id": "api_websocket_streaming_quote",
+      "community": 0,
+      "norm_label": "quote (websocket)"
+    },
+    {
+      "label": "Health Blueprint",
+      "file_type": "code",
+      "source_file": "blueprints/health.py",
+      "rationale": "Flask endpoints for health checks and monitoring API.",
+      "id": "blueprints_health",
+      "community": 1,
+      "norm_label": "health blueprint"
+    },
+    {
+      "label": "Health Database",
+      "file_type": "code",
+      "source_file": "database/health_db.py",
+      "rationale": "Stores FD, memory, DB, WS, and thread metrics with auto-purging.",
+      "id": "database_health_db",
+      "community": 1,
+      "norm_label": "health database"
+    },
+    {
+      "label": "Health API Client",
+      "file_type": "code",
+      "source_file": "frontend/src/api/health.ts",
+      "id": "frontend_src_api_health",
+      "community": 1,
+      "norm_label": "health api client"
+    },
+    {
+      "label": "Health Monitor Page",
+      "file_type": "code",
+      "source_file": "frontend/src/pages/HealthMonitor.tsx",
+      "id": "frontend_src_pages_healthmonitor",
+      "community": 1,
+      "norm_label": "health monitor page"
+    },
+    {
+      "label": "Market Data Service",
+      "file_type": "code",
+      "source_file": "services/market_data_service.py",
+      "rationale": "In-process Python facade for internal services to read prices with safety gates.",
+      "id": "services_market_data_service",
+      "community": 1,
+      "norm_label": "market data service"
+    },
+    {
+      "label": "Internal WebSocket Client",
+      "file_type": "code",
+      "source_file": "services/websocket_client.py",
+      "rationale": "Internal client used by services like Scalping Risk Monitor to subscribe to ticks.",
+      "id": "services_websocket_client",
+      "community": 1,
+      "norm_label": "internal websocket client"
+    },
+    {
+      "label": "WebSocket Service",
+      "file_type": "code",
+      "source_file": "services/websocket_service.py",
+      "rationale": "Backend service layer for managing proxy lifecycle and ZMQ publishing.",
+      "id": "services_websocket_service",
+      "community": 1,
+      "norm_label": "websocket service"
+    },
+    {
+      "label": "WhatsApp Bot Service",
+      "file_type": "code",
+      "source_file": "services/whatsapp_bot_service.py",
+      "rationale": "Manages WhatsApp linked device session and command dispatch.",
+      "id": "services_whatsapp_bot_service",
+      "community": 1,
+      "norm_label": "whatsapp bot service"
+    },
+    {
+      "label": "Health Monitor Utility",
+      "file_type": "code",
+      "source_file": "utils/health_monitor.py",
+      "rationale": "Background daemon thread for zero-latency metric collection.",
+      "id": "utils_health_monitor",
+      "community": 1,
+      "norm_label": "health monitor utility"
+    },
+    {
+      "label": "Logging Utility",
+      "file_type": "code",
+      "source_file": "utils/logging.py",
+      "rationale": "Configures console and rotating file handlers with level-based formatting.",
+      "id": "utils_logging",
+      "community": 1,
+      "norm_label": "logging utility"
+    },
+    {
+      "label": "Base Broker WebSocket Adapter",
+      "file_type": "code",
+      "source_file": "websocket_proxy/base_adapter.py",
+      "rationale": "Provides shared logic for auth-error detection and keepalive standardization.",
+      "id": "websocket_proxy_base_adapter",
+      "community": 1,
+      "norm_label": "base broker websocket adapter"
+    },
+    {
+      "label": "Broker Factory",
+      "file_type": "code",
+      "source_file": "websocket_proxy/broker_factory.py",
+      "rationale": "Factory for creating broker adapters with dynamic discovery.",
+      "id": "websocket_proxy_broker_factory",
+      "community": 1,
+      "norm_label": "broker factory"
+    },
+    {
+      "label": "ConnectionManager",
+      "file_type": "code",
+      "source_file": "websocket_proxy/connection_manager.py",
+      "rationale": "Manages broker WebSocket adapter pools and shared ZMQ publishers.",
+      "id": "websocket_proxy_connection_manager",
+      "community": 1,
+      "norm_label": "connectionmanager"
+    },
+    {
+      "label": "WebSocket Proxy Server",
+      "file_type": "code",
+      "source_file": "websocket_proxy/server.py",
+      "rationale": "Main proxy server on port 8765 handling client management and ZMQ listening.",
+      "id": "websocket_proxy_server",
+      "community": 1,
+      "norm_label": "websocket proxy server"
+    },
+    {
+      "label": "WebSocket Keepalive & Reconnection Audit",
+      "file_type": "document",
+      "source_file": "audit/websocket-keepalive-audit.md",
+      "id": "audit_websocket_keepalive_audit_md",
+      "community": 1,
+      "norm_label": "websocket keepalive & reconnection audit"
+    },
+    {
+      "label": "Broker Integration Guide",
+      "file_type": "document",
+      "source_file": "broker-integration-guide.md",
+      "id": "broker_integration_guide",
+      "community": 1,
+      "norm_label": "broker integration guide"
+    },
+    {
+      "label": "Health Monitor React Frontend",
+      "file_type": "document",
+      "source_file": "HEALTH_MONITOR_REACT_FRONTEND.md",
+      "id": "health_monitor_react_frontend",
+      "community": 1,
+      "norm_label": "health monitor react frontend"
+    },
+    {
+      "label": "Health Monitoring Implementation",
+      "file_type": "document",
+      "source_file": "HEALTH_MONITORING_IMPLEMENTATION.md",
+      "id": "health_monitoring_implementation",
+      "community": 1,
+      "norm_label": "health monitoring implementation"
+    },
+    {
+      "label": "Documentation Map",
+      "file_type": "document",
+      "source_file": "INDEX.md",
+      "id": "index",
+      "community": 1,
+      "norm_label": "documentation map"
+    },
+    {
+      "label": "MCP Tool Reference",
+      "file_type": "document",
+      "source_file": "mcp-tool-reference.md",
+      "id": "mcp_tool_reference",
+      "community": 1,
+      "norm_label": "mcp tool reference"
+    },
+    {
+      "label": "Scanner Architecture",
+      "file_type": "document",
+      "source_file": "scanner-architecture.md",
+      "id": "scanner_architecture",
+      "community": 1,
+      "norm_label": "scanner architecture"
+    },
+    {
+      "label": "WebSocket Architecture",
+      "file_type": "document",
+      "source_file": "websocket-architecture.md",
+      "id": "websocket_architecture",
+      "community": 1,
+      "norm_label": "websocket architecture"
+    },
+    {
+      "label": "WebSocket Quote Feed",
+      "file_type": "document",
+      "source_file": "websocket-quote-feed.md",
+      "id": "websocket_quote_feed",
+      "community": 1,
+      "norm_label": "websocket quote feed"
+    },
+    {
+      "label": "WhatsApp Integration",
+      "file_type": "document",
+      "source_file": "whatsapp.md",
+      "id": "whatsapp",
+      "community": 1,
+      "norm_label": "whatsapp integration"
+    },
+    {
+      "label": "auth_cache",
+      "file_type": "code",
+      "source_file": "database/auth_db.py",
+      "rationale": "TTLCache for broker auth tokens; identified as not thread-safe and potentially storing decrypted tokens.",
+      "id": "database_auth_db_auth_cache",
+      "community": 10,
+      "norm_label": "auth_cache"
+    },
+    {
+      "label": "broker_cache",
+      "file_type": "code",
+      "source_file": "database/auth_db.py",
+      "rationale": "Identified as high risk for using raw plaintext API keys as cache keys.",
+      "id": "database_auth_db_broker_cache",
+      "community": 10,
+      "norm_label": "broker_cache"
+    },
+    {
+      "label": "OpenAlgo Cache Architecture Audit",
+      "file_type": "document",
+      "source_file": "audit/CACHE_AUDIT.md",
+      "rationale": "Comprehensive audit of in-memory caching, persistence, and security risks in OpenAlgo.",
+      "id": "audit_cache_audit",
+      "community": 10,
+      "norm_label": "openalgo cache architecture audit"
+    },
+    {
+      "label": "Dhan Sandbox Adapter",
+      "file_type": "code",
+      "source_file": "broker/dhan_sandbox/streaming/dhan_sandbox_adapter.py",
+      "rationale": "Critical risk due to asyncio usage under eventlet in production environments.",
+      "id": "broker_dhan_sandbox_adapter",
+      "community": 11,
+      "norm_label": "dhan sandbox adapter"
+    },
+    {
+      "label": "Master Contract Cache Hook",
+      "file_type": "code",
+      "source_file": "database/master_contract_cache_hook.py",
+      "rationale": "Emits 'cache_loaded' event; identified as a gap for resubscribe orchestration.",
+      "id": "database_master_contract_cache_hook",
+      "community": 11,
+      "norm_label": "master contract cache hook"
+    },
+    {
+      "label": "WebSocket Broker Priority Audit",
+      "file_type": "document",
+      "source_file": "audit/websocket-broker-priority.md",
+      "rationale": "Audit of broker WebSocket integrations, reliability, and lifecycle management.",
+      "id": "audit_websocket_broker_priority",
+      "community": 11,
+      "norm_label": "websocket broker priority audit"
+    },
+    {
+      "label": "useLivePrice Hook",
+      "file_type": "code",
+      "source_file": "frontend/src/hooks/useLivePrice.ts",
+      "rationale": "Composite hook implementing the fallback chain: WebSocket -> MultiQuotes -> REST.",
+      "id": "frontend_hooks_useliveprice",
+      "community": 12,
+      "norm_label": "useliveprice hook"
+    },
+    {
+      "label": "useMarketData Hook",
+      "file_type": "code",
+      "source_file": "frontend/src/hooks/useMarketData.ts",
+      "rationale": "Direct WebSocket connection hook with visibility-aware pausing.",
+      "id": "frontend_hooks_usemarketdata",
+      "community": 12,
+      "norm_label": "usemarketdata hook"
+    },
+    {
+      "label": "Market Data Manager",
+      "file_type": "code",
+      "source_file": "frontend/src/lib/MarketDataManager.ts",
+      "rationale": "Centralizes browser-side subscriptions to prevent duplicate connections.",
+      "id": "frontend_lib_marketdatamanager",
+      "community": 12,
+      "norm_label": "market data manager"
+    },
+    {
+      "label": "Broker Connection",
+      "file_type": "document",
+      "source_file": "userguide/06-broker-connection/README.md",
+      "id": "userguide_06_broker_connection_readme",
+      "community": 14,
+      "norm_label": "broker connection"
+    },
+    {
+      "label": "Placing Your First Order",
+      "file_type": "document",
+      "source_file": "userguide/10-placing-first-order/README.md",
+      "id": "userguide_10_placing_first_order_readme",
+      "community": 14,
+      "norm_label": "placing your first order"
+    },
+    {
+      "label": "Analyzer Mode",
+      "file_type": "document",
+      "source_file": "userguide/15-analyzer-mode/README.md",
+      "id": "userguide_15_analyzer_mode_readme",
+      "community": 14,
+      "norm_label": "analyzer mode"
+    },
+    {
+      "label": "LTP (WebSocket)",
+      "file_type": "document",
+      "source_file": "api/websocket-streaming/ltp.md",
+      "id": "api_websocket_streaming_ltp",
+      "community": 15,
+      "norm_label": "ltp (websocket)"
+    },
+    {
+      "label": "OpenAlgo Architecture Diagram",
+      "file_type": "image",
+      "source_file": "architecture-diagram.png",
+      "rationale": "Visual representation of the OpenAlgo system architecture including Trade Management, Brokers, Restx API, and Common Websocket.",
+      "id": "architecture_diagram",
+      "community": 15,
+      "norm_label": "openalgo architecture diagram"
+    },
+    {
+      "label": "WhatsApp Notify API",
+      "file_type": "document",
+      "source_file": "api/whatsapp-services/notify.md",
+      "id": "api_whatsapp_services_notify",
+      "community": 16,
+      "norm_label": "whatsapp notify api"
+    },
+    {
+      "label": "WhatsApp Services",
+      "file_type": "document",
+      "source_file": "api/whatsapp-services/README.md",
+      "id": "api_whatsapp_services_readme",
+      "community": 16,
+      "norm_label": "whatsapp services"
+    },
+    {
+      "label": "Historify Export SQL",
+      "file_type": "code",
+      "source_file": "database/historify_db.py",
+      "rationale": "Vulnerable to SQL injection via unvalidated 'compression' parameter.",
+      "id": "database_historify_db_copy_query",
+      "community": 17,
+      "norm_label": "historify export sql"
+    },
+    {
+      "label": "OpenAlgo Deep Codebase Security Audit Report",
+      "file_type": "document",
+      "source_file": "audit/DEEP_SECURITY_AUDIT_REPORT.md",
+      "rationale": "Detailed security audit focusing on SQL injection, input validation, and crypto integration impact.",
+      "id": "audit_deep_security_audit_report",
+      "community": 17,
+      "norm_label": "openalgo deep codebase security audit report"
+    },
+    {
+      "label": "last_message_time",
+      "file_type": "code",
+      "source_file": "websocket_proxy/server.py",
+      "rationale": "Plain dict for WS throttling; identified as having unbounded growth risk.",
+      "id": "websocket_proxy_server_last_message_time",
+      "community": 18,
+      "norm_label": "last_message_time"
+    },
+    {
+      "label": "OpenAlgo Public IP Security Audit",
+      "file_type": "document",
+      "source_file": "audit/PUBLIC_IP_SECURITY_AUDIT_2026-04.md",
+      "rationale": "Audit focused on application-layer security for internet-exposed deployments.",
+      "id": "audit_public_ip_security_audit_2026_04",
+      "community": 18,
+      "norm_label": "openalgo public ip security audit"
+    },
+    {
+      "label": "Market Data Fallback Chain",
+      "file_type": "concept",
+      "rationale": "Priority: 1. WebSocket LTP, 2. MultiQuotes API, 3. REST API Initial Fetch.",
+      "id": "concept_fallback_chain",
+      "community": 19,
+      "norm_label": "market data fallback chain"
+    },
+    {
+      "label": "WebSocket Integration Guidelines",
+      "file_type": "document",
+      "source_file": "audit/websocket-integration-guidelines.md",
+      "id": "audit_websocket_integration_guidelines_md",
+      "community": 19,
+      "norm_label": "websocket integration guidelines"
+    },
+    {
+      "label": "Health Database",
+      "file_type": "code",
+      "source_file": "db/health.db",
+      "id": "db_health_db",
+      "community": 2,
+      "norm_label": "health database"
+    },
+    {
+      "label": "Logs Database",
+      "file_type": "code",
+      "source_file": "db/logs.db",
+      "rationale": "Storage for traffic rows, IP bans, and invalid attempt tracking.",
+      "id": "db_logs_db",
+      "community": 2,
+      "norm_label": "logs database"
+    },
+    {
+      "label": "PnL Tracker",
+      "file_type": "document",
+      "source_file": "userguide/24-pnl-tracker/README.md",
+      "rationale": "Provides analytics on trading performance including realized/unrealized P&L and equity curves.",
+      "id": "userguide_24_pnl_tracker_readme",
+      "community": 2,
+      "norm_label": "pnl tracker"
+    },
+    {
+      "label": "Latency Monitor",
+      "file_type": "document",
+      "source_file": "userguide/25-latency-monitor/README.md",
+      "rationale": "Tracks operation timing from signal receipt to order execution.",
+      "id": "userguide_25_latency_monitor_readme",
+      "community": 2,
+      "norm_label": "latency monitor"
+    },
+    {
+      "label": "Traffic Logs",
+      "file_type": "document",
+      "source_file": "userguide/26-traffic-logs/README.md",
+      "rationale": "Records HTTP request metadata for monitoring and security analysis.",
+      "id": "userguide_26_traffic_logs_readme",
+      "community": 2,
+      "norm_label": "traffic logs"
+    },
+    {
+      "label": "Security Settings",
+      "file_type": "document",
+      "source_file": "userguide/27-security-settings/README.md",
+      "rationale": "Manages authentication, API keys, rate limits, and IP bans.",
+      "id": "userguide_27_security_settings_readme",
+      "community": 2,
+      "norm_label": "security settings"
+    },
+    {
+      "label": "Two-Factor Authentication",
+      "file_type": "document",
+      "source_file": "userguide/28-two-factor-auth/README.md",
+      "rationale": "Supports TOTP for application login and Remote MCP authorization.",
+      "id": "userguide_28_two_factor_auth_readme",
+      "community": 2,
+      "norm_label": "two-factor authentication"
+    },
+    {
+      "label": "Troubleshooting",
+      "file_type": "document",
+      "source_file": "userguide/29-troubleshooting/README.md",
+      "rationale": "Diagnostic guide for installation, broker, and order issues.",
+      "id": "userguide_29_troubleshooting_readme",
+      "community": 2,
+      "norm_label": "troubleshooting"
+    },
+    {
+      "label": "Frequently Asked Questions",
+      "file_type": "document",
+      "source_file": "userguide/30-faqs_readme/README.md",
+      "id": "userguide_30_faqs_readme",
+      "community": 2,
+      "norm_label": "frequently asked questions"
+    },
+    {
+      "label": "Options & Strategy Analytics Suite",
+      "file_type": "document",
+      "source_file": "userguide/31-tools/README.md",
+      "rationale": "Built-in analytical tools for options trading and market analysis.",
+      "id": "userguide_31_tools_readme",
+      "community": 2,
+      "norm_label": "options & strategy analytics suite"
+    },
+    {
+      "label": "Symbol Format Guide",
+      "file_type": "document",
+      "source_file": "userguide/symbol-format/README.md",
+      "rationale": "Standardized symbol format across all exchanges and brokers.",
+      "id": "userguide_symbol_format_readme",
+      "community": 2,
+      "norm_label": "symbol format guide"
+    },
+    {
+      "label": "3AM IST Rollover Cycle",
+      "file_type": "concept",
+      "rationale": "Daily session expiry and token rotation event requiring clean teardown and resubscribe.",
+      "id": "concept_3am_cycle",
+      "community": 20,
+      "norm_label": "3am ist rollover cycle"
+    },
+    {
+      "label": "WebSocket Token-Refresh-on-Reconnect Audit",
+      "file_type": "document",
+      "source_file": "audit/websocket-token-refresh-audit.md",
+      "id": "audit_websocket_token_refresh_audit_md",
+      "community": 20,
+      "norm_label": "websocket token-refresh-on-reconnect audit"
+    },
+    {
+      "label": "BrokerAdapter Contract",
+      "file_type": "code",
+      "source_file": "superpowers/README.md",
+      "rationale": "Formal in-repo contract for broker integrations defined in global architecture.",
+      "id": "broker_adapter_contract",
+      "community": 21,
+      "norm_label": "brokeradapter contract"
+    },
+    {
+      "label": "Global-Market Architecture",
+      "file_type": "concept",
+      "source_file": "superpowers/README.md",
+      "rationale": "Design initiative to support all markets and asset classes (Indian, Crypto, US).",
+      "id": "superpowers_architecture",
+      "community": 21,
+      "norm_label": "global-market architecture"
+    },
+    {
+      "label": "broker/*/api/data.py",
+      "file_type": "code",
+      "source_file": "design/33-broker-folder/README.md",
+      "id": "design_33_broker_api_data",
+      "community": 22,
+      "norm_label": "broker/*/api/data.py"
+    },
+    {
+      "label": "Scalping Terminal",
+      "file_type": "concept",
+      "source_file": "design/54-scalping-terminal/README.md",
+      "id": "design_54_scalping_terminal",
+      "community": 22,
+      "norm_label": "scalping terminal"
+    },
+    {
+      "label": "broker/*/api/order_api.py",
+      "file_type": "code",
+      "source_file": "design/33-broker-folder/README.md",
+      "id": "design_33_broker_api_order",
+      "community": 23,
+      "norm_label": "broker/*/api/order_api.py"
+    },
+    {
+      "label": "Action Center Architecture",
+      "file_type": "concept",
+      "source_file": "design/42-action-center/README.md",
+      "id": "design_42_action_center_architecture",
+      "community": 23,
+      "norm_label": "action center architecture"
+    },
+    {
+      "label": "broker/*/streaming/websocket_adapter.py",
+      "file_type": "code",
+      "source_file": "design/33-broker-folder/README.md",
+      "id": "design_33_broker_streaming_websocket",
+      "community": 24,
+      "norm_label": "broker/*/streaming/websocket_adapter.py"
+    },
+    {
+      "label": "Broker WebSocket Factory",
+      "file_type": "code",
+      "source_file": "design/52-broker-factory/README.md",
+      "id": "design_52_broker_factory",
+      "community": 24,
+      "norm_label": "broker websocket factory"
+    },
+    {
+      "label": "Rate Limiting Architecture",
+      "file_type": "concept",
+      "source_file": "design/36-rate-limiting/README.md",
+      "id": "design_36_rate_limiting_architecture",
+      "community": 25,
+      "norm_label": "rate limiting architecture"
+    },
+    {
+      "label": "Strategy Module Architecture",
+      "file_type": "concept",
+      "source_file": "design/39-strategy-module/README.md",
+      "id": "design_39_strategy_module_architecture",
+      "community": 25,
+      "norm_label": "strategy module architecture"
+    },
+    {
+      "label": "Event Bus",
+      "file_type": "code",
+      "source_file": "design/53-event-bus/README.md",
+      "id": "design_53_event_bus",
+      "community": 26,
+      "norm_label": "event bus"
+    },
+    {
+      "label": "Telegram Bot Components",
+      "file_type": "concept",
+      "source_file": "design/43-telegram-bot/README.md",
+      "id": "design_43_telegram_bot_components",
+      "community": 26,
+      "norm_label": "telegram bot components"
+    },
+    {
+      "label": "start.sh",
+      "file_type": "code",
+      "source_file": "start.sh",
+      "rationale": "Sophisticated entrypoint handling cloud detection, .env generation, migrations, and Gunicorn startup.",
+      "id": "docker_start_sh",
+      "community": 27,
+      "norm_label": "start.sh"
+    },
+    {
+      "label": "API v1 Registration",
+      "file_type": "code",
+      "source_file": "restx_api/__init__.py",
+      "rationale": "Registers 57 method/path pairs across multiple namespaces with prefix /api/v1.",
+      "id": "restx_api_init",
+      "community": 27,
+      "norm_label": "api v1 registration"
+    },
+    {
+      "label": "Portfolio Backtester Engine",
+      "file_type": "code",
+      "source_file": "portfolio/engine.py",
+      "id": "portfolio_engine",
+      "community": 28,
+      "norm_label": "portfolio backtester engine"
+    },
+    {
+      "label": "Portfolio Backtester Release Hardening Plan",
+      "file_type": "document",
+      "source_file": "superpowers/plans/2026-07-31-portfolio-backtester-release-hardening.md",
+      "id": "superpowers_plans_portfolio_hardening",
+      "community": 28,
+      "norm_label": "portfolio backtester release hardening plan"
+    },
+    {
+      "label": "Version 2.0.0.7 Released",
+      "file_type": "document",
+      "source_file": "releases/version-2.0.0.7-released.md",
+      "id": "release_v2_0_0_7",
+      "community": 29,
+      "norm_label": "version 2.0.0.7 released"
+    },
+    {
+      "label": "Version 2.0.0.8 Released",
+      "file_type": "document",
+      "source_file": "releases/version-2.0.0.8-released.md",
+      "id": "release_v2_0_0_8",
+      "community": 29,
+      "norm_label": "version 2.0.0.8 released"
+    },
+    {
+      "label": "ExecutionEngine",
+      "file_type": "code",
+      "source_file": "sandbox/execution_engine.py",
+      "rationale": "Background worker polling every 5 seconds to execute pending orders based on live market quotes.",
+      "id": "sandbox_execution_engine_executionengine",
+      "community": 3,
+      "norm_label": "executionengine"
+    },
+    {
+      "label": "FundManager",
+      "file_type": "code",
+      "source_file": "sandbox/fund_manager.py",
+      "rationale": "Thread-safe management of sandbox capital, margin calculation, and auto-reset logic.",
+      "id": "sandbox_fund_manager_fundmanager",
+      "community": 3,
+      "norm_label": "fundmanager"
+    },
+    {
+      "label": "HoldingsManager",
+      "file_type": "code",
+      "source_file": "sandbox/holdings_manager.py",
+      "rationale": "Handles T+1 settlement by moving CNC positions to holdings at midnight.",
+      "id": "sandbox_holdings_manager_holdingsmanager",
+      "community": 3,
+      "norm_label": "holdingsmanager"
+    },
+    {
+      "label": "OrderManager",
+      "file_type": "code",
+      "source_file": "sandbox/order_manager.py",
+      "rationale": "Handles order placement validation, margin blocking, modification, and cancellation.",
+      "id": "sandbox_order_manager_ordermanager",
+      "community": 3,
+      "norm_label": "ordermanager"
+    },
+    {
+      "label": "SquareoffManager",
+      "file_type": "code",
+      "source_file": "sandbox/squareoff_manager.py",
+      "rationale": "Automatically closes MIS positions at exchange-specific timings using reverse market orders.",
+      "id": "sandbox_squareoff_manager_squareoffmanager",
+      "community": 3,
+      "norm_label": "squareoffmanager"
+    },
+    {
+      "label": "FlowExecutorService",
+      "file_type": "code",
+      "source_file": "services/flow_executor_service.py",
+      "rationale": "Executes visual workflow graphs with sequential node processing and variable interpolation.",
+      "id": "services_flow_executor_service",
+      "community": 3,
+      "norm_label": "flowexecutorservice"
+    },
+    {
+      "label": "PlaceOrderService",
+      "file_type": "code",
+      "source_file": "services/place_order_service.py",
+      "rationale": "Core service orchestrating validation, routing (semi-auto/analyzer), and broker execution.",
+      "id": "services_place_order_service",
+      "community": 3,
+      "norm_label": "placeorderservice"
+    },
+    {
+      "label": "Event Bus",
+      "file_type": "code",
+      "source_file": "utils/event_bus.py",
+      "rationale": "Dispatches side-effects like logging, SocketIO, and Telegram alerts asynchronously.",
+      "id": "utils_event_bus",
+      "community": 3,
+      "norm_label": "event bus"
+    },
+    {
+      "label": "Flask to FastAPI Migration Plan",
+      "file_type": "document",
+      "source_file": "migration/flask-to-fastapi-migration-plan.md",
+      "rationale": "Core migration strategy document outlining the transition from Flask/Gunicorn/eventlet to FastAPI/Uvicorn/asyncio.",
+      "id": "migration_flask_to_fastapi_migration_plan",
+      "community": 3,
+      "norm_label": "flask to fastapi migration plan"
+    },
+    {
+      "label": "Remote MCP",
+      "file_type": "concept",
+      "source_file": "releases/version-2.0.1.0-released.md",
+      "rationale": "Self-hosted OAuth 2.1 + MCP HTTP/SSE server for hosted AI clients.",
+      "id": "remote_mcp",
+      "community": 30,
+      "norm_label": "remote mcp"
+    },
+    {
+      "label": "Version 2.0.1.0 Released",
+      "file_type": "document",
+      "source_file": "releases/version-2.0.1.0-released.md",
+      "id": "release_v2_0_1_0",
+      "community": 30,
+      "norm_label": "version 2.0.1.0 released"
+    },
+    {
+      "label": "WhatsApp Bot Integration",
+      "file_type": "concept",
+      "source_file": "releases/version-2.0.1.1-released.md",
+      "rationale": "Event-driven alerts and slash-command queries via WhatsApp.",
+      "id": "whatsapp_bot",
+      "community": 31,
+      "norm_label": "whatsapp bot integration"
+    },
+    {
+      "label": "Version 2.0.1.1 Released",
+      "file_type": "document",
+      "source_file": "releases/version-2.0.1.1-released.md",
+      "id": "release_v2_0_1_1",
+      "community": 31,
+      "norm_label": "version 2.0.1.1 released"
+    },
+    {
+      "label": "Scalping Terminal (/scalping)",
+      "file_type": "concept",
+      "source_file": "releases/version-2.0.1.4-released.md",
+      "rationale": "Keyboard-driven order entry with server-side SL/TP/TSL engine introduced in v2.0.1.4.",
+      "id": "scalping_terminal",
+      "community": 32,
+      "norm_label": "scalping terminal (/scalping)"
+    },
+    {
+      "label": "Version 2.0.1.4 Released",
+      "file_type": "document",
+      "source_file": "releases/version-2.0.1.4-released.md",
+      "id": "release_v2_0_1_4",
+      "community": 32,
+      "norm_label": "version 2.0.1.4 released"
+    },
+    {
+      "label": "Documentation Freshness Checker Script",
+      "file_type": "code",
+      "source_file": "scripts/check_docs_freshness.py",
+      "id": "scripts_check_docs_freshness",
+      "community": 33,
+      "norm_label": "documentation freshness checker script"
+    },
+    {
+      "label": "Repository Documentation Freshness Plan",
+      "file_type": "document",
+      "source_file": "superpowers/plans/2026-08-02-repository-documentation-freshness.md",
+      "id": "superpowers_plans_docs_freshness",
+      "community": 33,
+      "norm_label": "repository documentation freshness plan"
+    },
+    {
+      "label": "Telegram Bot Service",
+      "file_type": "code",
+      "source_file": "services/telegram_bot_service.py",
+      "rationale": "Handles Telegram commands and chart rendering using Kaleido/Chromium.",
+      "id": "services_telegram_bot_service",
+      "community": 34,
+      "norm_label": "telegram bot service"
+    },
+    {
+      "label": "Telegram Chart Rendering",
+      "file_type": "document",
+      "source_file": "telegram-chart-rendering.md",
+      "id": "telegram_chart_rendering",
+      "community": 34,
+      "norm_label": "telegram chart rendering"
+    },
+    {
+      "label": "ADR-0001: Crypto exchanges: direct native integration, not CCXT",
+      "file_type": "document",
+      "source_file": "superpowers/decisions/2026-07-13-crypto-native-integration-not-ccxt.md",
+      "rationale": "Decision to use direct native BrokerAdapter for crypto instead of CCXT to maintain pattern consistency, full fidelity, and eventlet compatibility.",
+      "id": "superpowers_decisions_adr_0001",
+      "community": 35,
+      "norm_label": "adr-0001: crypto exchanges: direct native integration, not ccxt"
+    },
+    {
+      "label": "ADR-0002: Direct API/WebSocket integration; no vendor SDKs or aggregation libraries",
+      "file_type": "document",
+      "source_file": "superpowers/decisions/2026-07-13-direct-api-integration-no-vendor-sdks.md",
+      "rationale": "Generalizes ADR-0001 to all brokers to ensure control, fidelity, and zero vendor supply-chain surface.",
+      "id": "superpowers_decisions_adr_0002",
+      "community": 35,
+      "norm_label": "adr-0002: direct api/websocket integration; no vendor sdks or aggregation libraries"
+    },
+    {
+      "label": "API Key Management",
+      "file_type": "document",
+      "source_file": "userguide/09-api-key-management/README.md",
+      "id": "userguide_09_api_key_management_readme",
+      "community": 36,
+      "norm_label": "api key management"
+    },
+    {
+      "label": "Action Center",
+      "file_type": "document",
+      "source_file": "userguide/22-action-center/README.md",
+      "id": "userguide_22_action_center_readme",
+      "community": 36,
+      "norm_label": "action center"
+    },
+    {
+      "label": "Smart Orders",
+      "file_type": "document",
+      "source_file": "userguide/12-smart-orders/README.md",
+      "id": "userguide_12_smart_orders_readme",
+      "community": 37,
+      "norm_label": "smart orders"
+    },
+    {
+      "label": "TradingView Integration",
+      "file_type": "document",
+      "source_file": "userguide/16-tradingview-integration/README.md",
+      "id": "userguide_16_tradingview_integration_readme",
+      "community": 37,
+      "norm_label": "tradingview integration"
+    },
+    {
+      "label": "Flow Visual Strategy Builder",
+      "file_type": "document",
+      "source_file": "userguide/21-flow-visual-builder/README.md",
+      "id": "userguide_21_flow_visual_builder_readme",
+      "community": 38,
+      "norm_label": "flow visual strategy builder"
+    },
+    {
+      "label": "Telegram Bot",
+      "file_type": "document",
+      "source_file": "userguide/23-telegram-bot/README.md",
+      "id": "userguide_23_telegram_bot_readme",
+      "community": 38,
+      "norm_label": "telegram bot"
+    },
+    {
+      "label": "Compositedge Plugin",
+      "file_type": "code",
+      "source_file": "xtsapi.md",
+      "rationale": "The base plugin used for XTS API integration.",
+      "id": "xtsapi_compositedge_plugin",
+      "community": 39,
+      "norm_label": "compositedge plugin"
+    },
+    {
+      "label": "XTS API Integration Guide",
+      "file_type": "document",
+      "source_file": "xtsapi.md",
+      "rationale": "Provides instructions for integrating XTS-supported brokers into OpenAlgo.",
+      "id": "xtsapi_xts_integration",
+      "community": 39,
+      "norm_label": "xts api integration guide"
+    },
+    {
+      "label": "OpenAlgo TA Module",
+      "file_type": "code",
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "id": "openalgo_ta",
+      "community": 4,
+      "norm_label": "openalgo ta module"
+    },
+    {
+      "label": "Accumulation/Distribution Line (ADL)",
+      "file_type": "code",
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "id": "ta_adl",
+      "community": 4,
+      "norm_label": "accumulation/distribution line (adl)"
+    },
+    {
+      "label": "Chaikin Money Flow (CMF)",
+      "file_type": "code",
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "id": "ta_cmf",
+      "community": 4,
+      "norm_label": "chaikin money flow (cmf)"
+    },
+    {
+      "label": "Klinger Volume Oscillator (KVO)",
+      "file_type": "code",
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "id": "ta_kvo",
+      "community": 4,
+      "norm_label": "klinger volume oscillator (kvo)"
+    },
+    {
+      "label": "Money Flow Index (MFI)",
+      "file_type": "code",
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "id": "ta_mfi",
+      "community": 4,
+      "norm_label": "money flow index (mfi)"
+    },
+    {
+      "label": "On Balance Volume (OBV)",
+      "file_type": "code",
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "id": "ta_obv",
+      "community": 4,
+      "norm_label": "on balance volume (obv)"
+    },
+    {
+      "label": "Volume Weighted Average Price (VWAP)",
+      "file_type": "code",
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "id": "ta_vwap",
+      "community": 4,
+      "norm_label": "volume weighted average price (vwap)"
+    },
+    {
+      "label": "Volume Indicators Documentation",
+      "file_type": "document",
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "id": "prompt_indicators_volume",
+      "community": 4,
+      "norm_label": "volume indicators documentation"
+    },
+    {
+      "label": "WebSocket Frontend Management Audit",
+      "file_type": "document",
+      "source_file": "audit/websocket-frontend-management.md",
+      "id": "audit_websocket_frontend_management_md",
+      "community": 40,
+      "norm_label": "websocket frontend management audit"
+    },
+    {
+      "label": "Changelog",
+      "file_type": "document",
+      "source_file": "CHANGELOG.md",
+      "id": "changelog",
+      "community": 41,
+      "norm_label": "changelog"
+    },
+    {
+      "label": "Historify DuckDB",
+      "file_type": "code",
+      "source_file": "database/historify_db.py",
+      "rationale": "Columnar store for OHLCV candles, watchlist, and download job metadata.",
+      "id": "database_historify_db",
+      "community": 42,
+      "norm_label": "historify duckdb"
+    },
+    {
+      "label": "SandboxOrders Table",
+      "file_type": "code",
+      "source_file": "database/sandbox_db.py",
+      "rationale": "Stores all sandbox orders with complete state tracking and margin blocked at order time.",
+      "id": "database_sandbox_db_sandboxorders",
+      "community": 43,
+      "norm_label": "sandboxorders table"
+    },
+    {
+      "label": "SandboxPositions Table",
+      "file_type": "code",
+      "source_file": "database/sandbox_db.py",
+      "rationale": "Tracks open positions with unrealized, daily realized, and accumulated realized P&L.",
+      "id": "database_sandbox_db_sandboxpositions",
+      "community": 44,
+      "norm_label": "sandboxpositions table"
+    },
+    {
+      "label": "BrokerSymbolCache",
+      "file_type": "code",
+      "source_file": "database/token_db_enhanced.py",
+      "rationale": "Custom singleton cache for 100K+ symbols; lacks locking during reloads.",
+      "id": "database_token_db_enhanced_broker_symbol_cache",
+      "community": 45,
+      "norm_label": "brokersymbolcache"
+    },
+    {
+      "label": "Main Database",
+      "file_type": "code",
+      "source_file": "db/openalgo.db",
+      "id": "db_openalgo_db",
+      "community": 46,
+      "norm_label": "main database"
+    },
+    {
+      "label": "WebSocket Architecture Design",
+      "file_type": "document",
+      "source_file": "design/06-websockets/README.md",
+      "id": "design_06_websockets_readme_md",
+      "community": 47,
+      "norm_label": "websocket architecture design"
+    },
+    {
+      "label": "Sandbox Architecture (Analyzer Mode)",
+      "file_type": "document",
+      "source_file": "design/07-sandbox/README.md",
+      "id": "design_07_sandbox_readme",
+      "community": 48,
+      "norm_label": "sandbox architecture (analyzer mode)"
+    },
+    {
+      "label": "Historify Architecture",
+      "file_type": "document",
+      "source_file": "design/08-historify/README.md",
+      "id": "design_08_historify_readme",
+      "community": 49,
+      "norm_label": "historify architecture"
+    },
+    {
+      "label": "BrokerAdapter Contract",
+      "file_type": "code",
+      "source_file": "broker/contract/",
+      "rationale": "Formal in-repo module defining required and optional protocols for all broker integrations.",
+      "id": "broker_contract",
+      "community": 5,
+      "norm_label": "brokeradapter contract"
+    },
+    {
+      "label": "Delta Exchange Adapter",
+      "file_type": "code",
+      "source_file": "broker/deltaexchange/",
+      "rationale": "Reference native crypto adapter proving the BrokerAdapter contract.",
+      "id": "broker_deltaexchange",
+      "community": 5,
+      "norm_label": "delta exchange adapter"
+    },
+    {
+      "label": "ADR-0003: In-tree broker model (no out-of-tree plugins)",
+      "file_type": "document",
+      "source_file": "superpowers/decisions/2026-07-13-in-tree-broker-model.md",
+      "rationale": "Supersedes out-of-tree plugin model to match existing practice and simplify the contract boundary.",
+      "id": "superpowers_decisions_adr_0003",
+      "community": 5,
+      "norm_label": "adr-0003: in-tree broker model (no out-of-tree plugins)"
+    },
+    {
+      "label": "The Problem \u2014 Current Challenges & Solutions",
+      "file_type": "document",
+      "source_file": "superpowers/problem/2026-07-13-challenges-and-solutions.md",
+      "id": "superpowers_problem_challenges_solutions",
+      "community": 5,
+      "norm_label": "the problem \u2014 current challenges & solutions"
+    },
+    {
+      "label": "Phased Roadmap \u2014 P0A to P7",
+      "file_type": "document",
+      "source_file": "superpowers/roadmap/2026-07-13-phased-roadmap.md",
+      "id": "superpowers_roadmap_phased_roadmap",
+      "community": 5,
+      "norm_label": "phased roadmap \u2014 p0a to p7"
+    },
+    {
+      "label": "Global-Market Architecture Design",
+      "file_type": "document",
+      "source_file": "superpowers/specs/2026-07-13-global-market-architecture-design.md",
+      "rationale": "Defines the 5-axis domain model (Venue, Market, Segment, AssetClass, Kind) and the BrokerAdapter Protocol.",
+      "id": "superpowers_specs_global_market_architecture",
+      "community": 5,
+      "norm_label": "global-market architecture design"
+    },
+    {
+      "label": "REST API Architecture",
+      "file_type": "document",
+      "source_file": "design/09-rest-api/README.md",
+      "id": "design_09_rest_api_readme",
+      "community": 50,
+      "norm_label": "rest api architecture"
+    },
+    {
+      "label": "Flow Architecture",
+      "file_type": "document",
+      "source_file": "design/10-flow-architecture/README.md",
+      "id": "design_10_flow_architecture_readme",
+      "community": 51,
+      "norm_label": "flow architecture"
+    },
+    {
+      "label": "Docker Configuration",
+      "file_type": "document",
+      "source_file": "design/11-docker/README.md",
+      "id": "design_11_docker_readme",
+      "community": 52,
+      "norm_label": "docker configuration"
+    },
+    {
+      "label": "Chartink Architecture",
+      "file_type": "document",
+      "source_file": "design/13-chartink/README.md",
+      "id": "design_13_chartink_readme",
+      "community": 53,
+      "norm_label": "chartink architecture"
+    },
+    {
+      "label": "Centralized Logging",
+      "file_type": "document",
+      "source_file": "design/16-centralized-logging/README.md",
+      "id": "design_16_centralized_logging_readme",
+      "community": 54,
+      "norm_label": "centralized logging"
+    },
+    {
+      "label": "Connection Pooling",
+      "file_type": "document",
+      "source_file": "design/17-connection-pooling/README.md",
+      "id": "design_17_connection_pooling_readme",
+      "community": 55,
+      "norm_label": "connection pooling"
+    },
+    {
+      "label": "PlaceOrder Call Flow",
+      "file_type": "document",
+      "source_file": "design/19-placeorder-flow/README.md",
+      "id": "design_19_placeorder_flow_readme",
+      "community": 56,
+      "norm_label": "placeorder call flow"
+    },
+    {
+      "label": "Master Contract Download Overview",
+      "file_type": "concept",
+      "source_file": "design/32-master-contract/README.md",
+      "rationale": "Master contracts contain symbol mappings between OpenAlgo's standardized format and broker-specific formats.",
+      "id": "design_32_master_contract_overview",
+      "community": 57,
+      "norm_label": "master contract download overview"
+    },
+    {
+      "label": "master_contract_status table",
+      "file_type": "code",
+      "source_file": "design/32-master-contract/README.md",
+      "id": "design_32_master_contract_status_db",
+      "community": 58,
+      "norm_label": "master_contract_status table"
+    },
+    {
+      "label": "broker/*/api/auth_api.py",
+      "file_type": "code",
+      "source_file": "design/33-broker-folder/README.md",
+      "id": "design_33_broker_api_auth",
+      "community": 59,
+      "norm_label": "broker/*/api/auth_api.py"
+    },
+    {
+      "label": "Dhan GTT API",
+      "file_type": "code",
+      "source_file": "broker/dhan/api/gtt_api.py",
+      "rationale": "Broker-specific implementation of GTT operations for Dhan (Forever Orders).",
+      "id": "broker_dhan_api_gtt_api",
+      "community": 6,
+      "norm_label": "dhan gtt api"
+    },
+    {
+      "label": "Zerodha GTT API",
+      "file_type": "code",
+      "source_file": "broker/zerodha/api/gtt_api.py",
+      "rationale": "Broker-specific implementation of GTT operations for Zerodha Kite.",
+      "id": "broker_zerodha_api_gtt_api",
+      "community": 6,
+      "norm_label": "zerodha gtt api"
+    },
+    {
+      "label": "GTT Database Models",
+      "file_type": "code",
+      "source_file": "database/gtt_db.py",
+      "rationale": "SQLAlchemy models for SandboxGTT and SandboxGTTLeg.",
+      "id": "database_gtt_db",
+      "community": 6,
+      "norm_label": "gtt database models"
+    },
+    {
+      "label": "Sandbox GTT Manager",
+      "file_type": "code",
+      "source_file": "sandbox/gtt_manager.py",
+      "rationale": "Handles GTT placement, modification, cancellation, and atomic trigger claims in sandbox mode.",
+      "id": "sandbox_gtt_manager",
+      "community": 6,
+      "norm_label": "sandbox gtt manager"
+    },
+    {
+      "label": "GTT Orders Implementation Plan",
+      "file_type": "document",
+      "source_file": "plans/2026-04-22-gtt-orders-implementation-plan.md",
+      "rationale": "Phased implementation plan for Good Till Triggered (GTT) orders across live brokers and sandbox.",
+      "id": "plans_gtt_orders_implementation_plan",
+      "community": 6,
+      "norm_label": "gtt orders implementation plan"
+    },
+    {
+      "label": "broker/*/mapping/transform_data.py",
+      "file_type": "code",
+      "source_file": "design/33-broker-folder/README.md",
+      "id": "design_33_broker_mapping_transform",
+      "community": 60,
+      "norm_label": "broker/*/mapping/transform_data.py"
+    },
+    {
+      "label": "API Key Architecture",
+      "file_type": "concept",
+      "source_file": "design/37-apikey-playground/README.md",
+      "id": "design_37_apikey_architecture",
+      "community": 61,
+      "norm_label": "api key architecture"
+    },
+    {
+      "label": "Python Strategy Hosting",
+      "file_type": "concept",
+      "source_file": "design/38-python-strategies/README.md",
+      "id": "design_38_python_strategies_hosting",
+      "community": 62,
+      "norm_label": "python strategy hosting"
+    },
+    {
+      "label": "MCP Architecture",
+      "file_type": "concept",
+      "source_file": "design/41-mcp-architecture/README.md",
+      "id": "design_41_mcp_architecture",
+      "community": 63,
+      "norm_label": "mcp architecture"
+    },
+    {
+      "label": "PnL Tracker Architecture",
+      "file_type": "concept",
+      "source_file": "design/44-pnl-tracker/README.md",
+      "id": "design_44_pnl_tracker_architecture",
+      "community": 64,
+      "norm_label": "pnl tracker architecture"
+    },
+    {
+      "label": "OpenAlgo API Client",
+      "file_type": "code",
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "id": "openalgo_api",
+      "community": 65,
+      "norm_label": "openalgo api client"
+    },
+    {
+      "label": "OpenAlgo Python SDK",
+      "file_type": "code",
+      "source_file": "userguide/20-python-strategies/README.md",
+      "rationale": "Official library for programmatic strategy execution.",
+      "id": "openalgo_python_sdk",
+      "community": 66,
+      "norm_label": "openalgo python sdk"
+    },
+    {
+      "label": "PositionManager",
+      "file_type": "code",
+      "source_file": "sandbox/position_manager.py",
+      "rationale": "Handles MTM updates, session filtering (03:00 IST boundary), and expired contract settlement.",
+      "id": "sandbox_position_manager_positionmanager",
+      "community": 67,
+      "norm_label": "positionmanager"
+    },
+    {
+      "label": "Why Build with OpenAlgo?",
+      "file_type": "document",
+      "source_file": "userguide/02-why-build-with-openalgo/README.md",
+      "id": "userguide_02_why_build_with_openalgo_readme",
+      "community": 68,
+      "norm_label": "why build with openalgo?"
+    },
+    {
+      "label": "Key Concepts",
+      "file_type": "document",
+      "source_file": "userguide/03-key-concepts/README.md",
+      "id": "userguide_03_key_concepts_readme",
+      "community": 69,
+      "norm_label": "key concepts"
+    },
+    {
+      "label": "Strategy Position Database",
+      "file_type": "code",
+      "source_file": "database/strategy_position_db.py",
+      "rationale": "Local storage for strategy-specific orders, trades, and positions.",
+      "id": "database_strategy_position_db",
+      "community": 7,
+      "norm_label": "strategy position database"
+    },
+    {
+      "label": "Strategy Order Poller",
+      "file_type": "code",
+      "source_file": "services/strategy_order_poller.py",
+      "rationale": "Background thread polling broker order status at 1 req/sec to update local state.",
+      "id": "services_strategy_order_poller",
+      "community": 7,
+      "norm_label": "strategy order poller"
+    },
+    {
+      "label": "Strategy Position Tracker",
+      "file_type": "code",
+      "source_file": "services/strategy_position_tracker.py",
+      "rationale": "Manages position state, breakeven logic, and PnL calculations.",
+      "id": "services_strategy_position_tracker",
+      "community": 7,
+      "norm_label": "strategy position tracker"
+    },
+    {
+      "label": "Strategy Risk Engine",
+      "file_type": "code",
+      "source_file": "services/strategy_risk_engine.py",
+      "rationale": "Singleton service monitoring active strategy positions and checking SL/target/trailing triggers.",
+      "id": "services_strategy_risk_engine",
+      "community": 7,
+      "norm_label": "strategy risk engine"
+    },
+    {
+      "label": "Strategy Risk Management & Position Tracking PRD",
+      "file_type": "document",
+      "source_file": "plans/2026-02-06-strategy-risk-management-prd.md",
+      "rationale": "Product Requirements Document for local strategy-level order/position tracking and risk management.",
+      "id": "plans_strategy_risk_management_prd",
+      "community": 7,
+      "norm_label": "strategy risk management & position tracking prd"
+    },
+    {
+      "label": "System Requirements",
+      "file_type": "document",
+      "source_file": "userguide/03-system-requirements/README.md",
+      "id": "userguide_03_system_requirements_readme",
+      "community": 70,
+      "norm_label": "system requirements"
+    },
+    {
+      "label": "Basket Orders",
+      "file_type": "document",
+      "source_file": "userguide/13-basket-orders/README.md",
+      "id": "userguide_13_basket_orders_readme",
+      "community": 71,
+      "norm_label": "basket orders"
+    },
+    {
+      "label": "Async Download Task",
+      "file_type": "code",
+      "source_file": "design/32-master-contract/README.md",
+      "id": "design_32_master_contract_async_task",
+      "community": 8,
+      "norm_label": "async download task"
+    },
+    {
+      "label": "symtoken table",
+      "file_type": "code",
+      "source_file": "design/32-master-contract/README.md",
+      "id": "design_32_master_contract_db_schema",
+      "community": 8,
+      "norm_label": "symtoken table"
+    },
+    {
+      "label": "Download Trigger",
+      "file_type": "code",
+      "source_file": "design/32-master-contract/README.md",
+      "id": "design_32_master_contract_trigger",
+      "community": 8,
+      "norm_label": "download trigger"
+    },
+    {
+      "label": "Broker Directory Structure",
+      "file_type": "concept",
+      "source_file": "design/33-broker-folder/README.md",
+      "id": "design_33_broker_folder_structure",
+      "community": 8,
+      "norm_label": "broker directory structure"
+    },
+    {
+      "label": "Startup Sequence",
+      "file_type": "concept",
+      "source_file": "design/34-app-startup/README.md",
+      "id": "design_34_app_startup_sequence",
+      "community": 8,
+      "norm_label": "startup sequence"
+    },
+    {
+      "label": "app.py",
+      "file_type": "code",
+      "source_file": "app.py",
+      "id": "app_py",
+      "community": 9,
+      "norm_label": "app.py"
+    },
+    {
+      "label": "install.sh",
+      "file_type": "code",
+      "source_file": "install/install.sh",
+      "rationale": "Recommended approach for production deployment on Ubuntu servers.",
+      "id": "install_install_sh",
+      "community": 9,
+      "norm_label": "install.sh"
+    },
+    {
+      "label": "Installation Guide",
+      "file_type": "document",
+      "source_file": "userguide/04-installation/README.md",
+      "id": "userguide_04_installation_readme",
+      "community": 9,
+      "norm_label": "installation guide"
+    },
+    {
+      "label": "First-Time Setup",
+      "file_type": "document",
+      "source_file": "userguide/05-first-time-setup/README.md",
+      "id": "userguide_05_first_time_setup_readme",
+      "community": 9,
+      "norm_label": "first-time setup"
+    }
+  ],
+  "links": [
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "superpowers/audit/coupling_inventory.py",
+      "source_location": "L70",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "superpowers_audit_coupling_inventory_main",
+      "target": "superpowers_audit_coupling_inventory_scan",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "superpowers/audit/coupling_inventory.py",
+      "source_location": "L44",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "superpowers_audit_coupling_inventory",
+      "target": "superpowers_audit_coupling_inventory_scan",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "superpowers/audit/coupling_inventory.py",
+      "source_location": "L62",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "superpowers_audit_coupling_inventory",
+      "target": "superpowers_audit_coupling_inventory_main",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/09-api-key-management/README.md",
+      "rationale": "API Key management defines order modes that interact with Action Center.",
+      "source": "userguide_09_api_key_management_readme",
+      "target": "userguide_22_action_center_readme"
+    },
+    {
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "rationale": "Scanner service builds candles from the live WebSocket tick stream.",
+      "source_file": "scanner-architecture.md",
+      "source": "scanner_architecture",
+      "target": "websocket_architecture",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "design/32-master-contract/README.md",
+      "source": "design_32_master_contract_trigger",
+      "target": "design_32_master_contract_async_task"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "design/34-app-startup/README.md",
+      "source": "design_34_app_startup_sequence",
+      "target": "design_33_broker_folder_structure"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "design/42-action-center/README.md",
+      "source": "design_42_action_center_architecture",
+      "target": "design_33_broker_api_order"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "design/52-broker-factory/README.md",
+      "source": "design_52_broker_factory",
+      "target": "design_33_broker_streaming_websocket"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "design/01-frontend/README.md",
+      "source": "frontend_hooks_usemarketdata",
+      "target": "frontend_lib_marketdatamanager"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "sandbox/execution_engine.py",
+      "source": "sandbox_execution_engine_executionengine",
+      "target": "sandbox_fund_manager_fundmanager"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "plans/2026-04-22-gtt-orders-implementation-plan.md",
+      "source": "sandbox_gtt_manager",
+      "target": "database_gtt_db"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "sandbox/holdings_manager.py",
+      "source": "sandbox_holdings_manager_holdingsmanager",
+      "target": "sandbox_fund_manager_fundmanager"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "sandbox/order_manager.py",
+      "source": "sandbox_order_manager_ordermanager",
+      "target": "sandbox_fund_manager_fundmanager"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "sandbox/squareoff_manager.py",
+      "source": "sandbox_squareoff_manager_squareoffmanager",
+      "target": "sandbox_order_manager_ordermanager"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "services/place_order_service.py",
+      "source": "services_place_order_service",
+      "target": "utils_event_bus"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "design/06-websockets/README.md",
+      "source": "services_websocket_client",
+      "target": "websocket_proxy_server"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "design/06-websockets/README.md",
+      "source": "services_websocket_service",
+      "target": "websocket_proxy_server"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "design/06-websockets/README.md",
+      "source": "websocket_proxy_server",
+      "target": "websocket_proxy_connection_manager"
+    },
+    {
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "audit/websocket-integration-guidelines.md",
+      "source": "audit_websocket_integration_guidelines_md",
+      "target": "concept_fallback_chain"
+    },
+    {
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "audit/websocket-token-refresh-audit.md",
+      "source": "audit_websocket_token_refresh_audit_md",
+      "target": "concept_3am_cycle"
+    },
+    {
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "superpowers/decisions/2026-07-13-direct-api-integration-no-vendor-sdks.md",
+      "source": "superpowers_decisions_adr_0002",
+      "target": "superpowers_decisions_adr_0001"
+    },
+    {
+      "relation": "implements",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "superpowers/decisions/2026-07-13-crypto-native-integration-not-ccxt.md",
+      "source": "broker_deltaexchange",
+      "target": "broker_contract"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_account_services_funds"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_account_services_holdings"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_account_services_margin"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_account_services_orderbook"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_account_services_positionbook"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_account_services_tradebook"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_analyzer_services_analyzerstatus"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_analyzer_services_analyzertoggle"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_analyzer_services_pnlsymbols"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_chart_services_chart"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_market_calendar_holidays"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_market_calendar_timings"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_market_data_depth"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_market_data_history"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_market_data_intervals"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_market_data_multiquotes"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_market_data_quotes"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_market_data_ticker"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_options_services_multioptiongreeks"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_options_services_optionchain"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_options_services_optiongreeks"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_options_services_optionsymbol"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_options_services_syntheticfuture"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_information_openposition"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_information_orderstatus"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_management_basketorder"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_management_cancelallorder"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_management_cancelgttorder"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_management_cancelorder"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_management_closeposition"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_management_gttorderbook"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_management_modifygttorder"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_management_modifyorder"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_management_optionsmultiorder"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_management_optionsorder"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_management_placegttorder"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_management_placeorder"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_management_placesmartorder"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_order_management_splitorder"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_rate_limiting"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_symbol_services_expiry"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_symbol_services_instruments"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_symbol_services_search"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_symbol_services_symbol"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_telegram_services_readme"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_utility_services_ping"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_websocket_streaming_depth"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_websocket_streaming_ltp"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_websocket_streaming_order_updates"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_websocket_streaming_quote"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md",
+      "source": "api_readme",
+      "target": "api_whatsapp_services_readme"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/whatsapp-services/README.md",
+      "source": "api_whatsapp_services_readme",
+      "target": "api_whatsapp_services_notify"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "audit/CACHE_AUDIT.md",
+      "source": "audit_cache_audit",
+      "target": "database_auth_db_auth_cache"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "audit/DEEP_SECURITY_AUDIT_REPORT.md",
+      "source": "audit_deep_security_audit_report",
+      "target": "database_historify_db_copy_query"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "audit/PUBLIC_IP_SECURITY_AUDIT_2026-04.md",
+      "source": "audit_public_ip_security_audit_2026_04",
+      "target": "websocket_proxy_server_last_message_time"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "audit/websocket-broker-priority.md",
+      "source": "audit_websocket_broker_priority",
+      "target": "broker_dhan_sandbox_adapter"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "audit/websocket-broker-priority.md",
+      "source": "audit_websocket_broker_priority",
+      "target": "database_master_contract_cache_hook"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "audit/websocket-keepalive-audit.md",
+      "source": "audit_websocket_keepalive_audit_md",
+      "target": "websocket_proxy_base_adapter"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "broker-integration-guide.md",
+      "source": "broker_integration_guide",
+      "target": "websocket_proxy_broker_factory",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "design/33-broker-folder/README.md",
+      "source": "design_33_broker_folder_structure",
+      "target": "design_32_master_contract_db_schema"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "design/39-strategy-module/README.md",
+      "source": "design_39_strategy_module_architecture",
+      "target": "design_36_rate_limiting_architecture"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "design/43-telegram-bot/README.md",
+      "source": "design_43_telegram_bot_components",
+      "target": "design_53_event_bus"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "HEALTH_MONITOR_REACT_FRONTEND.md",
+      "source": "health_monitor_react_frontend",
+      "target": "frontend_src_api_health",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "HEALTH_MONITOR_REACT_FRONTEND.md",
+      "source": "health_monitor_react_frontend",
+      "target": "frontend_src_pages_healthmonitor",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "HEALTH_MONITORING_IMPLEMENTATION.md",
+      "source": "health_monitoring_implementation",
+      "target": "blueprints_health",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "HEALTH_MONITORING_IMPLEMENTATION.md",
+      "source": "health_monitoring_implementation",
+      "target": "database_health_db",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "HEALTH_MONITORING_IMPLEMENTATION.md",
+      "source": "health_monitoring_implementation",
+      "target": "utils_health_monitor",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "INDEX.md",
+      "source": "index",
+      "target": "broker_integration_guide",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "INDEX.md",
+      "source": "index",
+      "target": "health_monitor_react_frontend",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "INDEX.md",
+      "source": "index",
+      "target": "health_monitoring_implementation",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "INDEX.md",
+      "source": "index",
+      "target": "mcp_tool_reference",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "INDEX.md",
+      "source": "index",
+      "target": "scanner_architecture",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "INDEX.md",
+      "source": "index",
+      "target": "websocket_architecture",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "INDEX.md",
+      "source": "index",
+      "target": "websocket_quote_feed",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "INDEX.md",
+      "source": "index",
+      "target": "whatsapp",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "mcp-tool-reference.md",
+      "source": "mcp_tool_reference",
+      "target": "websocket_quote_feed",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "migration/flask-to-fastapi-migration-plan.md",
+      "source": "migration_flask_to_fastapi_migration_plan",
+      "target": "utils_event_bus"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "source": "openalgo_ta",
+      "target": "ta_adl"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "source": "openalgo_ta",
+      "target": "ta_cmf"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "source": "openalgo_ta",
+      "target": "ta_kvo"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "source": "openalgo_ta",
+      "target": "ta_mfi"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "source": "openalgo_ta",
+      "target": "ta_obv"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "source": "openalgo_ta",
+      "target": "ta_vwap"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "plans/2026-04-22-gtt-orders-implementation-plan.md",
+      "source": "plans_gtt_orders_implementation_plan",
+      "target": "broker_dhan_api_gtt_api"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "plans/2026-04-22-gtt-orders-implementation-plan.md",
+      "source": "plans_gtt_orders_implementation_plan",
+      "target": "broker_zerodha_api_gtt_api"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "plans/2026-04-22-gtt-orders-implementation-plan.md",
+      "source": "plans_gtt_orders_implementation_plan",
+      "target": "database_gtt_db"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "plans/2026-04-22-gtt-orders-implementation-plan.md",
+      "source": "plans_gtt_orders_implementation_plan",
+      "target": "sandbox_gtt_manager"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "plans/2026-02-06-strategy-risk-management-prd.md",
+      "source": "plans_strategy_risk_management_prd",
+      "target": "services_strategy_order_poller"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "plans/2026-02-06-strategy-risk-management-prd.md",
+      "source": "plans_strategy_risk_management_prd",
+      "target": "services_strategy_position_tracker"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "plans/2026-02-06-strategy-risk-management-prd.md",
+      "source": "plans_strategy_risk_management_prd",
+      "target": "services_strategy_risk_engine"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "prompt/indicators/volume - openalgo indicators.md",
+      "source": "prompt_indicators_volume",
+      "target": "openalgo_ta"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "releases/version-2.0.0.8-released.md",
+      "source": "release_v2_0_0_8",
+      "target": "release_v2_0_0_7"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "releases/version-2.0.1.0-released.md",
+      "source": "release_v2_0_1_0",
+      "target": "remote_mcp"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "releases/version-2.0.1.1-released.md",
+      "source": "release_v2_0_1_1",
+      "target": "whatsapp_bot"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "releases/version-2.0.1.4-released.md",
+      "source": "release_v2_0_1_4",
+      "target": "scalping_terminal"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "scanner-architecture.md",
+      "source": "scanner_architecture",
+      "target": "websocket_quote_feed",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "superpowers/README.md",
+      "source": "superpowers_architecture",
+      "target": "broker_adapter_contract"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "superpowers/decisions/2026-07-13-in-tree-broker-model.md",
+      "source": "superpowers_decisions_adr_0003",
+      "target": "broker_contract"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "superpowers/plans/2026-08-02-repository-documentation-freshness.md",
+      "source": "superpowers_plans_docs_freshness",
+      "target": "scripts_check_docs_freshness"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "superpowers/plans/2026-07-31-portfolio-backtester-release-hardening.md",
+      "source": "superpowers_plans_portfolio_hardening",
+      "target": "portfolio_engine"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "superpowers/problem/2026-07-13-challenges-and-solutions.md",
+      "source": "superpowers_problem_challenges_solutions",
+      "target": "superpowers_decisions_adr_0003"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "superpowers/roadmap/2026-07-13-phased-roadmap.md",
+      "source": "superpowers_roadmap_phased_roadmap",
+      "target": "superpowers_specs_global_market_architecture"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "superpowers/specs/2026-07-13-global-market-architecture-design.md",
+      "source": "superpowers_specs_global_market_architecture",
+      "target": "superpowers_decisions_adr_0003"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "telegram-chart-rendering.md",
+      "source": "telegram_chart_rendering",
+      "target": "services_telegram_bot_service",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/04-installation/README.md",
+      "source": "userguide_04_installation_readme",
+      "target": "app_py"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/04-installation/README.md",
+      "source": "userguide_04_installation_readme",
+      "target": "install_install_sh"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/05-first-time-setup/README.md",
+      "source": "userguide_05_first_time_setup_readme",
+      "target": "userguide_04_installation_readme"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/10-placing-first-order/README.md",
+      "source": "userguide_10_placing_first_order_readme",
+      "target": "userguide_15_analyzer_mode_readme"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/16-tradingview-integration/README.md",
+      "source": "userguide_16_tradingview_integration_readme",
+      "target": "userguide_12_smart_orders_readme"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/21-flow-visual-builder/README.md",
+      "source": "userguide_21_flow_visual_builder_readme",
+      "target": "userguide_23_telegram_bot_readme"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/24-pnl-tracker/README.md",
+      "source": "userguide_24_pnl_tracker_readme",
+      "target": "userguide_25_latency_monitor_readme"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/25-latency-monitor/README.md",
+      "source": "userguide_25_latency_monitor_readme",
+      "target": "userguide_26_traffic_logs_readme"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/26-traffic-logs/README.md",
+      "source": "userguide_26_traffic_logs_readme",
+      "target": "db_logs_db"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/26-traffic-logs/README.md",
+      "source": "userguide_26_traffic_logs_readme",
+      "target": "userguide_27_security_settings_readme"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/27-security-settings/README.md",
+      "source": "userguide_27_security_settings_readme",
+      "target": "userguide_28_two_factor_auth_readme"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/28-two-factor-auth/README.md",
+      "source": "userguide_28_two_factor_auth_readme",
+      "target": "userguide_29_troubleshooting_readme"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/29-troubleshooting/README.md",
+      "source": "userguide_29_troubleshooting_readme",
+      "target": "userguide_30_faqs_readme"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/29-troubleshooting/README.md",
+      "source": "userguide_29_troubleshooting_readme",
+      "target": "userguide_symbol_format_readme"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/30-faqs/README.md",
+      "source": "userguide_30_faqs_readme",
+      "target": "db_health_db"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/31-tools/README.md",
+      "source": "userguide_31_tools_readme",
+      "target": "userguide_24_pnl_tracker_readme"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "websocket-architecture.md",
+      "source": "websocket_architecture",
+      "target": "services_market_data_service",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "websocket-architecture.md",
+      "source": "websocket_architecture",
+      "target": "websocket_proxy_broker_factory",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "websocket-architecture.md",
+      "source": "websocket_architecture",
+      "target": "websocket_proxy_connection_manager",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "websocket-architecture.md",
+      "source": "websocket_architecture",
+      "target": "websocket_proxy_server",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "audit/websocket-keepalive-audit.md",
+      "source": "websocket_proxy_connection_manager",
+      "target": "websocket_proxy_base_adapter"
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "whatsapp.md",
+      "source": "whatsapp",
+      "target": "services_whatsapp_bot_service",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "xtsapi.md",
+      "source": "xtsapi_xts_integration",
+      "target": "xtsapi_compositedge_plugin"
+    },
+    {
+      "relation": "references",
+      "confidence": "INFERRED",
+      "rationale": "React frontend consumes endpoints defined in the health blueprint.",
+      "source_file": "HEALTH_MONITOR_REACT_FRONTEND.md",
+      "source": "health_monitor_react_frontend",
+      "target": "blueprints_health",
+      "confidence_score": 0.5
+    },
+    {
+      "relation": "references",
+      "confidence": "INFERRED",
+      "confidence_score": 0.7,
+      "source_file": "start.sh",
+      "source": "docker_start_sh",
+      "target": "restx_api_init"
+    },
+    {
+      "relation": "references",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "userguide/15-analyzer-mode/README.md",
+      "rationale": "Analyzer mode still requires broker data services for market prices.",
+      "source": "userguide_15_analyzer_mode_readme",
+      "target": "userguide_06_broker_connection_readme"
+    },
+    {
+      "relation": "semantically_similar_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "audit/CACHE_AUDIT.md",
+      "rationale": "The audit identifies a critical security flaw (C1) in how this cache handles keys.",
+      "source": "database_auth_db_broker_cache",
+      "target": "audit_cache_audit"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "design/54-scalping-terminal/README.md",
+      "source": "design_54_scalping_terminal",
+      "target": "design_33_broker_api_data"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "websocket_proxy/connection_manager.py",
+      "source": "websocket_proxy_connection_manager",
+      "target": "utils_logging"
+    },
+    {
+      "relation": "references",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "architecture-diagram.png",
+      "source": "architecture_diagram",
+      "target": "api_websocket_streaming_ltp"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "design/32-master-contract/README.md",
+      "source": "design_32_master_contract_async_task",
+      "target": "design_33_broker_folder_structure"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "audit/websocket-integration-guidelines.md",
+      "source": "frontend_hooks_useliveprice",
+      "target": "frontend_hooks_usemarketdata"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "services/flow_executor_service.py",
+      "source": "services_flow_executor_service",
+      "target": "services_place_order_service"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "services/place_order_service.py",
+      "source": "services_place_order_service",
+      "target": "sandbox_order_manager_ordermanager"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "plans/2026-02-06-strategy-risk-management-prd.md",
+      "source": "services_strategy_risk_engine",
+      "target": "database_strategy_position_db"
+    },
+    {
+      "relation": "conceptually_related_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "userguide/31-tools/README.md",
+      "source": "userguide_31_tools_readme",
+      "target": "userguide_symbol_format_readme"
+    },
+    {
+      "relation": "references",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "architecture-diagram.png",
+      "source": "architecture_diagram",
+      "target": "api_readme"
+    }
+  ],
+  "hyperedges": [
+    {
+      "id": "cache_concurrency_risks",
+      "label": "Cache Concurrency & Thread Safety Risks",
+      "nodes": [
+        "database_auth_db_auth_cache",
+        "database_token_db_enhanced_broker_symbol_cache",
+        "websocket_proxy_server_last_message_time"
+      ],
+      "relation": "form",
+      "confidence": "EXTRACTED",
+      "confidence_score": 0.85,
+      "source_file": "audit/CACHE_AUDIT.md"
+    },
+    {
+      "id": "critical_security_vulnerabilities",
+      "label": "Critical Security Vulnerabilities",
+      "nodes": [
+        "database_historify_db_copy_query",
+        "database_auth_db_broker_cache",
+        "broker_dhan_sandbox_adapter"
+      ],
+      "relation": "participate_in",
+      "confidence": "EXTRACTED",
+      "confidence_score": 0.9,
+      "source_file": "audit/DEEP_SECURITY_AUDIT_REPORT.md"
+    },
+    {
+      "id": "gtt_order_lifecycle",
+      "label": "GTT Order Lifecycle",
+      "nodes": [
+        "sandbox_gtt_manager",
+        "database_gtt_db",
+        "broker_zerodha_api_gtt_api",
+        "broker_dhan_api_gtt_api"
+      ],
+      "relation": "form",
+      "confidence": "EXTRACTED",
+      "confidence_score": 0.9,
+      "source_file": "plans/2026-04-22-gtt-orders-implementation-plan.md"
+    },
+    {
+      "id": "monitoring_and_logs_flow",
+      "label": "Monitoring and Logs Flow",
+      "nodes": [
+        "userguide_25_latency_monitor_readme",
+        "userguide_26_traffic_logs_readme",
+        "userguide_27_security_settings_readme"
+      ],
+      "relation": "participate_in",
+      "confidence": "EXTRACTED",
+      "confidence_score": 0.9,
+      "source_file": "userguide/26-traffic-logs/README.md"
+    },
+    {
+      "id": "order_execution_flow",
+      "label": "Order Execution Pipeline",
+      "nodes": [
+        "userguide_10_placing_first_order_readme",
+        "userguide_15_analyzer_mode_readme",
+        "userguide_22_action_center_readme"
+      ],
+      "relation": "participate_in",
+      "confidence": "EXTRACTED",
+      "confidence_score": 0.9,
+      "source_file": "userguide/10-placing-first-order/README.md"
+    },
+    {
+      "id": "order_management_flow",
+      "label": "Order Management Flow",
+      "nodes": [
+        "api_order_management_placeorder",
+        "api_order_management_modifyorder",
+        "api_order_management_cancelorder",
+        "api_order_information_orderstatus"
+      ],
+      "relation": "participate_in",
+      "confidence": "EXTRACTED",
+      "confidence_score": 0.9,
+      "source_file": "api/README.md"
+    },
+    {
+      "id": "volume_analysis_suite",
+      "label": "Volume Analysis Suite",
+      "nodes": [
+        "ta_obv",
+        "ta_vwap",
+        "ta_mfi",
+        "ta_adl",
+        "ta_cmf",
+        "ta_kvo"
+      ],
+      "relation": "participate_in",
+      "confidence": "EXTRACTED",
+      "confidence_score": 0.9,
+      "source_file": "prompt/indicators/volume - openalgo indicators.md"
+    },
+    {
+      "id": "analyzer_sandbox_mode",
+      "label": "Analyzer (Sandbox) Mode",
+      "nodes": [
+        "api_analyzer_services_analyzerstatus",
+        "api_analyzer_services_analyzertoggle",
+        "api_analyzer_services_pnlsymbols"
+      ],
+      "relation": "form",
+      "confidence": "EXTRACTED",
+      "confidence_score": 0.95,
+      "source_file": "api/analyzer-services/analyzerstatus.md"
+    },
+    {
+      "id": "market_data_flow",
+      "label": "Market Data Streaming Flow",
+      "nodes": [
+        "websocket_proxy_server",
+        "websocket_proxy_connection_manager",
+        "services_websocket_service",
+        "frontend_lib_marketdatamanager"
+      ],
+      "relation": "participate_in",
+      "confidence": "EXTRACTED",
+      "confidence_score": 0.95,
+      "source_file": "design/06-websockets/README.md"
+    },
+    {
+      "id": "security_and_auth_stack",
+      "label": "Security and Authentication Stack",
+      "nodes": [
+        "userguide_27_security_settings_readme",
+        "userguide_28_two_factor_auth_readme"
+      ],
+      "relation": "form",
+      "confidence": "EXTRACTED",
+      "confidence_score": 0.95,
+      "source_file": "userguide/28-two-factor-auth/README.md"
+    },
+    {
+      "id": "strategy_risk_management_flow",
+      "label": "Strategy Risk Management Flow",
+      "nodes": [
+        "services_strategy_risk_engine",
+        "services_strategy_position_tracker",
+        "services_strategy_order_poller",
+        "database_strategy_position_db"
+      ],
+      "relation": "participate_in",
+      "confidence": "EXTRACTED",
+      "confidence_score": 0.95,
+      "source_file": "plans/2026-02-06-strategy-risk-management-prd.md"
+    },
+    {
+      "id": "broker_interface_pattern",
+      "label": "Standardized Broker Interface",
+      "nodes": [
+        "design_33_broker_api_auth",
+        "design_33_broker_api_order",
+        "design_33_broker_api_data",
+        "design_33_broker_mapping_transform",
+        "design_33_broker_streaming_websocket"
+      ],
+      "relation": "implement",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "design/33-broker-folder/README.md"
+    },
+    {
+      "id": "external_integrations",
+      "label": "External Platform Integrations",
+      "nodes": [
+        "userguide_16_tradingview_integration_readme"
+      ],
+      "relation": "form",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "userguide/02-why-build-with-openalgo/README.md"
+    },
+    {
+      "id": "global_expansion_architecture",
+      "label": "Global Expansion Architecture Framework",
+      "nodes": [
+        "superpowers_decisions_adr_0001",
+        "superpowers_decisions_adr_0002",
+        "superpowers_decisions_adr_0003",
+        "superpowers_specs_global_market_architecture",
+        "superpowers_roadmap_phased_roadmap"
+      ],
+      "relation": "participate_in",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "superpowers/specs/2026-07-13-global-market-architecture-design.md"
+    },
+    {
+      "id": "sandbox_subsystem",
+      "label": "Sandbox/Analyzer Mode Components",
+      "nodes": [
+        "sandbox_fund_manager_fundmanager",
+        "sandbox_execution_engine_executionengine",
+        "sandbox_position_manager_positionmanager",
+        "sandbox_order_manager_ordermanager",
+        "database_sandbox_db_sandboxorders"
+      ],
+      "relation": "participate_in",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "design/07-sandbox/README.md"
+    },
+    {
+      "id": "websocket_streaming_modes",
+      "label": "WebSocket Streaming Modes",
+      "nodes": [
+        "api_websocket_streaming_ltp",
+        "api_websocket_streaming_quote",
+        "api_websocket_streaming_depth",
+        "api_websocket_streaming_order_updates"
+      ],
+      "relation": "implement",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "api/README.md"
+    },
+    {
+      "id": "health_monitoring_system",
+      "label": "Health Monitoring System",
+      "nodes": [
+        "database_health_db",
+        "utils_health_monitor",
+        "blueprints_health",
+        "frontend_src_api_health",
+        "frontend_src_pages_healthmonitor"
+      ],
+      "relation": "participate_in",
+      "confidence": "EXTRACTED"
+    },
+    {
+      "id": "websocket_infrastructure",
+      "label": "WebSocket Infrastructure",
+      "nodes": [
+        "websocket_proxy_server",
+        "websocket_proxy_broker_factory",
+        "websocket_proxy_connection_manager",
+        "services_market_data_service"
+      ],
+      "relation": "form",
+      "confidence": "EXTRACTED"
+    },
+    {
+      "id": "v2_major_features",
+      "label": "OpenAlgo V2 Major Features",
+      "nodes": [
+        "remote_mcp",
+        "whatsapp_bot",
+        "scalping_terminal"
+      ],
+      "relation": "form",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "releases/version-2.0.1.4-released.md"
+    },
+    {
+      "id": "automation_services",
+      "label": "Automation and Workflow Services",
+      "nodes": [
+        "services_flow_executor_service",
+        "design_10_flow_architecture_readme",
+        "design_13_chartink_readme"
+      ],
+      "relation": "form",
+      "confidence": "INFERRED",
+      "confidence_score": 0.85,
+      "source_file": "design/10-flow-architecture/README.md"
+    },
+    {
+      "id": "external_integration_mcp",
+      "label": "External AI and Tool Integration",
+      "nodes": [
+        "design_41_mcp_architecture",
+        "design_37_apikey_architecture",
+        "design_36_rate_limiting_architecture"
+      ],
+      "relation": "form",
+      "confidence": "INFERRED",
+      "confidence_score": 0.85,
+      "source_file": "design/41-mcp-architecture/README.md"
+    },
+    {
+      "id": "lifecycle_management",
+      "label": "WebSocket Lifecycle & Recovery",
+      "nodes": [
+        "concept_3am_cycle",
+        "audit_websocket_token_refresh_audit_md",
+        "database_master_contract_cache_hook"
+      ],
+      "relation": "form",
+      "confidence": "INFERRED",
+      "confidence_score": 0.85,
+      "source_file": "audit/websocket-broker-priority.md"
+    },
+    {
+      "id": "options_trading_suite",
+      "label": "Options Trading Suite",
+      "nodes": [
+        "userguide_31_tools_readme",
+        "userguide_symbol_format_readme",
+        "userguide_24_pnl_tracker_readme"
+      ],
+      "relation": "participate_in",
+      "confidence": "INFERRED",
+      "confidence_score": 0.85,
+      "source_file": "userguide/31-tools/README.md"
+    },
+    {
+      "id": "monitoring_and_logging",
+      "label": "System Monitoring and Telemetry",
+      "nodes": [
+        "design_16_centralized_logging_readme",
+        "utils_logging"
+      ],
+      "relation": "participate_in",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "design/16-centralized-logging/README.md"
+    },
+    {
+      "id": "order_execution_flow",
+      "label": "Order Execution and Approval Flow",
+      "nodes": [
+        "design_39_strategy_module_architecture",
+        "design_42_action_center_architecture",
+        "design_53_event_bus"
+      ],
+      "relation": "participate_in",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "design/42-action-center/README.md"
+    },
+    {
+      "id": "portfolio_hardening_flow",
+      "label": "Portfolio Backtester Hardening Workflow",
+      "nodes": [
+        "superpowers_plans_portfolio_hardening",
+        "portfolio_engine"
+      ],
+      "relation": "form",
+      "confidence": "INFERRED",
+      "confidence_score": 0.9,
+      "source_file": "superpowers/plans/2026-07-31-portfolio-backtester-release-hardening.md"
+    }
+  ],
+  "built_at_commit": "d4c8091cb2af5afd4ba0e59c0e7f39bd64e31cdb"
+}
