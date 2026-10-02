@@ -526,6 +526,7 @@ function ReplayTab({ payload }: { payload: MetricsPayload | null }) {
   const [idx, setIdx] = useState(0)
   const [speed, setSpeed] = useState(1)
   const [playing, setPlaying] = useState(false)
+  const [showAll, setShowAll] = useState(false)
   const timerRef = useRef<number | null>(null)
 
   const n = payload?.rows ?? 0
@@ -563,9 +564,16 @@ function ReplayTab({ payload }: { payload: MetricsPayload | null }) {
     return <p className="text-sm text-muted-foreground">No data for this session.</p>
   }
 
+  const bidsAll = row?.bids ?? []
+  const asksAll = row?.asks ?? []
+  const maxLen = Math.max(bidsAll.length, asksAll.length)
+  const limit = showAll ? Math.max(maxLen, 5) : 5
+  const bids = bidsAll.slice(0, limit)
+  const asks = asksAll.slice(0, limit)
+
   const maxQty = Math.max(
-    ...(row?.bids ?? []).map((b) => b.quantity ?? 0),
-    ...(row?.asks ?? []).map((a) => a.quantity ?? 0),
+    ...bids.map((b) => b.quantity ?? 0),
+    ...asks.map((a) => a.quantity ?? 0),
     1
   )
 
@@ -638,7 +646,7 @@ function ReplayTab({ payload }: { payload: MetricsPayload | null }) {
           </div>
           <div className="grid grid-cols-2 gap-1 text-xs font-mono">
             <div className="space-y-0.5">
-              {row?.bids?.map((b, i) => (
+              {bids.map((b, i) => (
                 <div
                   key={i}
                   className="relative flex items-center px-1 py-0.5 rounded overflow-hidden"
@@ -658,7 +666,7 @@ function ReplayTab({ payload }: { payload: MetricsPayload | null }) {
               ))}
             </div>
             <div className="space-y-0.5">
-              {row?.asks?.map((a, i) => (
+              {asks.map((a, i) => (
                 <div
                   key={i}
                   className="relative flex items-center px-1 py-0.5 rounded overflow-hidden"
@@ -676,6 +684,18 @@ function ReplayTab({ payload }: { payload: MetricsPayload | null }) {
               ))}
             </div>
           </div>
+          {maxLen > 5 && (
+            <div className="flex justify-center pt-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 text-[11px] text-muted-foreground hover:text-foreground"
+                onClick={() => setShowAll((prev) => !prev)}
+              >
+                {showAll ? 'Show top 5 levels' : `Show all levels (${maxLen})`}
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
