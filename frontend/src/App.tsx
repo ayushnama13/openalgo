@@ -62,6 +62,7 @@ const Historify = lazy(() => import('@/pages/Historify'))
 const HistorifyCharts = lazy(() => import('@/pages/HistorifyCharts'))
 const Backtest = lazy(() => import('@/pages/Backtest'))
 const BacktestResults = lazy(() => import('@/pages/BacktestResults'))
+const BacktestOptimizations = lazy(() => import('@/pages/BacktestOptimizations'))
 
 // Tools & Option Chain
 const Tools = lazy(() => import('@/pages/Tools'))
@@ -204,6 +205,8 @@ function App() {
                 <Route path="/portfolio-backtester" element={<PortfolioBacktester />} />
                 <Route path="/backtest" element={<Backtest />} />
                 <Route path="/backtest/results" element={<BacktestResults />} />
+                <Route path="/backtest/optimizations" element={<BacktestOptimizations />} />
+                <Route path="/backtest/optimizations/:optId" element={<BacktestOptimizations />} />
                 <Route
                   path="/portfolio-backtester/results"
                   element={<PortfolioBacktesterResults />}
@@ -215,10 +218,7 @@ function App() {
                   element={<Navigate to="/portfolio-backtester" replace />}
                 />
                 <Route path="/sip-backtester" element={<SipBacktester />} />
-                <Route
-                  path="/sip-backtester/results"
-                  element={<SipBacktesterResults />}
-                />
+                <Route path="/sip-backtester/results" element={<SipBacktesterResults />} />
                 <Route path="/portfolio-analyzer" element={<PortfolioAnalyzer />} />
                 <Route path="/gocharting" element={<GoCharting />} />
                 <Route path="/pnl-tracker" element={<PnLTracker />} />

@@ -16,6 +16,8 @@ export interface BacktestTrade {
   entry_reason?: string
   exit_reason?: string
   costs: number
+  mae_pct?: number | null
+  mfe_pct?: number | null
 }
 
 export interface Metrics {
@@ -87,6 +89,18 @@ export interface FullJobDetails {
   take_profit_pct?: number | null
   daily_loss_limit?: number | null
   max_positions: number
+  engine_options?: Record<string, unknown>
+  code_hash?: string | null
+  data_fingerprint?: Record<
+    string,
+    {
+      bars: number
+      first: string
+      last: string
+      sha256: string
+      instrument?: { kind: string; lot_size: number; strike?: number | null; expiry?: string | null }
+    }
+  > | null
   created_at?: string
   completed_at?: string
   error_message?: string

@@ -8,6 +8,7 @@ import {
   Loader2,
   Play,
   RotateCcw,
+  SlidersHorizontal,
   Square,
   Target,
   Trash2,
@@ -15,6 +16,9 @@ import {
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { fetchCSRFToken } from '@/api/client'
+import EngineOptionsCard from '@/components/backtest/EngineOptionsCard'
+import ExtraSymbols from '@/components/backtest/ExtraSymbols'
+import OptimizeDialog from '@/components/backtest/OptimizeDialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -47,6 +51,11 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { useSocket } from '@/hooks/useSocket'
+import {
+  buildEngineOptions,
+  DEFAULT_ENGINE_OPTIONS,
+  type EngineOptionsState,
+} from '@/lib/backtestEngineOptions'
 import {
   type FullJobDetails,
   type ResultsData,
@@ -203,6 +212,76 @@ def strategy(df):
   },
 ]
 
+STRATEGY_TEMPLATES.push(
+  {
+    label: 'Event: multi-symbol momentum',
+    code: `# Event-driven strategy: runs on every selected symbol, shares one capital pool.
+# Orders placed in on_bar fill at the NEXT bar's open (no lookahead).
+class Momentum(Strategy):
+    params = {"lookback": 20, "stop_pct": 2.0}
+
+    def on_bar(self, ctx):
+        n = self.params["lookback"]
+        for sym in ctx.symbols:
+            if ctx.bar(sym) is None:
+                continue
+            closes = ctx.history(sym, n + 1, "close")
+            if len(closes) <= n:
+                continue
+            rising = closes.iloc[-1] > closes.iloc[0]
+            pos = ctx.position(sym)
+            if rising and not pos and not ctx.pending(sym):
+                ctx.buy(sym, pct=20, sl_pct=self.params["stop_pct"], trail_pct=3)
+            elif not rising and pos:
+                ctx.close(sym, tag="Momentum lost")
+`,
+  },
+  {
+    label: 'Event: SMA cross with indicators in init',
+    code: `# Precompute causal indicators once in init, then index them with ctx.i(sym).
+class SmaCross(Strategy):
+    params = {"fast": 9, "slow": 21}
+
+    def init(self, ctx):
+        self.fast, self.slow = {}, {}
+        for sym in ctx.symbols:
+            close = ctx.data(sym)["close"]
+            self.fast[sym] = close.rolling(self.params["fast"]).mean().to_numpy()
+            self.slow[sym] = close.rolling(self.params["slow"]).mean().to_numpy()
+
+    def on_bar(self, ctx):
+        for sym in ctx.symbols:
+            if ctx.bar(sym) is None:
+                continue
+            i = ctx.i(sym)
+            if i < 1 or i >= len(self.slow[sym]) or self.slow[sym][i] != self.slow[sym][i]:
+                continue
+            up = self.fast[sym][i] > self.slow[sym][i] and self.fast[sym][i - 1] <= self.slow[sym][i - 1]
+            down = self.fast[sym][i] < self.slow[sym][i] and self.fast[sym][i - 1] >= self.slow[sym][i - 1]
+            pos = ctx.position(sym)
+            if up and not pos:
+                ctx.buy(sym, pct=25)
+            elif down and pos:
+                ctx.close(sym)
+`,
+  },
+  {
+    label: 'Signal: parameterised RSI',
+    code: `# Signal-style strategy that reads tunable values from PARAMS (use with Optimize).
+def strategy(df):
+    period = PARAMS.get("period", 14)
+    low = PARAMS.get("low", 30)
+    high = PARAMS.get("high", 70)
+    df["rsi"] = ta.rsi(df["close"], period=period)
+
+    df["signal"] = 0
+    df.loc[(df["rsi"] < low) & (df["rsi"].shift(1) >= low), "signal"] = 1
+    df.loc[(df["rsi"] > high) & (df["rsi"].shift(1) <= high), "signal"] = -1
+    return df
+`,
+  }
+)
+
 const DEFAULT_STRATEGY_CODE = STRATEGY_TEMPLATES[0].code
 
 const INTERVALS = ['1m', '5m', '15m', '1h', 'D', 'W', 'M']
@@ -261,6 +340,9 @@ export default function Backtest() {
   const [takeProfitPct, setTakeProfitPct] = useState('')
   const [dailyLossLimit, setDailyLossLimit] = useState('')
   const [maxPositions, setMaxPositions] = useState(5)
+  const [extraSymbols, setExtraSymbols] = useState<string[]>([])
+  const [engineOptions, setEngineOptions] = useState<EngineOptionsState>(DEFAULT_ENGINE_OPTIONS)
+  const [optimizeOpen, setOptimizeOpen] = useState(false)
 
   // Run state
   const [submitting, setSubmitting] = useState(false)
@@ -423,19 +505,59 @@ export default function Backtest() {
     if (template) setStrategyCode(template.code)
   }
 
-  const handleRun = async () => {
+  /** Run fields shared by "Run" and "Optimize"; null (after a toast) when the form is invalid. */
+  const buildRunPayload = (): Record<string, unknown> | null => {
     if (!symbol) {
       showToast.error('Please select a symbol')
-      return
+      return null
     }
     if (!intervals.length) {
       showToast.error('Please select at least one timeframe')
-      return
+      return null
     }
     if (!strategyCode.trim()) {
       showToast.error('Strategy code is required')
-      return
+      return null
     }
+    const built = buildEngineOptions(engineOptions)
+    if (!built.ok) {
+      showToast.error(built.error)
+      return null
+    }
+    const primary = `${exchange}:${symbol}`
+    const allSymbols = [primary, ...extraSymbols.filter((k) => k !== primary)]
+    return {
+      name:
+        allSymbols.length > 1
+          ? `${symbol} +${allSymbols.length - 1} backtest`
+          : intervals.length > 1
+            ? `${symbol} MTF backtest`
+            : `${symbol} ${intervals[0]} backtest`,
+      strategy_code: strategyCode,
+      symbols: allSymbols,
+      exchange,
+      intervals,
+      interval: intervals[0],
+      start_date: startDate || null,
+      end_date: endDate || null,
+      initial_capital: initialCapital,
+      sizing_type: sizingType,
+      sizing_value: sizingValue,
+      slippage_bps: slippageBps,
+      brokerage_bps: brokerageBps,
+      product_type: productType,
+      missing_data_policy: missingDataPolicy,
+      stop_loss_pct: stopLossPct ? parseFloat(stopLossPct) : null,
+      take_profit_pct: takeProfitPct ? parseFloat(takeProfitPct) : null,
+      daily_loss_limit: dailyLossLimit ? parseFloat(dailyLossLimit) : null,
+      max_positions: maxPositions,
+      engine_options: Object.keys(built.value).length ? built.value : undefined,
+    }
+  }
+
+  const handleRun = async () => {
+    const payload = buildRunPayload()
+    if (!payload) return
     const firstRange = rangesByInterval[intervals[0]]
     if (firstRange?.start_date && startDate < firstRange.start_date.slice(0, 10)) {
       showToast.warning('Start date is before the earliest available data')
@@ -449,27 +571,7 @@ export default function Backtest() {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
-        body: JSON.stringify({
-          name: sweep ? `${symbol} MTF backtest` : `${symbol} ${intervals[0]} backtest`,
-          strategy_code: strategyCode,
-          symbols: [`${exchange}:${symbol}`],
-          exchange,
-          intervals,
-          interval: intervals[0],
-          start_date: startDate || null,
-          end_date: endDate || null,
-          initial_capital: initialCapital,
-          sizing_type: sizingType,
-          sizing_value: sizingValue,
-          slippage_bps: slippageBps,
-          brokerage_bps: brokerageBps,
-          product_type: productType,
-          missing_data_policy: missingDataPolicy,
-          stop_loss_pct: stopLossPct ? parseFloat(stopLossPct) : null,
-          take_profit_pct: takeProfitPct ? parseFloat(takeProfitPct) : null,
-          daily_loss_limit: dailyLossLimit ? parseFloat(dailyLossLimit) : null,
-          max_positions: maxPositions,
-        }),
+        body: JSON.stringify(payload),
       })
       const data = await response.json()
       if (data.status === 'success') {
@@ -822,6 +924,12 @@ export default function Backtest() {
           <Button variant="outline" onClick={() => setJobsOpen(true)}>
             <History className="h-4 w-4" /> Job History ({jobs.length})
           </Button>
+          <Button variant="outline" onClick={() => navigate('/backtest/optimizations')}>
+            Optimizations
+          </Button>
+          <Button variant="outline" onClick={() => setOptimizeOpen(true)}>
+            <SlidersHorizontal className="h-4 w-4" /> Optimize
+          </Button>
           <Button onClick={handleRun} disabled={submitting}>
             {submitting ? (
               <>
@@ -842,7 +950,8 @@ export default function Backtest() {
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
               <CardTitle className="text-base flex items-center gap-2">
-                <Activity className="h-4 w-4 text-primary animate-pulse" /> Active & Queued Backtests
+                <Activity className="h-4 w-4 text-primary animate-pulse" /> Active & Queued
+                Backtests
               </CardTitle>
               <div className="flex items-center gap-2">
                 {runningJobs.length > 0 && (
@@ -1016,6 +1125,13 @@ export default function Backtest() {
               </div>
             </div>
 
+            <ExtraSymbols
+              catalog={catalog}
+              primary={symbol ? `${exchange}:${symbol}` : ''}
+              value={extraSymbols}
+              onChange={setExtraSymbols}
+            />
+
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <Label>Start Date</Label>
@@ -1065,11 +1181,15 @@ export default function Backtest() {
               <PythonEditor value={strategyCode} onChange={setStrategyCode} height="280px" />
             </div>
             <p className="text-xs text-muted-foreground">
-              Define a <code className="text-primary">strategy(df)</code> function returning the
-              bars DataFrame with a <code className="text-primary">signal</code> column: 1 = BUY, -1
-              = SELL/exit. Available: <code className="text-primary">df</code>,{' '}
-              <code className="text-primary">ta</code> (openalgo.ta indicators),{' '}
-              <code className="text-primary">pd</code>, <code className="text-primary">np</code>.
+              Signal style: define <code className="text-primary">strategy(df)</code> returning the
+              bars DataFrame with a <code className="text-primary">signal</code> column (1 = BUY, -1
+              = exit long, 2 = SHORT, -2 = cover); it runs separately on every selected symbol.
+              Event style: subclass <code className="text-primary">Strategy</code> and implement{' '}
+              <code className="text-primary">on_bar(ctx)</code> for multi-symbol logic, brackets,
+              trailing stops and scaling. Available: <code className="text-primary">ta</code>,{' '}
+              <code className="text-primary">pd</code>, <code className="text-primary">np</code>,{' '}
+              <code className="text-primary">PARAMS</code>. Code runs in a sandbox with no network
+              or file access.
             </p>
           </CardContent>
         </Card>
@@ -1221,7 +1341,15 @@ export default function Backtest() {
             </p>
           </CardContent>
         </Card>
+
+        <EngineOptionsCard value={engineOptions} onChange={setEngineOptions} />
       </div>
+
+      <OptimizeDialog
+        open={optimizeOpen}
+        onOpenChange={setOptimizeOpen}
+        buildRunPayload={buildRunPayload}
+      />
 
       {/* Job history dialog */}
       <Dialog open={jobsOpen} onOpenChange={setJobsOpen}>
