@@ -55,6 +55,7 @@ class DhanWebSocket:
         self,
         client_id: str,
         access_token: str,
+        depth_level: int = 5,
         is_20_depth: bool = False,
         user_id: str | None = None,
     ):
@@ -64,13 +65,19 @@ class DhanWebSocket:
         Args:
             client_id: Dhan client ID
             access_token: Access token for authentication
-            is_20_depth: If True, connects to 20-level depth endpoint
+            depth_level: Market depth level (5, 20, or 200)
+            is_20_depth: If True, connects to 20-level depth endpoint (backwards compat)
             user_id: OpenAlgo user id, used to re-read a fresh access token from
                 the database on reconnect (tokens roll over daily at ~3 AM IST)
         """
+        if is_20_depth and depth_level == 5:
+            depth_level = 20
         self.client_id = client_id
         self.access_token = access_token
-        self.is_20_depth = is_20_depth
+        self.depth_level = depth_level
+        # True for both separate depth feeds (20 and 200): same 12-byte framing and
+        # "20_DEPTH" request code (23); only the URL and instrument limit differ.
+        self.is_20_depth = depth_level in (20, 200)
         self.user_id = user_id
 
         # WebSocket connection
@@ -103,14 +110,17 @@ class DhanWebSocket:
         self._health_check_thread: threading.Thread | None = None
 
         # Logging
-        self.logger = logging.getLogger(f"dhan_websocket_{'20depth' if is_20_depth else '5depth'}")
+        self.logger = logging.getLogger(f"dhan_websocket_{self.depth_level}depth")
 
         # Build WebSocket URL
         self._build_url()
 
     def _build_url(self):
         """Build the WebSocket URL based on depth level"""
-        if self.is_20_depth:
+        if self.depth_level == 200:
+            base_url = "wss://full-depth-api.dhan.co/twohundreddepth"
+            params = {"token": self.access_token, "clientId": self.client_id, "authType": "2"}
+        elif self.depth_level == 20 or self.is_20_depth:
             base_url = "wss://depth-api-feed.dhan.co/twentydepth"
             params = {"token": self.access_token, "clientId": self.client_id, "authType": "2"}
         else:
@@ -305,7 +315,7 @@ class DhanWebSocket:
 
         # Prepare subscription message
         # Split instruments into batches (max 100 for regular, all for 20-depth)
-        max_batch_size = 100 if not self.is_20_depth else 50
+        max_batch_size = 1 if self.depth_level == 200 else (50 if self.is_20_depth else 100)
 
         for i in range(0, len(instruments), max_batch_size):
             batch = instruments[i : i + max_batch_size]
@@ -391,7 +401,7 @@ class DhanWebSocket:
                 continue
             by_mode.setdefault(mode, []).append(instrument)
 
-        max_batch_size = 50 if self.is_20_depth else 100
+        max_batch_size = 1 if self.depth_level == 200 else (50 if self.is_20_depth else 100)
 
         for mode, instruments in by_mode.items():
             request_code = self.REQUEST_CODES.get(f"SUBSCRIBE_{mode}")
@@ -613,51 +623,47 @@ class DhanWebSocket:
             offset = payload_end
 
     def _parse_20_depth_message(self, data: bytes):
-        """Parse 20-level depth binary message"""
+        """Parse 20-level or 200-level depth binary message"""
         offset = 0
-
-        # self.logger.info(f"Parsing 20-depth message with {len(data)} bytes")
 
         while offset < len(data):
             if offset + 12 > len(data):
                 break
 
-            # Parse header (12 bytes for 20-depth)
+            # Parse header (12 bytes)
             message_length = struct.unpack("<H", data[offset : offset + 2])[0]
             feed_response_code = struct.unpack("<B", data[offset + 2 : offset + 3])[0]
             exchange_segment = struct.unpack("<B", data[offset + 3 : offset + 4])[0]
             security_id = struct.unpack("<I", data[offset + 4 : offset + 8])[0]
-            # Skip message sequence (4 bytes)
+            header_row_count = struct.unpack("<I", data[offset + 8 : offset + 12])[0]
 
             # Parse payload
             payload_start = offset + 12
             payload_end = offset + message_length
 
             if payload_end > len(data):
-                self.logger.warning("Incomplete 20-depth message received")
+                self.logger.warning("Incomplete depth message received")
                 break
 
             payload = data[payload_start:payload_end]
 
             # Parse based on feed response code
-            if feed_response_code in [41, 51]:  # 20-depth bid/ask
+            if feed_response_code in [41, 51]:  # bid/ask
                 side = "BID" if feed_response_code == 41 else "ASK"
-                # self.logger.info(f"Parsing 20-depth {side} packet for security {security_id}")
 
-                parsed_data = self._parse_20_depth_packet(
-                    payload, exchange_segment, security_id, is_bid=(feed_response_code == 41)
+                parsed_data = self._parse_depth_packet(
+                    payload, exchange_segment, security_id, is_bid=(feed_response_code == 41), header_rows=header_row_count
                 )
 
                 if parsed_data and self.on_data:
-                    # self.logger.info(f"Sending 20-depth {side} data to callback")
                     self.on_data(self, parsed_data)
                 else:
-                    self.logger.warning(f"Failed to parse 20-depth {side} data")
+                    self.logger.warning(f"Failed to parse depth {side} data")
             elif feed_response_code == 0:
                 # Response code 0 is a heartbeat/acknowledgment from Dhan - silently ignore
                 pass
             else:
-                self.logger.debug(f"Unknown 20-depth response code: {feed_response_code}")
+                self.logger.debug(f"Unknown depth response code: {feed_response_code}")
 
             # Move to next message
             offset = payload_end
@@ -792,15 +798,20 @@ class DhanWebSocket:
         )
         return result
 
-    def _parse_20_depth_packet(
-        self, payload: bytes, exchange_segment: int, security_id: int, is_bid: bool
+    def _parse_depth_packet(
+        self, payload: bytes, exchange_segment: int, security_id: int, is_bid: bool, header_rows: int = 0
     ) -> dict[str, Any]:
-        """Parse 20-level depth packet"""
-        if len(payload) < 320:  # 20 levels * 16 bytes
-            return None
+        """Parse depth packet (supports 20 and 200 levels with variable row counts)"""
+        max_rows = len(payload) // 16
+        # Only the 200-depth feed carries a row count in the header's last field;
+        # on the 20-depth feed that field is a message sequence number.
+        if self.depth_level == 200 and header_rows > 0:
+            num_rows = min(header_rows, max_rows)
+        else:
+            num_rows = max_rows
 
         levels = []
-        for i in range(20):
+        for i in range(num_rows):
             offset = i * 16
             price = struct.unpack("<d", payload[offset : offset + 8])[0]
             quantity = struct.unpack("<I", payload[offset + 8 : offset + 12])[0]
@@ -808,13 +819,21 @@ class DhanWebSocket:
 
             levels.append({"price": price, "quantity": quantity, "orders": orders})
 
+        depth_type = "depth_200" if self.depth_level == 200 else "depth_20"
+
         return {
-            "type": "depth_20",
+            "type": depth_type,
             "exchange_segment": exchange_segment,
             "security_id": str(security_id),
             "side": "buy" if is_bid else "sell",
             "levels": levels,
         }
+
+    def _parse_20_depth_packet(
+        self, payload: bytes, exchange_segment: int, security_id: int, is_bid: bool, header_rows: int = 0
+    ) -> dict[str, Any]:
+        """Legacy alias for _parse_depth_packet"""
+        return self._parse_depth_packet(payload, exchange_segment, security_id, is_bid, header_rows)
 
     def _handle_disconnect_packet(self, payload: bytes):
         """Handle disconnect packet"""

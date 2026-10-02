@@ -39,13 +39,16 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
         # Separate WebSocket clients for different depth levels
         self.ws_client_5depth = None
         self.ws_client_20depth = None
+        self.ws_client_200depth = None
 
         # Track subscriptions by depth level
         self.subscriptions_5depth = {}
         self.subscriptions_20depth = {}
+        self.subscriptions_200depth = {}
 
-        # Track 20-depth data accumulation
+        # Track depth data accumulation
         self.depth_20_accumulator = {}
+        self.depth_200_accumulator = {}
 
         # Fallback tracking for 20-depth subscriptions
         self.depth_20_fallbacks = {}  # Track which subscriptions have fallen back to 5-depth
@@ -120,7 +123,7 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
         self.ws_client_5depth = DhanWebSocket(
             client_id=client_id,  # Use the actual Dhan client ID
             access_token=auth_token,
-            is_20_depth=False,
+            depth_level=5,
             user_id=user_id,
         )
 
@@ -128,7 +131,15 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
         self.ws_client_20depth = DhanWebSocket(
             client_id=client_id,  # Use the actual Dhan client ID
             access_token=auth_token,
-            is_20_depth=True,
+            depth_level=20,
+            user_id=user_id,
+        )
+
+        # Initialize 200-depth WebSocket client
+        self.ws_client_200depth = DhanWebSocket(
+            client_id=client_id,
+            access_token=auth_token,
+            depth_level=200,
             user_id=user_id,
         )
 
@@ -143,6 +154,12 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
         self.ws_client_20depth.on_data = self._on_data_20depth
         self.ws_client_20depth.on_error = self._on_error_20depth
         self.ws_client_20depth.on_close = self._on_close_20depth
+
+        # Set callbacks for 200-depth client
+        self.ws_client_200depth.on_open = self._on_open_200depth
+        self.ws_client_200depth.on_data = self._on_data_200depth
+        self.ws_client_200depth.on_error = self._on_error_200depth
+        self.ws_client_200depth.on_close = self._on_close_200depth
 
         self.running = True
 
@@ -178,9 +195,12 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
 
             groups_5depth = defaultdict(list)
             instruments_20depth = []
+            instruments_200depth = []
 
             for item in self.subscription_queue:
-                if item["use_20_depth"]:
+                if item.get("use_200_depth"):
+                    instruments_200depth.append(item["instrument"])
+                elif item.get("use_20_depth"):
                     instruments_20depth.append(item["instrument"])
                 else:
                     groups_5depth[item["dhan_mode"]].append(item["instrument"])
@@ -208,6 +228,15 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
             except Exception as e:
                 self.logger.error(f"Batch 20-depth subscription failed: {e}")
 
+        # Send 200-depth (max 1 per connection)
+        if instruments_200depth and self.ws_client_200depth and self.ws_client_200depth.connected:
+            for inst in instruments_200depth:
+                try:
+                    self.logger.info("Subscribing 1 instrument in 200_DEPTH mode")
+                    self.ws_client_200depth.subscribe([inst], "20_DEPTH")
+                except Exception as e:
+                    self.logger.error(f"200-depth subscription failed: {e}")
+
     def disconnect(self) -> None:
         """Disconnect from Dhan WebSocket endpoints with proper resource cleanup"""
         self.logger.debug("Starting Dhan adapter disconnect sequence...")
@@ -219,12 +248,9 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
             self.batch_timer.cancel()
             self.batch_timer = None
 
-        # Store references but clear them AFTER cleanup completes (not before).
-        # Clearing before cleanup creates a window under eventlet where another
-        # greenlet can see ws_client_5depth=None while the old connection is
-        # still being torn down, causing reused adapters to silently drop subscribes.
         ws_5depth = self.ws_client_5depth
         ws_20depth = self.ws_client_20depth
+        ws_200depth = self.ws_client_200depth
 
         try:
             # Disconnect 5-depth WebSocket
@@ -243,19 +269,30 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 except Exception as e:
                     self.logger.debug(f"Error disconnecting 20-depth WebSocket: {e}")
 
+            # Disconnect 200-depth WebSocket
+            if ws_200depth:
+                try:
+                    ws_200depth.cleanup()
+                    self.logger.debug("200-depth WebSocket disconnected and cleaned up")
+                except Exception as e:
+                    self.logger.debug(f"Error disconnecting 200-depth WebSocket: {e}")
+
             # Stop fallback monitor thread
             self._stop_fallback_monitor_internal()
 
             # Clear WebSocket references AFTER cleanup is done
             self.ws_client_5depth = None
             self.ws_client_20depth = None
+            self.ws_client_200depth = None
 
             # Clear all state for clean reconnection
             with self.lock:
                 self.subscriptions_5depth.clear()
                 self.subscriptions_20depth.clear()
+                self.subscriptions_200depth.clear()
                 self.subscriptions.clear()
                 self.depth_20_accumulator.clear()
+                self.depth_200_accumulator.clear()
                 self.depth_20_timeouts.clear()
                 self.depth_20_data_received.clear()
                 self.depth_20_fallbacks.clear()
@@ -277,10 +314,10 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
         Subscribe to market data with Dhan-specific implementation
 
         Args:
-            symbol: Trading symbol (e.g., 'RELIANCE' or 'RELIANCE:20' for 20-level depth)
+            symbol: Trading symbol (e.g., 'RELIANCE', 'RELIANCE:20', 'RELIANCE:200')
             exchange: Exchange code (e.g., 'NSE', 'BSE', 'NFO')
             mode: Subscription mode - 1:LTP, 2:Quote, 3:Depth
-            depth_level: Market depth level (5 or 20)
+            depth_level: Market depth level (5, 20, or 200)
 
         Returns:
             Dict: Response with status and error message if applicable
@@ -291,16 +328,25 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 "INVALID_MODE", f"Invalid mode {mode}. Must be 1 (LTP), 2 (Quote), or 3 (Depth)"
             )
 
-        # Check for :20 suffix to determine depth level (allows differentiation without modifying feed.py)
         original_symbol = symbol  # Keep original for ZeroMQ topic matching
         actual_symbol = symbol
         use_20_depth = False
+        use_200_depth = False
 
-        if symbol.endswith(":20"):
-            # Strip the :20 suffix and use 20-level depth
+        if symbol.endswith(":200"):
+            actual_symbol = symbol[:-4]
+            use_200_depth = True
+            depth_level = 200
+            self.logger.debug(f"200-level depth requested via symbol suffix for {actual_symbol}")
+        elif symbol.endswith(":20"):
             actual_symbol = symbol[:-3]
             use_20_depth = True
+            depth_level = 20
             self.logger.debug(f"20-level depth requested via symbol suffix for {actual_symbol}")
+        elif depth_level == 200:
+            use_200_depth = True
+        elif depth_level == 20:
+            use_20_depth = True
 
         # Map symbol to token (use actual symbol without suffix)
         self.logger.debug(f"Looking up token for {actual_symbol}.{exchange}")
@@ -328,15 +374,21 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
         actual_depth = depth_level
 
         if mode == 3:  # Depth mode
-            # Check if 20-level depth is requested via symbol suffix
-            if (
-                use_20_depth
-                and exchange in ["NSE", "NFO"]
-                and DhanCapabilityRegistry.is_depth_level_supported(exchange, 20)
-            ):
-                actual_depth = 20
-                self.logger.debug(f"Using 20-level depth for {exchange}:{actual_symbol}")
-            # Check if requested depth level is supported for this exchange
+            if use_200_depth or depth_level == 200:
+                if exchange in ["NSE", "NFO"] and DhanCapabilityRegistry.is_depth_level_supported(exchange, 200):
+                    actual_depth = 200
+                elif DhanCapabilityRegistry.is_depth_level_supported(exchange, 20):
+                    actual_depth = 20
+                    is_fallback = True
+                else:
+                    actual_depth = DhanCapabilityRegistry.get_fallback_depth_level(exchange, 200)
+                    is_fallback = True
+            elif use_20_depth or depth_level == 20:
+                if exchange in ["NSE", "NFO"] and DhanCapabilityRegistry.is_depth_level_supported(exchange, 20):
+                    actual_depth = 20
+                else:
+                    actual_depth = DhanCapabilityRegistry.get_fallback_depth_level(exchange, 20)
+                    is_fallback = True
             elif not DhanCapabilityRegistry.is_depth_level_supported(exchange, depth_level):
                 actual_depth = DhanCapabilityRegistry.get_fallback_depth_level(
                     exchange, depth_level
@@ -347,7 +399,6 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
                     f"using {actual_depth} instead"
                 )
             else:
-                # Use the requested depth level (it's supported for this exchange)
                 actual_depth = depth_level
                 self.logger.debug(
                     f"Using {actual_depth}-level depth for {exchange}:{actual_symbol}"
@@ -372,7 +423,48 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
         )
 
         # Subscribe based on depth level
-        if actual_depth == 20 and mode == 3:
+        if actual_depth == 200 and mode == 3:
+            # Use 200-depth connection (max 1 subscription)
+            with self.lock:
+                if (
+                    len(self.subscriptions_200depth)
+                    >= DhanCapabilityRegistry.MAX_SUBSCRIPTIONS_200_DEPTH
+                ):
+                    existing_sub = list(self.subscriptions_200depth.values())[0] if self.subscriptions_200depth else None
+                    if not existing_sub or existing_sub["token"] != token or existing_sub["exchange"] != exchange:
+                        return self._create_error_response(
+                            "SUBSCRIPTION_LIMIT",
+                            f"Maximum {DhanCapabilityRegistry.MAX_SUBSCRIPTIONS_200_DEPTH} subscription allowed for 200-depth",
+                        )
+
+                self.subscriptions_200depth[correlation_id] = {
+                    "symbol": original_symbol,
+                    "actual_symbol": actual_symbol,
+                    "exchange": exchange,
+                    "dhan_exchange": dhan_exchange,
+                    "token": token,
+                    "mode": mode,
+                    "depth_level": actual_depth,
+                    "instrument": instrument,
+                }
+
+
+            if self.ws_client_200depth and not self.ws_client_200depth.connected and not self.ws_client_200depth.running:
+                self.logger.info("Lazy-connecting Dhan 200-depth WebSocket (first 200-depth subscription)")
+                self.ws_client_200depth.connect()
+
+            if self.ws_client_200depth and self.ws_client_200depth.connected:
+                with self.lock:
+                    self.subscription_queue.append(
+                        {
+                            "instrument": instrument,
+                            "dhan_mode": "20_DEPTH",
+                            "use_200_depth": True,
+                        }
+                    )
+                    if len(self.subscription_queue) == 1:
+                        self._start_batch_timer()
+        elif actual_depth == 20 and mode == 3:
             # Use 20-depth connection
             with self.lock:
                 # Check subscription limit
@@ -406,9 +498,6 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 self.logger.info("Lazy-connecting Dhan 20-depth WebSocket (first 20-depth subscription)")
                 self.ws_client_20depth.connect()
 
-            # Queue for batch flush only when connection is up.
-            # If not connected, _on_open_20depth resubscribes from subscriptions_20depth,
-            # so enqueueing here would cause a double-subscribe once the timer fires.
             if self.ws_client_20depth and self.ws_client_20depth.connected:
                 with self.lock:
                     self.subscription_queue.append(
@@ -444,9 +533,6 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
                     "instrument": instrument,
                 }
 
-            # Queue for batch flush only when connection is up.
-            # If not connected, _on_open_5depth resubscribes from subscriptions_5depth,
-            # so enqueueing here would cause a double-subscribe once the timer fires.
             if self.ws_client_5depth and self.ws_client_5depth.connected:
                 with self.lock:
                     self.subscription_queue.append(
@@ -467,7 +553,7 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 "exchange": exchange,
                 "mode": mode,
                 "depth_level": actual_depth,
-                "is_20_depth": (actual_depth == 20 and mode == 3),
+                "is_20_depth": (actual_depth in [20, 200] and mode == 3),
             }
 
         return self._create_success_response(
@@ -528,8 +614,8 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
                 )
             ]
 
-            # Check 5-depth subscriptions
-            for depth in [5, 20]:
+            # Check depth subscriptions
+            for depth in [5, 20, 200]:
                 correlation_id = f"{symbol}_{exchange}_{mode}_{depth}"
 
                 if correlation_id in self.subscriptions_5depth:
@@ -540,7 +626,6 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
 
                 if correlation_id in self.subscriptions_20depth:
                     del self.subscriptions_20depth[correlation_id]
-                    # Clean up fallback tracking
                     if correlation_id in self.depth_20_timeouts:
                         del self.depth_20_timeouts[correlation_id]
                     if correlation_id in self.depth_20_data_received:
@@ -549,6 +634,16 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
                         del self.depth_20_fallbacks[correlation_id]
                     if self.ws_client_20depth:
                         self.ws_client_20depth.unsubscribe([instrument])
+                    removed = True
+
+                if correlation_id in self.subscriptions_200depth:
+                    del self.subscriptions_200depth[correlation_id]
+                    if correlation_id in self.depth_20_timeouts:
+                        del self.depth_20_timeouts[correlation_id]
+                    if correlation_id in self.depth_20_data_received:
+                        del self.depth_20_data_received[correlation_id]
+                    if self.ws_client_200depth:
+                        self.ws_client_200depth.unsubscribe([instrument])
                     removed = True
 
                 if correlation_id in self.subscriptions:
@@ -579,27 +674,23 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
             Dict: Response with status
         """
         with self.lock:
-            unsubscribed_count = len(self.subscriptions_5depth) + len(self.subscriptions_20depth)
+            unsubscribed_count = len(self.subscriptions_5depth) + len(self.subscriptions_20depth) + len(self.subscriptions_200depth)
 
             # Collect instruments to unsubscribe from each connection
-            instruments_5depth = []
-            for sub in self.subscriptions_5depth.values():
-                instruments_5depth.append(sub["instrument"])
-
-            instruments_20depth = []
-            for sub in self.subscriptions_20depth.values():
-                instruments_20depth.append(sub["instrument"])
+            instruments_5depth = [sub["instrument"] for sub in self.subscriptions_5depth.values()]
+            instruments_20depth = [sub["instrument"] for sub in self.subscriptions_20depth.values()]
+            instruments_200depth = [sub["instrument"] for sub in self.subscriptions_200depth.values()]
 
             # Clear all subscription tracking
             self.subscriptions_5depth.clear()
             self.subscriptions_20depth.clear()
+            self.subscriptions_200depth.clear()
             self.subscriptions.clear()
             self.depth_20_accumulator.clear()
+            self.depth_200_accumulator.clear()
             self.depth_20_timeouts.clear()
             self.depth_20_data_received.clear()
             self.depth_20_fallbacks.clear()
-            # Drop any queued subscribes that haven't been flushed yet,
-            # otherwise the batch timer would resurrect ghost subscriptions.
             self.subscription_queue.clear()
 
         # Send unsubscribe messages (outside lock to avoid deadlock)
@@ -608,6 +699,9 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
 
         if instruments_20depth and self.ws_client_20depth:
             self.ws_client_20depth.unsubscribe(instruments_20depth)
+
+        if instruments_200depth and self.ws_client_200depth:
+            self.ws_client_200depth.unsubscribe(instruments_200depth)
 
         self.logger.info(
             f"Dhan adapter unsubscribed from {unsubscribed_count} instruments (connections kept alive)"
@@ -748,33 +842,60 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
 
     def _on_data_20depth(self, ws, data):
         """Handle data from 20-depth connection"""
+        self._handle_depth_data(ws, data, 20)
+
+    # Callbacks for 200-depth connection
+    def _on_open_200depth(self, ws):
+        """Handle 200-depth connection open"""
+        self.logger.debug("Connected to Dhan 200-depth WebSocket")
+
+        with self.lock:
+            instruments = [sub["instrument"] for sub in self.subscriptions_200depth.values()]
+
+            if instruments:
+                for inst in instruments:
+                    try:
+                        self.ws_client_200depth.subscribe([inst], "20_DEPTH")
+                        self.logger.debug("Resubscribed to 1 instrument for 200-depth")
+                    except Exception as e:
+                        self.logger.error(f"Error resubscribing to 200-depth: {e}")
+
+    def _on_error_200depth(self, ws, error):
+        """Handle 200-depth connection error"""
+        self.logger.error(f"Dhan 200-depth WebSocket error: {error}")
+        self._check_and_publish_fatal_error(ws, error, "200-depth")
+
+    def _on_close_200depth(self, ws):
+        """Handle 200-depth connection close"""
+        self.logger.debug("Dhan 200-depth WebSocket connection closed")
+
+    def _on_data_200depth(self, ws, data):
+        """Handle data from 200-depth connection"""
+        self._handle_depth_data(ws, data, 200)
+
+    def _handle_depth_data(self, ws, data, depth_level: int):
+        """Handle data from 20 or 200 depth connection with accumulation"""
         try:
-            # 20-depth data comes in two parts: bid and ask
-            # We need to accumulate both before publishing
             security_id = data.get("security_id")
             side = data.get("side")
+            expected_type = f"depth_{depth_level}"
 
-            if data.get("type") != "depth_20":
+            if data.get("type") != expected_type:
                 return
 
-            # Store in accumulator
-            if security_id not in self.depth_20_accumulator:
-                self.depth_20_accumulator[security_id] = {}
+            accumulator = self.depth_20_accumulator if depth_level == 20 else self.depth_200_accumulator
+            subscriptions = self.subscriptions_20depth if depth_level == 20 else self.subscriptions_200depth
 
-            self.depth_20_accumulator[security_id][side] = data.get("levels", [])
+            if security_id not in accumulator:
+                accumulator[security_id] = {}
 
-            # Check if we have both sides
-            if (
-                "buy" in self.depth_20_accumulator[security_id]
-                and "sell" in self.depth_20_accumulator[security_id]
-            ):
-                # Find matching subscription by token and exchange segment
+            accumulator[security_id][side] = data.get("levels", [])
+
+            if "buy" in accumulator[security_id] and "sell" in accumulator[security_id]:
                 exchange_segment = data.get("exchange_segment")
-
-                # Find the subscription that matches this token and exchange segment
                 subscription = None
                 with self.lock:
-                    for sub in self.subscriptions_20depth.values():
+                    for sub in subscriptions.values():
                         if (
                             sub["token"] == security_id
                             and DhanExchangeMapper.get_segment_from_exchange(sub["exchange"])
@@ -784,45 +905,38 @@ class DhanWebSocketAdapter(BaseBrokerWebSocketAdapter):
                             break
 
                 if not subscription:
-                    # Debug level - this is expected during disconnect
                     self.logger.debug(
-                        f"Received 20-depth data for unsubscribed token: {security_id}, segment: {exchange_segment}"
+                        f"Received {depth_level}-depth data for unsubscribed token: {security_id}, segment: {exchange_segment}"
                     )
-                    # Clear accumulator
-                    del self.depth_20_accumulator[security_id]
+                    del accumulator[security_id]
                     return
 
-                # Get symbol and exchange from subscription
                 symbol = subscription["symbol"]
                 exchange = subscription["exchange"]
 
-                # Create combined depth data
                 market_data = {
                     "symbol": symbol,
                     "exchange": exchange,
-                    "mode": 3,  # Depth mode
+                    "mode": 3,
                     "timestamp": int(time.time() * 1000),
                     "depth": {
-                        "buy": self.depth_20_accumulator[security_id]["buy"],
-                        "sell": self.depth_20_accumulator[security_id]["sell"],
+                        "buy": accumulator[security_id]["buy"],
+                        "sell": accumulator[security_id]["sell"],
                     },
-                    "depth_level": 20,
+                    "depth_level": depth_level,
                 }
 
-                # Publish with standard DEPTH topic (mode 3)
                 topic = f"{exchange}_{symbol}_DEPTH"
                 self.publish_market_data(topic, market_data)
 
-                # Clear accumulator
-                del self.depth_20_accumulator[security_id]
+                del accumulator[security_id]
 
-                # Update data received timestamp for fallback monitoring
-                correlation_id = f"{symbol}_{exchange}_3_20"
+                correlation_id = f"{symbol}_{exchange}_3_{depth_level}"
                 if correlation_id in self.depth_20_timeouts:
                     self.depth_20_data_received[correlation_id] = time.time()
 
         except Exception as e:
-            self.logger.error(f"Error processing 20-depth data: {e}", exc_info=True)
+            self.logger.error(f"Error processing {depth_level}-depth data: {e}", exc_info=True)
 
     def _normalize_5depth_data(
         self, data: dict[str, Any], symbol: str, exchange: str
