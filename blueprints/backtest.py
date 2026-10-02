@@ -10,6 +10,7 @@ from flask import Blueprint, jsonify, render_template_string, request
 
 from database.backtest_db import (
     BacktestEquityCurve,
+    BacktestOptimization,
     BacktestRun,
     BacktestStrategy,
     BacktestTrade,
@@ -22,10 +23,13 @@ from database.historify_db import (
     resolve_base_interval,
 )
 from services.backtest_analytics import get_benchmark_comparison
+from services.backtest_optimizer import monte_carlo
 from services.backtest_service import (
     cancel_batch,
     cancel_job,
+    cancel_optimization,
     start_backtest_batch,
+    start_optimization,
 )
 from utils.logging import get_logger
 from utils.session import check_session_validity
@@ -844,6 +848,157 @@ def delete_saved_strategy(strat_id):
     except Exception as e:
         session.rollback()
         logger.exception(f"Error deleting strategy {strat_id}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db_session.remove()
+
+
+# ---------------------------------------------------------------------------
+# Parameter sweeps, walk-forward and Monte Carlo
+# ---------------------------------------------------------------------------
+@backtest_bp.route("/optimize", methods=["POST"])
+@check_session_validity
+def submit_optimization():
+    """Queue a parameter sweep (``optimize.kind='sweep'``) or walk-forward study.
+
+    Body: the same run fields as ``/run`` (single ``interval``), plus
+    ``optimize``: ``{kind, param_space, method, max_trials, objective,
+    min_trades, oos_pct | train_pct/test_pct/n_windows, seed}``.
+    """
+    data = request.get_json() or {}
+    try:
+        if not data.get("strategy_code"):
+            return jsonify({"status": "error", "message": "strategy_code is required"}), 400
+        symbols = data.get("symbols", ["NSE:SBIN"])
+        opt_id = start_optimization(
+            name=data.get("name", "Untitled Optimization"),
+            strategy_code=data["strategy_code"],
+            symbols=symbols if isinstance(symbols, list) else [symbols],
+            optimize=data.get("optimize"),
+            exchange=data.get("exchange", "NSE"),
+            interval=data.get("interval", "5m"),
+            start_date=data.get("start_date"),
+            end_date=data.get("end_date"),
+            initial_capital=float(data.get("initial_capital", 100000.0)),
+            sizing_type=data.get("sizing_type", "fixed_qty"),
+            sizing_value=float(data.get("sizing_value", 1.0)),
+            slippage_bps=float(data.get("slippage_bps", 0.0)),
+            brokerage_bps=float(data.get("brokerage_bps", 0.0)),
+            product_type=data.get("product_type", "MIS"),
+            missing_data_policy=data.get("missing_data_policy", "skip"),
+            stop_loss_pct=float(data["stop_loss_pct"]) if data.get("stop_loss_pct") is not None else None,
+            take_profit_pct=float(data["take_profit_pct"]) if data.get("take_profit_pct") is not None else None,
+            daily_loss_limit=float(data["daily_loss_limit"]) if data.get("daily_loss_limit") is not None else None,
+            max_positions=int(data.get("max_positions", 5)),
+            engine_options=data.get("engine_options"),
+        )
+        return jsonify({"status": "success", "opt_id": opt_id})
+    except (ValueError, TypeError) as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        logger.exception(f"Error submitting optimization: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+def _opt_summary(rec: BacktestOptimization) -> dict:
+    return {
+        "opt_id": rec.opt_id,
+        "name": rec.name,
+        "kind": rec.kind,
+        "status": rec.status,
+        "progress": rec.progress,
+        "error_message": rec.error_message,
+        "created_at": rec.created_at.isoformat() if rec.created_at else "",
+        "completed_at": rec.completed_at.isoformat() if rec.completed_at else "",
+    }
+
+
+@backtest_bp.route("/optimizations", methods=["GET"])
+@check_session_validity
+def list_optimizations():
+    session = db_session()
+    try:
+        recs = session.query(BacktestOptimization).order_by(BacktestOptimization.created_at.desc()).limit(100).all()
+        return jsonify({"status": "success", "optimizations": [_opt_summary(r) for r in recs]})
+    except Exception as e:
+        logger.exception(f"Error listing optimizations: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db_session.remove()
+
+
+@backtest_bp.route("/optimizations/<opt_id>", methods=["GET"])
+@check_session_validity
+def get_optimization(opt_id):
+    session = db_session()
+    try:
+        rec = session.query(BacktestOptimization).filter_by(opt_id=opt_id).first()
+        if not rec:
+            return jsonify({"status": "error", "message": "Optimization not found"}), 404
+        out = _opt_summary(rec)
+        out["config"] = json.loads(rec.config_json)
+        out["result"] = json.loads(rec.result_json) if rec.result_json else None
+        return jsonify({"status": "success", "optimization": out})
+    except Exception as e:
+        logger.exception(f"Error fetching optimization {opt_id}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db_session.remove()
+
+
+@backtest_bp.route("/optimizations/<opt_id>/cancel", methods=["POST"])
+@check_session_validity
+def cancel_optimization_run(opt_id):
+    if cancel_optimization(opt_id):
+        return jsonify({"status": "success", "message": "Cancellation requested"})
+    return jsonify({"status": "error", "message": "Optimization is not running"}), 404
+
+
+@backtest_bp.route("/optimizations/<opt_id>", methods=["DELETE"])
+@check_session_validity
+def delete_optimization(opt_id):
+    session = db_session()
+    try:
+        rec = session.query(BacktestOptimization).filter_by(opt_id=opt_id).first()
+        if not rec:
+            return jsonify({"status": "error", "message": "Optimization not found"}), 404
+        if rec.status in ("pending", "running"):
+            return jsonify({"status": "error", "message": "Cancel it before deleting"}), 409
+        session.delete(rec)
+        session.commit()
+        return jsonify({"status": "success"})
+    except Exception as e:
+        session.rollback()
+        logger.exception(f"Error deleting optimization {opt_id}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db_session.remove()
+
+
+@backtest_bp.route("/monte-carlo/<job_id>", methods=["POST"])
+@check_session_validity
+def run_monte_carlo(job_id):
+    """Resample a finished run's trades to show how much of the result was path luck."""
+    data = request.get_json(silent=True) or {}
+    session = db_session()
+    try:
+        run = session.query(BacktestRun).filter_by(job_id=job_id).first()
+        if not run:
+            return jsonify({"status": "error", "message": "Job not found"}), 404
+        pnls = [t.pnl for t in session.query(BacktestTrade.pnl).filter_by(job_id=job_id).all()]
+        result = monte_carlo(
+            pnls,
+            run.initial_capital,
+            n_sims=int(data.get("simulations", 2000)),
+            method=data.get("method", "bootstrap"),
+            seed=int(data.get("seed", 0)),
+            ruin_drawdown_pct=float(data.get("ruin_drawdown_pct", 50.0)),
+        )
+        return jsonify({"status": "success", "job_id": job_id, "monte_carlo": result})
+    except (ValueError, TypeError) as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        logger.exception(f"Error running Monte Carlo for {job_id}: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         db_session.remove()

@@ -110,6 +110,24 @@ class BacktestEquityCurve(Base):
     positions_value = Column(Float, nullable=False, default=0.0)
 
 
+class BacktestOptimization(Base):
+    """A parameter sweep or walk-forward study over one strategy."""
+
+    __tablename__ = "backtest_optimizations"
+
+    opt_id = Column(String(64), primary_key=True)
+    name = Column(String(128), nullable=False, default="Untitled Optimization")
+    kind = Column(String(32), nullable=False, default="sweep")  # sweep, walk_forward
+    status = Column(String(32), nullable=False, default="pending", index=True)
+    progress = Column(Float, nullable=False, default=0.0)
+    strategy_code = Column(Text, nullable=False)
+    config_json = Column(Text, nullable=False)  # run config + optimize spec
+    result_json = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Asia/Kolkata")))
+    completed_at = Column(DateTime, nullable=True)
+
+
 class BacktestStrategy(Base):
     __tablename__ = "backtest_strategies"
 

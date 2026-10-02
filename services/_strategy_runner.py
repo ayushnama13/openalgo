@@ -124,27 +124,11 @@ def mode_signals(job, workdir, code, pd, np, ta):
 
 
 
-def mode_engine(job, workdir, code, pd, np, ta):
-    sys.path.insert(0, _SERVICES_DIR)
-    import backtest_engine as be
-
-    fmt = job["fmt"]
-    bars = {}
-    for i, sym in enumerate(job["symbols"]):
-        bars[sym] = _read(os.path.join(workdir, f"bars_{i}.{fmt}"), fmt, pd)
-    cfg = be.EngineConfig.from_dict(job["config"])
-
-    prog = open(os.path.join(workdir, "progress.json"), "w")  # noqa: SIM115 - held for the run
-
-    def progress(pct, ts, equity, ntrades):
-        prog.seek(0)
-        prog.write(json.dumps({"pct": pct, "ts": ts, "equity": equity, "trades": ntrades}).ljust(200))
-        prog.flush()
-
-    _lock_down()
-    first = bars[job["symbols"][0]]
-    extra = {"pd": pd, "np": np, "ta": ta, "df": first.copy(),
-             "Strategy": be.Strategy, "SYMBOLS": list(job["symbols"]), "PARAMS": dict(cfg.params)}
+def _build_strategy(code, bars, cfg, symbols, pd, np, ta, be):
+    """Exec the user code and return a Strategy instance (event class, functions, or signal DSL)."""
+    first = bars[symbols[0]]
+    extra = {"pd": pd, "np": np, "ta": ta, "df": first.copy(), "Strategy": be.Strategy,
+             "SYMBOLS": list(symbols), "PARAMS": dict(cfg.params)}
     env = _run_user_code(code, extra)
 
     strat = None
@@ -169,8 +153,9 @@ def mode_engine(job, workdir, code, pd, np, ta):
     if strat is None:  # legacy signal DSL, one independent series per symbol
         signals = {}
         for sym, frame in bars.items():
-            def run_code(frame_copy, _sym=sym):
-                e = _run_user_code(code, {"pd": pd, "np": np, "ta": ta, "df": frame_copy})
+            def run_code(frame_copy):
+                e = _run_user_code(code, {"pd": pd, "np": np, "ta": ta, "df": frame_copy,
+                                          "PARAMS": dict(cfg.params)})
                 fn = e.get("strategy")
                 if callable(fn):
                     res = fn(frame_copy.copy())
@@ -180,7 +165,31 @@ def mode_engine(job, workdir, code, pd, np, ta):
 
             signals[sym] = be.compute_signals(run_code, frame)
         strat = be.SignalStrategy(signals)
+    return strat
 
+
+def _load_bars(job, workdir, pd):
+    fmt = job["fmt"]
+    return {sym: _read(os.path.join(workdir, f"bars_{i}.{fmt}"), fmt, pd)
+            for i, sym in enumerate(job["symbols"])}
+
+
+def mode_engine(job, workdir, code, pd, np, ta):
+    sys.path.insert(0, _SERVICES_DIR)
+    import backtest_engine as be
+
+    bars = _load_bars(job, workdir, pd)
+    cfg = be.EngineConfig.from_dict(job["config"])
+
+    prog = open(os.path.join(workdir, "progress.json"), "w")  # noqa: SIM115 - held for the run
+
+    def progress(pct, ts, equity, ntrades):
+        prog.seek(0)
+        prog.write(json.dumps({"pct": pct, "ts": ts, "equity": equity, "trades": ntrades}).ljust(200))
+        prog.flush()
+
+    _lock_down()
+    strat = _build_strategy(code, bars, cfg, job["symbols"], pd, np, ta, be)
     result = be.Engine(bars, cfg, strat, progress_cb=progress).run()
 
     pd.DataFrame(result.trades, columns=_TRADE_COLS).to_json(
@@ -189,6 +198,72 @@ def mode_engine(job, workdir, code, pd, np, ta):
     with open(os.path.join(workdir, "meta.json"), "w") as fh:
         json.dump({"notes": result.notes, "logs": result.logs,
                    "rejections": result.rejections, "cancelled": result.cancelled}, fh)
+
+
+def mode_tasks(job, workdir, code, pd, np, ta):
+    """Run many (params, time-window) engine evaluations over one loaded dataset.
+
+    Each task: {"id", "params", "start", "end"} where start/end are inclusive
+    timestamp strings or null. Writes eq_<id>.npy (equity floats) plus
+    tasks.json (offsets into timeline.json and slim trade rows).
+    """
+    sys.path.insert(0, _SERVICES_DIR)
+    import backtest_engine as be
+
+    bars = _load_bars(job, workdir, pd)
+    symbols = job["symbols"]
+    base_cfg = dict(job["config"])
+    union = None
+    for frame in bars.values():
+        idx = pd.DatetimeIndex(pd.to_datetime(frame["timestamp"]))
+        union = idx if union is None else union.union(idx)
+    timeline = list(union.sort_values().strftime("%Y-%m-%d %H:%M:%S"))
+    timeline_arr = np.array(timeline)
+    with open(os.path.join(workdir, "timeline.json"), "w") as fh:
+        json.dump(timeline, fh)
+
+    prog = open(os.path.join(workdir, "progress.json"), "w")  # noqa: SIM115 - held for the run
+    _lock_down()
+
+    out = []
+    tasks = job["tasks"]
+    for n, task in enumerate(tasks):
+        rec = {"id": task["id"]}
+        try:
+            sub = {}
+            for sym in symbols:
+                f = bars[sym]
+                keep = np.ones(len(f), dtype=bool)
+                if task.get("start"):
+                    keep &= (f["timestamp"] >= task["start"]).to_numpy()
+                if task.get("end"):
+                    keep &= (f["timestamp"] <= task["end"]).to_numpy()
+                sub[sym] = f[keep].reset_index(drop=True)
+            sub = {k: v for k, v in sub.items() if len(v) >= 2}
+            if not sub:
+                raise ValueError("no bars in the task window")
+            cfg = be.EngineConfig.from_dict({**base_cfg, "params": task.get("params", {})})
+            strat = _build_strategy(code, sub, cfg, list(sub), pd, np, ta, be)
+            res = be.Engine(sub, cfg, strat).run()
+            eq = np.array([r["equity"] for r in res.equity], dtype="float64")
+            np.save(os.path.join(workdir, f"eq_{task['id']}.npy"), eq, allow_pickle=False)
+            rec.update({
+                "start": int(np.searchsorted(timeline_arr, res.equity[0]["timestamp"])),
+                "n": int(len(eq)),
+                "trades": [{k: t[k] for k in ("pnl", "holding_period_bars", "entry_time", "exit_time")}
+                           for t in res.trades],
+                "notes": res.notes,
+            })
+        except Exception:
+            lines = traceback.format_exc().strip().splitlines()
+            rec["error"] = "\n".join(lines[-4:])
+        out.append(rec)
+        prog.seek(0)
+        prog.write(json.dumps({"pct": (n + 1) / len(tasks) * 100.0, "ts": str(task["id"]),
+                               "equity": 0.0, "trades": 0}).ljust(200))
+        prog.flush()
+    with open(os.path.join(workdir, "tasks.json"), "w") as fh:
+        json.dump(out, fh)
 
 
 _TRADE_COLS = [
@@ -211,7 +286,7 @@ def main():
     ta = _import_ta()
     _apply_limits(job)
     try:
-        {"signals": mode_signals, "engine": mode_engine}[job["mode"]](
+        {"signals": mode_signals, "engine": mode_engine, "tasks": mode_tasks}[job["mode"]](
             job, workdir, code, pd, np, ta)
     except SystemExit:
         raise

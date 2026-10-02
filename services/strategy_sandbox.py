@@ -196,3 +196,48 @@ def run_backtest_sandboxed(
     if not equity:
         raise ValueError("Backtest produced no equity curve")
     return {"trades": trades, "equity": equity, **meta}
+
+
+def run_tasks_sandboxed(
+    strategy_code: str,
+    bars: dict[str, pd.DataFrame],
+    config: dict,
+    tasks: list[dict],
+    timeout_s: float = 3600,
+    mem_mb: int = 4096,
+    cancel_event=None,
+    progress_cb: Callable[[float], None] | None = None,
+) -> dict:
+    """Evaluate many (params, window) tasks against one loaded dataset.
+
+    ``tasks`` items: ``{"id": int, "params": {...}, "start": ts|None, "end": ts|None}``.
+    Returns ``{"timeline": [...], "tasks": {id: {"equity": ndarray, "start": int,
+    "trades": [...], "notes": [...]} | {"error": str}}}``.
+    """
+    fmt = _fmt()
+    symbols = list(bars)
+    with tempfile.TemporaryDirectory(prefix="oa-tasks-") as tmp:
+        for i, sym in enumerate(symbols):
+            _write_frame(bars[sym], os.path.join(tmp, f"bars_{i}.{fmt}"), fmt)
+        job = {
+            "mode": "tasks", "fmt": fmt, "symbols": symbols, "config": config, "tasks": tasks,
+            "mem_mb": mem_mb, "cpu_s": int(timeout_s) + 5,
+        }
+
+        def _on_progress(p: dict) -> None:
+            if progress_cb is not None:
+                progress_cb(float(p["pct"]))
+
+        _run_child(tmp, job, strategy_code, timeout_s, cancel_event, _on_progress)
+        timeline = json.loads(Path(tmp, "timeline.json").read_text())
+        recs = json.loads(Path(tmp, "tasks.json").read_text())
+        out: dict = {}
+        for rec in recs:
+            if "error" in rec:
+                out[rec["id"]] = {"error": rec["error"]}
+                continue
+            eq = np.load(os.path.join(tmp, f"eq_{rec['id']}.npy"), allow_pickle=False)
+            out[rec["id"]] = {
+                "equity": eq, "start": rec["start"], "trades": rec["trades"], "notes": rec["notes"],
+            }
+    return {"timeline": timeline, "tasks": out}

@@ -7,6 +7,7 @@ backtest_runs   engine_options   TEXT         JSON of cost / execution / strateg
                 data_fingerprint TEXT         JSON per symbol: bars, first/last timestamp, sha256
 backtest_trades mae_pct          FLOAT        max adverse excursion, % of entry price
                 mfe_pct          FLOAT        max favourable excursion, % of entry price
+backtest_optimizations (new table)  parameter sweeps / walk-forward studies
 
 Old rows keep NULL in every new column: nothing can be derived for a run that
 was executed before the inputs were recorded, and a made-up default would read
@@ -46,6 +47,23 @@ NEW_COLUMNS = {
 }
 
 
+OPTIMIZATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS backtest_optimizations (
+    opt_id VARCHAR(64) NOT NULL PRIMARY KEY,
+    name VARCHAR(128) NOT NULL,
+    kind VARCHAR(32) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    progress FLOAT NOT NULL,
+    strategy_code TEXT NOT NULL,
+    config_json TEXT NOT NULL,
+    result_json TEXT,
+    error_message TEXT,
+    created_at DATETIME,
+    completed_at DATETIME
+)
+"""
+
+
 def _resolve_db_url() -> str:
     """Resolve the backtest database URL, rebased onto the repo root."""
     url = os.getenv("BACKTEST_DATABASE_URL", "sqlite:///db/backtest.db")
@@ -77,6 +95,15 @@ def migrate() -> dict:
                 conn.commit()
                 summary["added"].append(f"{table}.{column}")
                 logger.info(f"Added column: {table}.{column}")
+        # New table: CREATE IF NOT EXISTS keeps this idempotent (and the status index below).
+        conn.execute(text(OPTIMIZATIONS_DDL))
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_backtest_optimizations_status "
+                "ON backtest_optimizations (status)"
+            )
+        )
+        conn.commit()
     engine.dispose()
     return summary
 

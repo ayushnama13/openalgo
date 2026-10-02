@@ -255,6 +255,84 @@ def _data_fingerprint(bars: dict[str, pd.DataFrame]) -> dict:
     return out
 
 
+def load_run_bars(
+    symbols: list[str],
+    exchange: str,
+    interval: str,
+    start_date: str | None,
+    end_date: str | None,
+    missing_data_policy: str,
+) -> tuple[dict[str, pd.DataFrame], list[str]]:
+    """Load, normalise and clean the OHLCV frames for every requested symbol.
+
+    Returns ({"NSE:SBIN": frame}, notes). Raises ValueError when nothing is usable.
+    """
+    start_ts = int(pd.to_datetime(start_date).timestamp()) if start_date else None
+    end_ts = int(pd.to_datetime(end_date).timestamp()) if end_date else None
+
+    keys: list[str] = []
+    for raw in symbols or ["SBIN"]:
+        sym_clean, exch = _split_symbol(raw, exchange)
+        key = f"{exch}:{sym_clean}"
+        if key not in keys:
+            keys.append(key)
+    if len(keys) > _MAX_SYMBOLS:
+        raise ValueError(f"Too many symbols ({len(keys)}); the limit is {_MAX_SYMBOLS}.")
+
+    run_notes: list[str] = []
+    bars_by_symbol: dict[str, pd.DataFrame] = {}
+    for key in keys:
+        exch, sym_clean = key.split(":", 1)
+        df = get_ohlcv(
+            symbol=sym_clean,
+            exchange=exch,
+            interval=interval,
+            start_timestamp=start_ts,
+            end_timestamp=end_ts,
+        )
+        if df.empty or len(df) < 2:
+            if len(keys) == 1:
+                raise ValueError(
+                    f"No historical data available for {sym_clean} ({exch}) interval {interval} in selected range."
+                )
+            run_notes.append(f"{key} skipped: no historical data in the selected range.")
+            continue
+
+        # get_ohlcv() returns raw epoch seconds (UTC) in the timestamp column on
+        # every code path (raw, intraday-aggregated, daily-aggregated) - convert
+        # once here. Everything downstream (day-boundary detection for the daily
+        # loss limit, MIS square-off time matching, the final equity-curve index)
+        # assumes a "YYYY-MM-DD HH:MM:SS" string and silently misbehaves on a raw
+        # epoch value instead of raising.
+        df["timestamp"] = (
+            pd.to_datetime(df["timestamp"], unit="s", utc=True)
+            .dt.tz_convert("Asia/Kolkata")
+            .dt.tz_localize(None)
+            .astype(str)
+        )
+
+        # Handle missing data policy
+        if missing_data_policy == "skip":
+            df = df.dropna(subset=["open", "high", "low", "close"])
+        elif missing_data_policy == "forward_fill":
+            df = df.ffill().bfill()
+        elif missing_data_policy == "abort":
+            if df[["open", "high", "low", "close"]].isnull().any().any():
+                raise ValueError(
+                    f"Missing bar data detected in {key} and policy is set to abort."
+                )
+        df = df.drop_duplicates(subset="timestamp", keep="last").reset_index(drop=True)
+        if df.empty:
+            raise ValueError(f"{key}: DataFrame is empty after applying missing data policy.")
+        bars_by_symbol[key] = df[
+            [c for c in ("timestamp", "open", "high", "low", "close", "volume") if c in df.columns]
+        ]
+
+    if not bars_by_symbol:
+        raise ValueError("No historical data available for any requested symbol.")
+    return bars_by_symbol, run_notes
+
+
 def run_backtest_pipeline(
     job_id: str,
     name: str,
@@ -301,71 +379,9 @@ def run_backtest_pipeline(
         batch_seq = getattr(run_record, "batch_seq", 0) or 0
         emit_kwargs.update({"batch_id": batch_id, "batch_seq": batch_seq})
 
-        # Parse start and end timestamps
-        start_ts = int(pd.to_datetime(start_date).timestamp()) if start_date else None
-        end_ts = int(pd.to_datetime(end_date).timestamp()) if end_date else None
-
-        # Load every requested symbol from the Historify DB
-        keys: list[str] = []
-        for raw in symbols or ["SBIN"]:
-            sym_clean, exch = _split_symbol(raw, exchange)
-            key = f"{exch}:{sym_clean}"
-            if key not in keys:
-                keys.append(key)
-        if len(keys) > _MAX_SYMBOLS:
-            raise ValueError(f"Too many symbols ({len(keys)}); the limit is {_MAX_SYMBOLS}.")
-
-        run_notes: list[str] = []
-        bars_by_symbol: dict[str, pd.DataFrame] = {}
-        for key in keys:
-            exch, sym_clean = key.split(":", 1)
-            df = get_ohlcv(
-                symbol=sym_clean,
-                exchange=exch,
-                interval=interval,
-                start_timestamp=start_ts,
-                end_timestamp=end_ts,
-            )
-            if df.empty or len(df) < 2:
-                if len(keys) == 1:
-                    raise ValueError(
-                        f"No historical data available for {sym_clean} ({exch}) interval {interval} in selected range."
-                    )
-                run_notes.append(f"{key} skipped: no historical data in the selected range.")
-                continue
-
-            # get_ohlcv() returns raw epoch seconds (UTC) in the timestamp column on
-            # every code path (raw, intraday-aggregated, daily-aggregated) - convert
-            # once here. Everything downstream (day-boundary detection for the daily
-            # loss limit, MIS square-off time matching, the final equity-curve index)
-            # assumes a "YYYY-MM-DD HH:MM:SS" string and silently misbehaves on a raw
-            # epoch value instead of raising.
-            df["timestamp"] = (
-                pd.to_datetime(df["timestamp"], unit="s", utc=True)
-                .dt.tz_convert("Asia/Kolkata")
-                .dt.tz_localize(None)
-                .astype(str)
-            )
-
-            # Handle missing data policy
-            if missing_data_policy == "skip":
-                df = df.dropna(subset=["open", "high", "low", "close"])
-            elif missing_data_policy == "forward_fill":
-                df = df.ffill().bfill()
-            elif missing_data_policy == "abort":
-                if df[["open", "high", "low", "close"]].isnull().any().any():
-                    raise ValueError(
-                        f"Missing bar data detected in {key} and policy is set to abort."
-                    )
-            df = df.drop_duplicates(subset="timestamp", keep="last").reset_index(drop=True)
-            if df.empty:
-                raise ValueError(f"{key}: DataFrame is empty after applying missing data policy.")
-            bars_by_symbol[key] = df[
-                [c for c in ("timestamp", "open", "high", "low", "close", "volume") if c in df.columns]
-            ]
-
-        if not bars_by_symbol:
-            raise ValueError("No historical data available for any requested symbol.")
+        bars_by_symbol, run_notes = load_run_bars(
+            symbols, exchange, interval, start_date, end_date, missing_data_policy
+        )
 
         engine_cfg = {
             "initial_capital": initial_capital,
@@ -724,3 +740,95 @@ def cancel_batch(batch_id: str) -> list[str]:
         raise
     finally:
         db_session.remove()
+
+
+# ---------------------------------------------------------------------------
+# Parameter sweeps / walk-forward (see services/backtest_optimizer.py)
+# ---------------------------------------------------------------------------
+def start_optimization(
+    name: str,
+    strategy_code: str,
+    symbols: list[str],
+    optimize: dict,
+    exchange: str = "NSE",
+    interval: str = "5m",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    initial_capital: float = 100000.0,
+    sizing_type: str = "fixed_qty",
+    sizing_value: float = 1.0,
+    slippage_bps: float = 0.0,
+    brokerage_bps: float = 0.0,
+    product_type: str = "MIS",
+    missing_data_policy: str = "skip",
+    stop_loss_pct: float | None = None,
+    take_profit_pct: float | None = None,
+    daily_loss_limit: float | None = None,
+    max_positions: int = 5,
+    engine_options: dict | None = None,
+) -> str:
+    """Queue a parameter sweep or walk-forward study; returns its opt_id."""
+    from services import backtest_optimizer as opt
+
+    options = sanitize_engine_options(engine_options)
+    config = {
+        "symbols": symbols,
+        "exchange": exchange,
+        "interval": interval,
+        "start_date": start_date,
+        "end_date": end_date,
+        "missing_data_policy": missing_data_policy,
+        "engine_config": {
+            "initial_capital": initial_capital,
+            "sizing_type": sizing_type,
+            "sizing_value": sizing_value,
+            "slippage_bps": slippage_bps,
+            "brokerage_bps": brokerage_bps,
+            "product_type": product_type,
+            "stop_loss_pct": stop_loss_pct,
+            "take_profit_pct": take_profit_pct,
+            "daily_loss_limit": daily_loss_limit,
+            "max_positions": max_positions or 1,
+            "interval": interval,
+            **options,
+        },
+        "optimize": optimize,
+    }
+    opt_id = opt.create_optimization_record(name, strategy_code, config)
+
+    def loader(cfg: dict):
+        return load_run_bars(
+            cfg["symbols"], cfg["exchange"], cfg["interval"], cfg["start_date"],
+            cfg["end_date"], cfg["missing_data_policy"],
+        )
+
+    def work():
+        cancel_event = register_active_job(opt_id)
+        try:
+            opt.run_optimization_job(opt_id, cancel_event, loader)
+        finally:
+            unregister_active_job(opt_id)
+
+    future = _BACKTEST_EXECUTOR.submit(work)
+    with _ACTIVE_JOBS_LOCK:
+        _JOB_FUTURES[opt_id] = future
+    return opt_id
+
+
+def cancel_optimization(opt_id: str) -> bool:
+    """Cancel a running or queued study."""
+    from database.backtest_db import BacktestOptimization
+
+    if cancel_job(opt_id):
+        session = db_session()
+        try:
+            rec = session.query(BacktestOptimization).filter_by(opt_id=opt_id).first()
+            if rec and rec.status == "pending":
+                rec.status = "cancelled"
+                rec.completed_at = datetime.now(pytz.timezone("Asia/Kolkata"))
+                rec.error_message = "Cancelled by user before the run started"
+                session.commit()
+        finally:
+            db_session.remove()
+        return True
+    return False
