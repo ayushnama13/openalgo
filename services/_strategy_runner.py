@@ -1,15 +1,24 @@
 """Child-process runner for user strategy code. Invoked by strategy_sandbox only.
 
-argv: <input_file> <output_file> <format: parquet|csv>
+argv: <workdir>
+Reads <workdir>/job.json; modes:
+  signals - run the signal DSL once, write signal columns (out.<fmt>)
+  engine  - run the event-driven multi-symbol engine, write trades/equity
 """
 
 import builtins
+import json
+import os
 import sys
+import traceback
+
+_SERVICES_DIR = os.path.dirname(os.path.abspath(__file__))
 
 _ALLOWED_IMPORTS = {
     "math", "statistics", "numpy", "pandas", "ta", "openalgo", "datetime",
     "itertools", "functools", "collections", "typing", "numbers", "decimal",
-    "fractions", "operator", "random", "warnings", "time",
+    "fractions", "operator", "random", "warnings", "time", "dataclasses",
+    "enum", "abc", "copy", "heapq", "bisect",
 }
 _SIGNAL_COLS = ("signal", "buy_signal", "sell_signal")
 
@@ -22,8 +31,19 @@ def _write(df, path, fmt):
     df.to_parquet(path) if fmt == "parquet" else df.to_csv(path, index=False)
 
 
+def _apply_limits(job):
+    import resource
+
+    mem = int(job.get("mem_mb", 1024)) * 1024 * 1024
+    cpu = int(job.get("cpu_s", 65))
+    resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+    resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024 * 1024,) * 2)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+
 def _lock_down():
-    import os
+    import os as _os
     import socket
 
     def _denied(*_a, **_k):
@@ -38,8 +58,8 @@ def _lock_down():
         "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp",
         "spawnvpe", "posix_spawn", "posix_spawnp", "remove", "unlink", "rmdir", "rename",
     ):
-        if hasattr(os, name):
-            setattr(os, name, _denied)
+        if hasattr(_os, name):
+            setattr(_os, name, _denied)
     sub = sys.modules.get("subprocess")
     if sub is not None:
         for name in ("Popen", "run", "call", "check_call", "check_output", "getoutput"):
@@ -47,25 +67,7 @@ def _lock_down():
                 setattr(sub, name, _denied)
 
 
-def main():
-    in_path, out_path, fmt = sys.argv[1:4]
-    with open(in_path + ".code", encoding="utf-8") as fh:
-        code = fh.read()
-
-    import numpy as np
-    import pandas as pd
-
-    try:
-        from openalgo import ta
-    except ImportError:
-        try:
-            import ta
-        except ImportError:
-            ta = None
-
-    df = _read(in_path, fmt, pd)
-    _lock_down()
-
+def _user_namespace(extra):
     real_import = builtins.__import__
 
     def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -73,32 +75,153 @@ def main():
             raise ImportError(f"import of '{name}' is not allowed in strategy code")
         return real_import(name, globals, locals, fromlist, level)
 
-    safe_builtins = {
+    safe = {
         k: v for k, v in vars(builtins).items()
         if k not in ("open", "eval", "exec", "compile", "input", "breakpoint",
                      "help", "exit", "quit", "__loader__", "__spec__")
     }
-    safe_builtins["__import__"] = _guarded_import
-    env = {"__builtins__": safe_builtins, "pd": pd, "np": np, "ta": ta, "df": df}
+    safe["__import__"] = _guarded_import
+    return {"__builtins__": safe, **extra}
 
+
+def _import_ta():
+    try:
+        from openalgo import ta
+    except ImportError:
+        try:
+            import ta
+        except ImportError:
+            ta = None
+    return ta
+
+
+def _run_user_code(code, extra):
+    env = _user_namespace(extra)
     exec(compile(code, "<strategy>", "exec"), env)  # noqa: S102 - sandboxed child
+    return env
+
+
+def mode_signals(job, workdir, code, pd, np, ta):
+    fmt = job["fmt"]
+    df = _read(os.path.join(workdir, "in." + fmt), fmt, pd)
+    _lock_down()
+    env = _run_user_code(code, {"pd": pd, "np": np, "ta": ta, "df": df})
     fn = env.get("strategy")
     if callable(fn):
         res = fn(df.copy())
         if isinstance(res, pd.DataFrame):
             df = res
-
     if "buy_signal" in df.columns and "sell_signal" in df.columns:
         df["signal"] = 0
         df.loc[df["buy_signal"].astype(bool), "signal"] = 1
         df.loc[df["sell_signal"].astype(bool), "signal"] = -1
     elif "signal" not in df.columns:
         df["signal"] = 0
-
     out = df[[c for c in _SIGNAL_COLS if c in df.columns]].reset_index(drop=True)
     for c in out.columns:
         out[c] = pd.to_numeric(out[c], errors="coerce") if c == "signal" else out[c].astype(bool)
-    _write(out, out_path, fmt)
+    _write(out, os.path.join(workdir, "out." + fmt), fmt)
+
+
+
+def mode_engine(job, workdir, code, pd, np, ta):
+    sys.path.insert(0, _SERVICES_DIR)
+    import backtest_engine as be
+
+    fmt = job["fmt"]
+    bars = {}
+    for i, sym in enumerate(job["symbols"]):
+        bars[sym] = _read(os.path.join(workdir, f"bars_{i}.{fmt}"), fmt, pd)
+    cfg = be.EngineConfig.from_dict(job["config"])
+
+    prog = open(os.path.join(workdir, "progress.json"), "w")  # noqa: SIM115 - held for the run
+
+    def progress(pct, ts, equity, ntrades):
+        prog.seek(0)
+        prog.write(json.dumps({"pct": pct, "ts": ts, "equity": equity, "trades": ntrades}).ljust(200))
+        prog.flush()
+
+    _lock_down()
+    first = bars[job["symbols"][0]]
+    extra = {"pd": pd, "np": np, "ta": ta, "df": first.copy(),
+             "Strategy": be.Strategy, "SYMBOLS": list(job["symbols"]), "PARAMS": dict(cfg.params)}
+    env = _run_user_code(code, extra)
+
+    strat = None
+    for v in env.values():
+        if isinstance(v, type) and issubclass(v, be.Strategy) and v is not be.Strategy:
+            strat = v()
+            base = dict(getattr(v, "params", {}) or {})
+            strat.params = {**base, **cfg.params}
+            cfg.params = strat.params
+    if strat is None and callable(env.get("on_bar")):
+        init_fn, bar_fn = env.get("init"), env["on_bar"]
+
+        class FnStrategy(be.Strategy):
+            def init(self, ctx):
+                if callable(init_fn):
+                    init_fn(ctx)
+
+            def on_bar(self, ctx):
+                bar_fn(ctx)
+
+        strat = FnStrategy()
+    if strat is None:  # legacy signal DSL, one independent series per symbol
+        signals = {}
+        for sym, frame in bars.items():
+            def run_code(frame_copy, _sym=sym):
+                e = _run_user_code(code, {"pd": pd, "np": np, "ta": ta, "df": frame_copy})
+                fn = e.get("strategy")
+                if callable(fn):
+                    res = fn(frame_copy.copy())
+                    if isinstance(res, pd.DataFrame):
+                        return res
+                return frame_copy
+
+            signals[sym] = be.compute_signals(run_code, frame)
+        strat = be.SignalStrategy(signals)
+
+    result = be.Engine(bars, cfg, strat, progress_cb=progress).run()
+
+    pd.DataFrame(result.trades, columns=_TRADE_COLS).to_json(
+        os.path.join(workdir, "trades.json"), orient="records")
+    pd.DataFrame(result.equity).to_json(os.path.join(workdir, "equity.json"), orient="records")
+    with open(os.path.join(workdir, "meta.json"), "w") as fh:
+        json.dump({"notes": result.notes, "logs": result.logs,
+                   "rejections": result.rejections, "cancelled": result.cancelled}, fh)
+
+
+_TRADE_COLS = [
+    "symbol", "exchange", "action", "entry_time", "entry_price", "exit_time", "exit_price",
+    "quantity", "pnl", "pnl_pct", "holding_period_bars", "entry_reason", "exit_reason",
+    "costs", "mae_pct", "mfe_pct",
+]
+
+
+def main():
+    workdir = sys.argv[1]
+    with open(os.path.join(workdir, "job.json"), encoding="utf-8") as fh:
+        job = json.load(fh)
+    with open(os.path.join(workdir, "code.py"), encoding="utf-8") as fh:
+        code = fh.read()
+
+    import numpy as np
+    import pandas as pd
+
+    ta = _import_ta()
+    _apply_limits(job)
+    try:
+        {"signals": mode_signals, "engine": mode_engine}[job["mode"]](
+            job, workdir, code, pd, np, ta)
+    except SystemExit:
+        raise
+    except BaseException as exc:  # report the user-code failure compactly
+        lines = traceback.format_exc().strip().splitlines()
+        keep = [ln for ln in lines if "<strategy>" in ln or not ln.startswith("  File")]
+        print("\n".join(keep[-8:]), file=sys.stderr)
+        if isinstance(exc, MemoryError):
+            print("MemoryError", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
