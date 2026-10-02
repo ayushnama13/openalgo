@@ -22,12 +22,20 @@ from database.historify_db import (
     get_data_range,
     resolve_base_interval,
 )
-from services.backtest_analytics import get_benchmark_comparison
+from services.backtest_analytics import get_benchmark_comparison, periods_per_year_for_interval
 from services.backtest_optimizer import monte_carlo
+from services.backtest_reports import (
+    chart_payload,
+    drawdown_periods,
+    exposure_stats,
+    rolling_metrics,
+    trade_breakdown,
+)
 from services.backtest_service import (
     cancel_batch,
     cancel_job,
     cancel_optimization,
+    load_run_bars,
     start_backtest_batch,
     start_optimization,
 )
@@ -999,6 +1007,85 @@ def run_monte_carlo(job_id):
         return jsonify({"status": "error", "message": str(e)}), 400
     except Exception as e:
         logger.exception(f"Error running Monte Carlo for {job_id}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db_session.remove()
+
+
+def _trade_dicts(session, job_id: str) -> list[dict]:
+    rows = session.query(BacktestTrade).filter_by(job_id=job_id).order_by(BacktestTrade.id.asc()).all()
+    return [{
+        "symbol": t.symbol, "exchange": t.exchange, "action": t.action,
+        "entry_time": t.entry_time, "entry_price": t.entry_price,
+        "exit_time": t.exit_time, "exit_price": t.exit_price, "quantity": t.quantity,
+        "pnl": t.pnl, "pnl_pct": t.pnl_pct, "costs": t.costs,
+        "holding_period_bars": t.holding_period_bars, "entry_reason": t.entry_reason,
+        "exit_reason": t.exit_reason, "mae_pct": t.mae_pct, "mfe_pct": t.mfe_pct,
+    } for t in rows]
+
+
+@backtest_bp.route("/analytics/<job_id>", methods=["GET"])
+@check_session_validity
+def get_analytics(job_id):
+    """Drawdown periods, rolling Sharpe, trade breakdowns, MAE/MFE and exposure for one run."""
+    session = db_session()
+    try:
+        run = session.query(BacktestRun).filter_by(job_id=job_id).first()
+        if not run:
+            return jsonify({"status": "error", "message": "Job not found"}), 404
+        eq_rows = (
+            session.query(BacktestEquityCurve).filter_by(job_id=job_id)
+            .order_by(BacktestEquityCurve.id.asc()).all()
+        )
+        if not eq_rows:
+            return jsonify({"status": "error", "message": "Run has no equity curve yet"}), 409
+        idx = pd.to_datetime([r.timestamp for r in eq_rows])
+        equity = pd.Series([r.equity for r in eq_rows], index=idx)
+        positions = pd.Series([r.positions_value for r in eq_rows], index=idx)
+        ppy = periods_per_year_for_interval(run.interval)
+        return jsonify({
+            "status": "success",
+            "job_id": job_id,
+            "drawdown_periods": drawdown_periods(equity),
+            "rolling": rolling_metrics(equity, ppy),
+            "trades": trade_breakdown(_trade_dicts(session, job_id)),
+            "exposure": exposure_stats(positions),
+        })
+    except Exception as e:
+        logger.exception(f"Error building analytics for {job_id}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db_session.remove()
+
+
+@backtest_bp.route("/chart/<job_id>", methods=["GET"])
+@check_session_validity
+def get_trade_chart(job_id):
+    """Candles for one symbol of a run with its entry/exit markers."""
+    symbol = request.args.get("symbol", "")
+    session = db_session()
+    try:
+        run = session.query(BacktestRun).filter_by(job_id=job_id).first()
+        if not run:
+            return jsonify({"status": "error", "message": "Job not found"}), 404
+        symbols = json.loads(run.symbols) if run.symbols else []
+        if not symbol:
+            symbol = symbols[0] if symbols else ""
+        if ":" not in symbol:
+            symbol = f"{run.exchange}:{symbol}"
+        bars, _ = load_run_bars([symbol], run.exchange, run.interval, run.start_date,
+                                run.end_date, run.missing_data_policy)
+        frame = bars.get(symbol)
+        if frame is None:
+            return jsonify({"status": "error", "message": f"No data for {symbol}"}), 404
+        max_bars = max(100, min(int(request.args.get("max_bars", 5000)), 20000))
+        payload = chart_payload(frame, _trade_dicts(session, job_id), symbol, max_bars)
+        payload["symbols"] = symbols
+        return jsonify({"status": "success", "job_id": job_id, **payload})
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception as e:
+        logger.exception(f"Error building trade chart for {job_id}: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         db_session.remove()
