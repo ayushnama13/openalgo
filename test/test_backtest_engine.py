@@ -293,3 +293,96 @@ def test_spread_and_impact_worsen_fills():
     base = run({"NSE:A": df}, Scripted(script))
     wide = run({"NSE:A": df}, Scripted(script), spread_bps=20, impact_bps=50)
     assert wide.trades[0]["pnl"] < base.trades[0]["pnl"]
+
+
+# ---- F&O: lots, margin, futures accounting, contract end ----
+FUT = "NFO:NIFTYFUT"
+FUT_INFO = {FUT: {"lot_size": 75, "kind": "FUT"}}
+
+
+def test_futures_do_not_pay_notional_and_settle_pnl():
+    df = make_df([20000, 20000, 20100, 20100, 20100, 20100])
+    res = run(
+        {FUT: df},
+        Scripted({0: lambda c: c.buy(FUT, qty=75), 3: lambda c: c.close(FUT)}),
+        instruments=FUT_INFO, initial_capital=500000,
+    )
+    t = res.trades[0]
+    assert t["quantity"] == 75
+    assert t["pnl"] == pytest.approx(75 * 100)
+    # equity never dipped by the 15 lakh notional: cash stayed ~ initial until the close
+    assert min(r["equity"] for r in res.equity) > 490000
+    assert res.equity[-1]["equity"] == pytest.approx(500000 + t["pnl"], abs=0.05)
+
+
+def test_fixed_qty_means_lots_for_contracts():
+    df = make_df([20000] * 6)
+    res = run({FUT: df}, Scripted({0: lambda c: c.buy(FUT)}), instruments=FUT_INFO,
+              sizing_type="fixed_qty", sizing_value=2, initial_capital=1_000_000)
+    assert res.trades[0]["quantity"] == 150  # 2 lots x 75
+
+
+def test_explicit_qty_rounds_down_to_whole_lots():
+    df = make_df([20000] * 6)
+    res = run({FUT: df}, Scripted({0: lambda c: c.buy(FUT, qty=200)}), instruments=FUT_INFO,
+              initial_capital=1_000_000)
+    assert res.trades[0]["quantity"] == 150  # 200 -> 2 lots
+
+
+def test_margin_limits_futures_position():
+    df = make_df([20000] * 6)
+    # one lot needs 75 * 20000 * 12% = 1.8 lakh; 2 lakh capital cannot carry two lots
+    res = run({FUT: df}, Scripted({0: lambda c: c.buy(FUT, qty=150)}), instruments=FUT_INFO,
+              initial_capital=200000)
+    assert res.trades == []
+    assert res.rejections["insufficient_margin"] == 1
+
+
+def test_short_option_blocks_strike_based_margin_but_long_option_pays_premium():
+    opt = "NFO:NIFTY24500CE"
+    info = {opt: {"lot_size": 75, "kind": "CE", "strike": 24500}}
+    df = make_df([100] * 6)
+    # short 1 lot: margin = 75 * 24500 * 15% = 2.76 lakh
+    short_ok = run({opt: df}, Scripted({0: lambda c: c.sell(opt, qty=75)}), instruments=info,
+                   initial_capital=300000)
+    assert short_ok.trades and short_ok.trades[0]["action"] == "SELL"
+    short_no = run({opt: df}, Scripted({0: lambda c: c.sell(opt, qty=75)}), instruments=info,
+                   initial_capital=200000)
+    assert short_no.trades == [] and short_no.rejections["insufficient_margin"] == 1
+    long_ok = run({opt: df}, Scripted({0: lambda c: c.buy(opt, qty=75)}), instruments=info,
+                  initial_capital=10000)
+    assert long_ok.trades  # premium 7,500 fits in 10,000 cash
+
+
+def test_contract_expiry_settles_at_last_bar_of_that_contract():
+    short_life = make_df([100] * 4)            # contract ends after 4 bars
+    long_life = make_df([50] * 10)             # underlying keeps trading
+    res = run(
+        {"NSE:EXP": short_life, "NSE:LIVE": long_life},
+        Scripted({0: lambda c: c.buy("NSE:EXP", qty=1)}),
+        max_positions=2,
+    )
+    t = res.trades[0]
+    assert t["exit_reason"] == "Contract Expiry / Last Bar"
+    assert t["exit_time"] == short_life["timestamp"].iloc[-1]
+
+
+def test_auto_cost_preset_uses_contract_kind():
+    df = make_df([20000, 20000, 20000, 20000])
+    script = {0: lambda c: c.buy(FUT, qty=75), 2: lambda c: c.close(FUT)}
+    fut = run({FUT: df}, Scripted(script), instruments=FUT_INFO, cost_preset="auto",
+              product_type="NRML", initial_capital=500000)
+    eq_df = make_df([20000, 20000, 20000, 20000])
+    eq = run({"NSE:EQ1": eq_df},
+             Scripted({0: lambda c: c.buy("NSE:EQ1", qty=75), 2: lambda c: c.close("NSE:EQ1")}),
+             cost_preset="auto", product_type="NRML", initial_capital=5_000_000)
+    # futures STT (0.02% sell) is far below delivery STT (0.1% both legs)
+    assert fut.trades[0]["costs"] < eq.trades[0]["costs"]
+
+
+def test_mis_leverage_widens_buying_power():
+    df = make_df([1000] * 6)
+    script = {0: lambda c: c.buy("NSE:A", qty=300)}  # Rs 3 lakh on 1 lakh capital
+    no = run({"NSE:A": df}, Scripted(script), product_type="MIS")
+    yes = run({"NSE:A": df}, Scripted(script), product_type="MIS", intraday_leverage=5)
+    assert no.trades == [] and yes.trades

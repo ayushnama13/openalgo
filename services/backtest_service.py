@@ -23,7 +23,12 @@ from database.backtest_db import (
     BacktestTrade,
     db_session,
 )
-from database.historify_db import get_data_range, get_ohlcv, resolve_base_interval
+from database.historify_db import (
+    get_data_range,
+    get_ohlcv,
+    get_symbol_metadata,
+    resolve_base_interval,
+)
 from services.backtest_analytics import (
     calculate_backtest_metrics,
     generate_monthly_returns_heatmap,
@@ -199,6 +204,9 @@ _ENGINE_OPTION_TYPES: dict[str, type | tuple] = {
     "enforce_cash": bool,
     "instrument": str,
     "params": dict,
+    "margin_pct_fut": (int, float),
+    "margin_pct_short_opt": (int, float),
+    "intraday_leverage": (int, float),
 }
 
 
@@ -253,6 +261,45 @@ def _data_fingerprint(bars: dict[str, pd.DataFrame]) -> dict:
             "sha256": digest,
         }
     return out
+
+
+_FO_EXCHANGES = {"NFO", "BFO", "MCX", "CDS", "BCD", "NCDEX"}
+
+
+def resolve_instruments(keys: list[str]) -> tuple[dict[str, dict], list[str]]:
+    """Lot size / contract kind / strike / expiry per symbol, from Historify metadata.
+
+    Cash equity needs nothing (lot 1); contracts without metadata fall back to lot 1
+    with a note so the user knows quantities are not lot-aligned.
+    """
+    out: dict[str, dict] = {}
+    notes: list[str] = []
+    for key in keys:
+        exch, sym = key.split(":", 1)
+        if exch.upper() not in _FO_EXCHANGES:
+            continue
+        meta = get_symbol_metadata(sym, exch) or {}
+        itype = str(meta.get("instrumenttype") or "").upper()
+        tail = sym.upper()
+        if "FUT" in itype or tail.endswith("FUT"):
+            kind = "FUT"
+        elif itype in ("CE", "PE"):
+            kind = itype
+        elif tail.endswith(("CE", "PE")):
+            kind = tail[-2:]
+        else:
+            kind = "EQ"
+        lot = meta.get("lotsize")
+        if not lot or int(lot) < 1:
+            notes.append(f"{key}: lot size unknown in Historify metadata, assuming 1 unit.")
+            lot = 1
+        out[key] = {
+            "kind": kind,
+            "lot_size": int(lot),
+            "strike": meta.get("strike") or None,
+            "expiry": str(meta["expiry"]) if meta.get("expiry") else None,
+        }
+    return out, notes
 
 
 def load_run_bars(
@@ -383,6 +430,9 @@ def run_backtest_pipeline(
             symbols, exchange, interval, start_date, end_date, missing_data_policy
         )
 
+        instruments, inst_notes = resolve_instruments(list(bars_by_symbol))
+        run_notes.extend(inst_notes)
+
         engine_cfg = {
             "initial_capital": initial_capital,
             "sizing_type": sizing_type,
@@ -395,10 +445,15 @@ def run_backtest_pipeline(
             "daily_loss_limit": daily_loss_limit,
             "max_positions": max_positions or 1,
             "interval": interval,
+            "instruments": instruments,
             **(engine_options or {}),
         }
         run_record.code_hash = hashlib.sha256(strategy_code.encode("utf-8")).hexdigest()
-        run_record.data_fingerprint = json.dumps(_data_fingerprint(bars_by_symbol))
+        fingerprint = _data_fingerprint(bars_by_symbol)
+        for key, info in instruments.items():
+            if key in fingerprint:
+                fingerprint[key]["instrument"] = info
+        run_record.data_fingerprint = json.dumps(fingerprint)
         session.commit()
 
         def _on_progress(pct: float, ts: str, eq: float, n_trades: int) -> None:
@@ -797,10 +852,12 @@ def start_optimization(
     opt_id = opt.create_optimization_record(name, strategy_code, config)
 
     def loader(cfg: dict):
-        return load_run_bars(
+        bars, notes = load_run_bars(
             cfg["symbols"], cfg["exchange"], cfg["interval"], cfg["start_date"],
             cfg["end_date"], cfg["missing_data_policy"],
         )
+        instruments, inst_notes = resolve_instruments(list(bars))
+        return bars, notes + inst_notes, instruments
 
     def work():
         cancel_event = register_active_job(opt_id)
