@@ -71,8 +71,8 @@ class DhanCapabilityRegistry:
 
     # Exchange-wise depth level support
     DEPTH_SUPPORT = {
-        "NSE": {5, 20},  # NSE Equity supports both 5 and 20 level depth
-        "NFO": {5, 20},  # NSE F&O supports both 5 and 20 level depth
+        "NSE": {5, 20, 200},  # NSE Equity supports 5, 20 and 200 level depth
+        "NFO": {5, 20, 200},  # NSE F&O supports 5, 20 and 200 level depth
         "BSE": {5},  # BSE only supports 5 level depth
         "BFO": {5},  # BSE F&O only supports 5 level depth
         "MCX": {5},  # MCX only supports 5 level depth
@@ -85,6 +85,7 @@ class DhanCapabilityRegistry:
     # Maximum subscriptions per connection
     MAX_SUBSCRIPTIONS_5_DEPTH = 5000  # Max 5000 instruments for 5-level depth
     MAX_SUBSCRIPTIONS_20_DEPTH = 50  # Max 50 instruments for 20-level depth
+    MAX_SUBSCRIPTIONS_200_DEPTH = 1  # Max 1 instrument for 200-level depth
 
     # Maximum instruments per request
     MAX_INSTRUMENTS_PER_REQUEST = 100  # Max 100 instruments per subscribe request
@@ -118,6 +119,8 @@ class DhanCapabilityRegistry:
     @classmethod
     def get_max_subscriptions(cls, depth_level: int) -> int:
         """Get maximum subscriptions allowed for a depth level"""
+        if depth_level == 200:
+            return cls.MAX_SUBSCRIPTIONS_200_DEPTH
         if depth_level == 20:
             return cls.MAX_SUBSCRIPTIONS_20_DEPTH
         return cls.MAX_SUBSCRIPTIONS_5_DEPTH
