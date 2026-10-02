@@ -76,11 +76,18 @@ _recorders: dict[str, dict] = {}
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-def start_recorder(symbol: str, exchange: str, api_key: str) -> dict:
+def start_recorder(symbol: str, exchange: str, api_key: str, depth_level: int = 5) -> dict:
     """
     Start a background depth recorder for symbol/exchange.
     Returns a status dict immediately — recording happens asynchronously.
     """
+    try:
+        depth_level = int(depth_level)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("depth_level must be an integer between 5 and 200") from exc
+    if not (5 <= depth_level <= 200):
+        raise ValueError("depth_level must be between 5 and 200")
+
     symbol = symbol.upper()
     exchange = exchange.upper()
     key = f"{exchange}:{symbol}"
@@ -96,6 +103,8 @@ def start_recorder(symbol: str, exchange: str, api_key: str) -> dict:
             "exchange": exchange,
             "api_key": api_key,
             "status": "starting",
+            "depth_level": depth_level,
+            "actual_depth": depth_level,
             "ticks_written": 0,
             "ticks_buffered": 0,
             "last_tick_time": None,
@@ -106,7 +115,7 @@ def start_recorder(symbol: str, exchange: str, api_key: str) -> dict:
         }
         _recorders[key] = state
 
-    upsert_config(symbol, exchange, "active")
+    upsert_config(symbol, exchange, "active", depth_level=depth_level)
 
     thread = _original_threading.Thread(
         target=_recorder_loop,
@@ -118,8 +127,35 @@ def start_recorder(symbol: str, exchange: str, api_key: str) -> dict:
         _recorders[key]["thread"] = thread
     thread.start()
 
-    logger.info(f"[DepthRecorder] Started for {key}")
-    return {"status": "started", "symbol": symbol, "exchange": exchange}
+    logger.info(f"[DepthRecorder] Started for {key} at depth {depth_level}")
+    return {"status": "started", "symbol": symbol, "exchange": exchange, "depth_level": depth_level}
+
+
+def set_depth_level(symbol: str, exchange: str, depth_level: int) -> dict:
+    """
+    Change the requested depth level for a symbol/exchange recorder at runtime.
+    """
+    try:
+        depth_level = int(depth_level)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("depth_level must be an integer between 5 and 200") from exc
+    if not (5 <= depth_level <= 200):
+        raise ValueError("depth_level must be between 5 and 200")
+
+    symbol = symbol.upper()
+    exchange = exchange.upper()
+    key = f"{exchange}:{symbol}"
+
+    with _lock:
+        state = _recorders.get(key)
+        if state:
+            state["depth_level"] = depth_level
+
+    # Persist the level only; status stays as is so a stopped recorder is not
+    # silently re-armed for auto-restore.
+    upsert_config(symbol, exchange, depth_level=depth_level)
+    logger.info(f"[DepthRecorder] Depth level set for {key} to {depth_level}")
+    return {"status": "success", "symbol": symbol, "exchange": exchange, "depth_level": depth_level}
 
 
 def stop_recorder(symbol: str, exchange: str) -> dict:
@@ -195,8 +231,8 @@ def restore_active_recorders():
 
         for cfg in configs:
             try:
-                start_recorder(cfg["symbol"], cfg["exchange"], api_key)
-                logger.info(f"[DepthRecorder] Auto-restored: {cfg['exchange']}:{cfg['symbol']}")
+                start_recorder(cfg["symbol"], cfg["exchange"], api_key, depth_level=cfg.get("depth_level", 5))
+                logger.info(f"[DepthRecorder] Auto-restored: {cfg['exchange']}:{cfg['symbol']} at depth {cfg.get('depth_level', 5)}")
             except Exception as exc:
                 logger.error(
                     f"[DepthRecorder] Auto-restore failed for "
@@ -214,6 +250,8 @@ def _state_to_dict(state: dict) -> dict:
         "symbol": state.get("symbol"),
         "exchange": state.get("exchange"),
         "status": state.get("status"),
+        "depth_level": state.get("depth_level", 5),
+        "actual_depth": state.get("actual_depth", state.get("depth_level", 5)),
         "ticks_written": state.get("ticks_written", 0),
         "ticks_buffered": state.get("ticks_buffered", 0),
         "last_tick_time": state.get("last_tick_time"),
@@ -226,6 +264,8 @@ def _state_to_dict(state: dict) -> dict:
 
 def _is_market_hours() -> bool:
     """Return True during NSE trading hours on weekdays (IST)."""
+    if os.getenv("DEPTH_RECORDER_IGNORE_MARKET_HOURS") == "1" or os.getenv("IGNORE_MARKET_HOURS") == "1":
+        return True
     now = datetime.now(IST)
     if now.weekday() >= 5:  # Saturday/Sunday
         return False
@@ -237,7 +277,7 @@ def _get_ws_url() -> str:
     return os.getenv("WEBSOCKET_URL", "ws://127.0.0.1:8765")
 
 
-async def _read_subscribe_ack(ws, symbol: str, exchange: str, request_id: str) -> tuple[bool, str]:
+async def _read_subscribe_ack(ws, symbol: str, exchange: str, request_id: str, key: str | None = None) -> tuple[bool, str]:
     """Read and validate the proxy's subscribe acknowledgement.
 
     Returns (ok, note). ok=False means the proxy explicitly rejected the
@@ -286,13 +326,19 @@ async def _read_subscribe_ack(ws, symbol: str, exchange: str, request_id: str) -
             if (
                 str(sub.get("symbol", "")).upper() == symbol.upper()
                 and str(sub.get("exchange", "")).upper() == exchange.upper()
-                and sub.get("status") != "success"
             ):
-                return (
-                    False,
-                    f"broker rejected {symbol}/{exchange}: "
-                    f"{sub.get('message') or sub.get('status')}",
-                )
+                if sub.get("status") != "success":
+                    return (
+                        False,
+                        f"broker rejected {symbol}/{exchange}: "
+                        f"{sub.get('message') or sub.get('status')}",
+                    )
+                act_depth = sub.get("depth")
+                if act_depth is not None and key:
+                    with _lock:
+                        s = _recorders.get(key)
+                        if s:
+                            s["actual_depth"] = int(act_depth)
         return True, ""
 
 
@@ -346,6 +392,14 @@ def _normalise_depth_payload(data: dict, symbol: str, exchange: str) -> dict | N
         except (IndexError, TypeError, ValueError):
             return None
 
+    actual_levels = max(len(bids), len(asks))
+    depth_level = actual_levels if actual_levels > 0 else 5
+    levels_json = None
+    if actual_levels > 5:
+        b_list = [[_lv([b], 0, "price"), _lv([b], 0, "quantity"), _lo([b], 0)] for b in bids]
+        s_list = [[_lv([a], 0, "price"), _lv([a], 0, "quantity"), _lo([a], 0)] for a in asks]
+        levels_json = json.dumps({"b": b_list, "s": s_list}, separators=(',', ':'))
+
     now = _now_ist()
     return {
         "symbol": symbol,
@@ -357,6 +411,8 @@ def _normalise_depth_payload(data: dict, symbol: str, exchange: str) -> dict | N
         "oi": _safe_float(md.get("oi")),
         "total_buy_qty": _safe_float(md.get("total_buy_qty", md.get("total_buy_quantity"))),
         "total_sell_qty": _safe_float(md.get("total_sell_qty", md.get("total_sell_quantity"))),
+        "depth_level": depth_level,
+        "levels_json": levels_json,
         "bid1_price": _lv(bids, 0, "price"),
         "bid1_qty": _lv(bids, 0, "quantity"),
         "bid1_orders": _lo(bids, 0),
@@ -441,6 +497,10 @@ def _recorder_loop(
 
             logger.info(f"[DepthRecorder:{key}] Authenticated — subscribing Depth")
 
+            with _lock:
+                s = _recorders.get(key, {})
+                depth_level = s.get("depth_level", 5)
+
             request_id = f"dr-{key}"
             await ws.send(
                 json.dumps(
@@ -449,15 +509,13 @@ def _recorder_loop(
                         "request_id": request_id,
                         "symbols": [{"symbol": symbol, "exchange": exchange}],
                         "mode": "Depth",
+                        "depth": depth_level,
                     }
                 )
             )
 
-            # Read the subscribe ack. A bad symbol/exchange or a broker-side
-            # reject produces an error/partial ack; without this check the
-            # recorder would sit in "recording" forever with zero ticks and no
-            # signal for the user.
-            ack_ok, ack_note = await _read_subscribe_ack(ws, symbol, exchange, request_id)
+            current_sub_depth = depth_level
+            ack_ok, ack_note = await _read_subscribe_ack(ws, symbol, exchange, request_id, key=key)
             if not ack_ok:
                 with _lock:
                     s = _recorders.get(key, {})
@@ -470,9 +528,51 @@ def _recorder_loop(
             with _lock:
                 s = _recorders.get(key, {})
                 s["subscribed"] = True
-            logger.info(f"[DepthRecorder:{key}] Subscribed — recording Depth")
+            logger.info(f"[DepthRecorder:{key}] Subscribed — recording Depth at depth {depth_level}")
 
             while not stop_event.is_set():
+                with _lock:
+                    target_depth = _recorders.get(key, {}).get("depth_level", 5)
+                if target_depth != current_sub_depth:
+                    logger.info(f"[DepthRecorder:{key}] Depth level changed {current_sub_depth} -> {target_depth}, re-subscribing")
+                    # Drop the old depth subscription first: the broker adapter keys
+                    # subscriptions per depth level, so without this the old feed
+                    # (e.g. 5-level, or the single 200-level slot) keeps streaming.
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "action": "unsubscribe",
+                                "symbols": [{"symbol": symbol, "exchange": exchange, "mode": 3}],
+                            }
+                        )
+                    )
+                    req_id = f"dr-{key}-{time.time()}"
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "action": "subscribe",
+                                "request_id": req_id,
+                                "symbols": [{"symbol": symbol, "exchange": exchange}],
+                                "mode": "Depth",
+                                "depth": target_depth,
+                            }
+                        )
+                    )
+                    ack_ok, ack_note = await _read_subscribe_ack(ws, symbol, exchange, req_id, key=key)
+                    if not ack_ok:
+                        # Old subscription is already dropped, so behave like a rejected
+                        # initial subscribe: surface it and stop instead of recording nothing.
+                        with _lock:
+                            s = _recorders.get(key, {})
+                            s["status"] = "subscribe_failed"
+                            s["connected"] = False
+                            s["error"] = f"depth {target_depth} rejected: {ack_note}"
+                        logger.error(f"[DepthRecorder:{key}] Depth {target_depth} rejected: {ack_note}")
+                        return
+                    current_sub_depth = target_depth
+                    with _lock:
+                        _recorders.get(key, {})["error"] = None
+
                 now_mono = asyncio.get_running_loop().time()
                 if now_mono - last_flush >= FLUSH_INTERVAL_SECONDS and tick_buffer:
                     n = batch_save_ticks(tick_buffer)

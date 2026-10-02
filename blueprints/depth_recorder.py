@@ -37,6 +37,7 @@ from services.depth_analysis import (
 from services.depth_recorder_service import (
     get_all_statuses,
     get_status,
+    set_depth_level,
     start_recorder,
     stop_recorder,
 )
@@ -82,6 +83,13 @@ def api_start():
     data = request.get_json(silent=True) or {}
     symbol = (data.get("symbol") or "").strip().upper()
     exchange = (data.get("exchange") or "NSE").strip().upper()
+    try:
+        depth_level = int(data.get("depth_level", 5))
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "depth_level must be an integer between 5 and 200"}), 400
+
+    if not (5 <= depth_level <= 200):
+        return jsonify({"status": "error", "message": "depth_level must be between 5 and 200"}), 400
 
     if not symbol:
         return jsonify({"status": "error", "message": "symbol is required"}), 400
@@ -90,8 +98,37 @@ def api_start():
     if not api_key:
         return jsonify({"status": "error", "message": "API key not found — visit /apikey"}), 401
 
-    result = start_recorder(symbol, exchange, api_key)
-    return jsonify(result), 200
+    try:
+        result = start_recorder(symbol, exchange, api_key, depth_level=depth_level)
+        return jsonify(result), 200
+    except ValueError as ve:
+        return jsonify({"status": "error", "message": str(ve)}), 400
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 500
+
+
+@depth_recorder_bp.route("/api/depth-recorder/depth-level", methods=["POST"])
+@check_session_validity
+def api_depth_level():
+    """Change depth level for a symbol/exchange recorder at runtime."""
+    data = request.get_json(silent=True) or {}
+    symbol = (data.get("symbol") or "").strip().upper()
+    exchange = (data.get("exchange") or "NSE").strip().upper()
+    try:
+        depth_level = int(data.get("depth_level", 5))
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "depth_level must be an integer between 5 and 200"}), 400
+
+    if not symbol:
+        return jsonify({"status": "error", "message": "symbol is required"}), 400
+
+    try:
+        result = set_depth_level(symbol, exchange, depth_level)
+        return jsonify(result), 200
+    except ValueError as ve:
+        return jsonify({"status": "error", "message": str(ve)}), 400
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 500
 
 
 # ────────────────────────────────────────────────────────────────────────────
