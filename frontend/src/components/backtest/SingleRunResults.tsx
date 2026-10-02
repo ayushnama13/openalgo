@@ -9,6 +9,8 @@
 import { BarChart3, ChevronDown, Download, Table2 } from 'lucide-react'
 import type * as PlotlyTypes from 'plotly.js'
 import { useMemo } from 'react'
+import { PLOT_CONFIG, PLOT_LAYOUT } from '@/components/backtest/plotConfig'
+import RunInsights from '@/components/backtest/RunInsights'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -25,29 +27,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import Plot from '@/lib/Plot2D'
 import type { FullJobDetails, ResultsData } from '@/stores/strategyBacktestStore'
 
-export const PLOT_LAYOUT: Partial<PlotlyTypes.Layout> = {
-  paper_bgcolor: 'transparent',
-  plot_bgcolor: 'transparent',
-  font: { color: '#94a3b8', family: 'Inter, system-ui, sans-serif', size: 11 },
-  margin: { l: 50, r: 16, t: 30, b: 40 },
-  xaxis: {
-    showgrid: true,
-    gridcolor: 'rgba(148,163,184,0.15)',
-    zeroline: false,
-  },
-  yaxis: {
-    showgrid: true,
-    gridcolor: 'rgba(148,163,184,0.15)',
-    zeroline: false,
-  },
-  hoverlabel: { bgcolor: '#1e293b', bordercolor: '#334155', font: { color: '#f8fafc' } },
-}
-
-export const PLOT_CONFIG: Partial<PlotlyTypes.Config> = {
-  displaylogo: false,
-  responsive: true,
-  modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d'],
-}
+export { PLOT_CONFIG, PLOT_LAYOUT } from '@/components/backtest/plotConfig'
 
 // ---------------------------------------------------------------------------
 // Metrics card
@@ -308,7 +288,10 @@ export default function SingleRunResults({
       `${t.pnl_pct}%`,
       t.exit_reason || 'Signal Exit',
     ])
-    const csvContent = [headers.join(','), ...rows.map((r) => r.map((c) => `"${c}"`).join(','))].join('\n')
+    const csvContent = [
+      headers.join(','),
+      ...rows.map((r) => r.map((c) => `"${c}"`).join(',')),
+    ].join('\n')
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
@@ -460,7 +443,12 @@ export default function SingleRunResults({
               </TabsList>
 
               {result.trades && result.trades.length > 0 && (
-                <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs" onClick={handleExportCSV}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 gap-1.5 text-xs"
+                  onClick={handleExportCSV}
+                >
                   <Download className="h-3.5 w-3.5" /> Export CSV
                 </Button>
               )}
@@ -550,6 +538,14 @@ export default function SingleRunResults({
           </Tabs>
         </CardContent>
       </Card>
+
+      {result.job_id && (
+        <RunInsights
+          jobId={result.job_id}
+          jobDetails={jobDetails}
+          tradeCount={result.trades?.length ?? 0}
+        />
+      )}
     </div>
   )
 }

@@ -597,6 +597,12 @@ def react_backtest_index():
     return serve_react_app()
 
 
+@react_bp.route("/backtest/optimizations", strict_slashes=False)
+@react_bp.route("/backtest/optimizations/<opt_id>")
+def react_backtest_optimizations(opt_id=None):
+    return serve_react_app()
+
+
 # ============================================================
 # Static Assets - Always served for React app
 # ============================================================
