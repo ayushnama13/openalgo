@@ -121,6 +121,10 @@ class DepthTick(Base):
     # Raw JSON dump of the full depth payload (for reference)
     raw_json = Column(Text, nullable=True)
 
+    # Depth level and full levels JSON for deep order books (>5 levels)
+    depth_level = Column(Integer, nullable=True)
+    levels_json = Column(Text, nullable=True)
+
     # Composite indexes for fast time-range queries per symbol
     __table_args__ = (
         Index("ix_depth_ticks_symbol_exchange_time", "symbol", "exchange", "tick_time"),
@@ -130,7 +134,7 @@ class DepthTick(Base):
 
 class DepthRecorderConfig(Base):
     """
-    Persists recorder configuration (symbol, exchange, status).
+    Persists recorder configuration (symbol, exchange, status, depth_level).
     Survives server restarts — if 'active' the recorder service
     auto-resumes on boot.
     """
@@ -142,6 +146,7 @@ class DepthRecorderConfig(Base):
     exchange = Column(String(20), nullable=False)
     # 'active' | 'stopped'
     status = Column(String(10), nullable=False, default="stopped")
+    depth_level = Column(Integer, nullable=False, default=5)
     created_at = Column(DateTime(timezone=False), nullable=False)
     updated_at = Column(DateTime(timezone=False), nullable=False)
 
@@ -153,11 +158,31 @@ class DepthRecorderConfig(Base):
 # ---------------------------------------------------------------------------
 # Init
 # ---------------------------------------------------------------------------
+def _ensure_columns(table: str, columns: dict[str, str]) -> None:
+    if "sqlite" not in (DEPTH_RECORDER_DATABASE_URL or ""):
+        return
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        existing = {
+            row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))
+        }
+        for col_name, col_type in columns.items():
+            if col_name not in existing:
+                logger.info("depth_recorder_db: adding missing column %s.%s", table, col_name)
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}"))
+        conn.commit()
+
+
 def init_db():
     """Create tables if they don't exist (idempotent)."""
     from database.db_init_helper import init_db_with_logging
 
     init_db_with_logging(Base, engine, "Depth Recorder DB", logger)
+    try:
+        _ensure_columns("depth_ticks", {"depth_level": "INTEGER", "levels_json": "TEXT"})
+        _ensure_columns("depth_recorder_config", {"depth_level": "INTEGER DEFAULT 5"})
+    except Exception:
+        logger.exception("depth_recorder_db: migration failed")
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +227,8 @@ def save_tick(
             oi=_safe_float(tick_data.get("oi")),
             total_buy_qty=_safe_float(tick_data.get("total_buy_qty")),
             total_sell_qty=_safe_float(tick_data.get("total_sell_qty")),
+            depth_level=tick_data.get("depth_level"),
+            levels_json=tick_data.get("levels_json"),
             # Bids
             bid1_price=_p(bids, 0, "price"),
             bid1_qty=_p(bids, 0, "quantity"),
@@ -266,7 +293,9 @@ def _safe_float(val) -> float | None:
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
-def upsert_config(symbol: str, exchange: str, status: str) -> dict | None:
+def upsert_config(
+    symbol: str, exchange: str, status: str | None = None, depth_level: int | None = None
+) -> dict | None:
     """Create or update recorder config for a symbol."""
     try:
         row = (
@@ -279,13 +308,18 @@ def upsert_config(symbol: str, exchange: str, status: str) -> dict | None:
             row = DepthRecorderConfig(
                 symbol=symbol.upper(),
                 exchange=exchange.upper(),
-                status=status,
+                status=status or "stopped",
+                depth_level=depth_level or 5,
                 created_at=now,
                 updated_at=now,
             )
             db_session.add(row)
         else:
-            row.status = status
+            # None means "leave unchanged" so stop/start don't clobber each other's field
+            if status is not None:
+                row.status = status
+            if depth_level is not None:
+                row.depth_level = depth_level
             row.updated_at = now
         db_session.commit()
         return _config_to_dict(row)
@@ -334,6 +368,7 @@ def _config_to_dict(row: DepthRecorderConfig) -> dict:
         "symbol": row.symbol,
         "exchange": row.exchange,
         "status": row.status,
+        "depth_level": row.depth_level if row.depth_level is not None else 5,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
@@ -490,6 +525,36 @@ def get_stats() -> dict:
 
 
 def _tick_to_dict(row: DepthTick) -> dict:
+    import json
+    bids = []
+    asks = []
+    if row.levels_json:
+        try:
+            data = json.loads(row.levels_json)
+            for b in data.get("b", []):
+                bids.append({"price": b[0], "quantity": b[1], "orders": b[2] if len(b) > 2 else None})
+            for a in data.get("s", []):
+                asks.append({"price": a[0], "quantity": a[1], "orders": a[2] if len(a) > 2 else None})
+        except Exception:
+            pass
+
+    if not bids:
+        bids = [
+            {"price": row.bid1_price, "quantity": row.bid1_qty, "orders": row.bid1_orders},
+            {"price": row.bid2_price, "quantity": row.bid2_qty, "orders": row.bid2_orders},
+            {"price": row.bid3_price, "quantity": row.bid3_qty, "orders": row.bid3_orders},
+            {"price": row.bid4_price, "quantity": row.bid4_qty, "orders": row.bid4_orders},
+            {"price": row.bid5_price, "quantity": row.bid5_qty, "orders": row.bid5_orders},
+        ]
+    if not asks:
+        asks = [
+            {"price": row.ask1_price, "quantity": row.ask1_qty, "orders": row.ask1_orders},
+            {"price": row.ask2_price, "quantity": row.ask2_qty, "orders": row.ask2_orders},
+            {"price": row.ask3_price, "quantity": row.ask3_qty, "orders": row.ask3_orders},
+            {"price": row.ask4_price, "quantity": row.ask4_qty, "orders": row.ask4_orders},
+            {"price": row.ask5_price, "quantity": row.ask5_qty, "orders": row.ask5_orders},
+        ]
+
     return {
         "id": row.id,
         "symbol": row.symbol,
@@ -501,18 +566,8 @@ def _tick_to_dict(row: DepthTick) -> dict:
         "oi": row.oi,
         "total_buy_qty": row.total_buy_qty,
         "total_sell_qty": row.total_sell_qty,
-        "bids": [
-            {"price": row.bid1_price, "quantity": row.bid1_qty, "orders": row.bid1_orders},
-            {"price": row.bid2_price, "quantity": row.bid2_qty, "orders": row.bid2_orders},
-            {"price": row.bid3_price, "quantity": row.bid3_qty, "orders": row.bid3_orders},
-            {"price": row.bid4_price, "quantity": row.bid4_qty, "orders": row.bid4_orders},
-            {"price": row.bid5_price, "quantity": row.bid5_qty, "orders": row.bid5_orders},
-        ],
-        "asks": [
-            {"price": row.ask1_price, "quantity": row.ask1_qty, "orders": row.ask1_orders},
-            {"price": row.ask2_price, "quantity": row.ask2_qty, "orders": row.ask2_orders},
-            {"price": row.ask3_price, "quantity": row.ask3_qty, "orders": row.ask3_orders},
-            {"price": row.ask4_price, "quantity": row.ask4_qty, "orders": row.ask4_orders},
-            {"price": row.ask5_price, "quantity": row.ask5_qty, "orders": row.ask5_orders},
-        ],
+        "depth_level": row.depth_level,
+        "levels_json": row.levels_json,
+        "bids": bids,
+        "asks": asks,
     }
