@@ -550,7 +550,7 @@ def run_optimization_job(opt_id: str, cancel_event, loader) -> None:
         session.commit()
         cfg = json.loads(rec.config_json)
         spec = cfg["optimize"]
-        bars, notes = loader(cfg)
+        bars, notes, instruments = loader(cfg)
 
         def progress(pct: float) -> None:
             s2 = db_session()
@@ -560,7 +560,7 @@ def run_optimization_job(opt_id: str, cancel_event, loader) -> None:
             finally:
                 db_session.remove()
 
-        base = cfg["engine_config"]
+        base = {**cfg["engine_config"], "instruments": instruments}
         capital = float(base["initial_capital"])
         runner = run_walk_forward if spec["kind"] == "walk_forward" else run_sweep
         result = runner(rec.strategy_code, bars, base, spec, capital, cfg["interval"],

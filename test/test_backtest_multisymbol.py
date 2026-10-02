@@ -200,3 +200,43 @@ def test_bad_engine_options_rejected():
         svc.sanitize_engine_options({"spread_bps": -1})
     with pytest.raises(ValueError, match="wrong type"):
         svc.sanitize_engine_options({"allow_short": 1})
+
+
+def test_futures_symbol_uses_metadata_lot_size(monkeypatch):
+    data = {"NIFTYFUT": bars_for(9, n=60)}
+    data["NIFTYFUT"][["open", "high", "low", "close"]] *= 200  # index-like price level
+    monkeypatch.setattr(svc, "get_ohlcv", lambda symbol, **kw: data[symbol].copy())
+    monkeypatch.setattr(
+        svc, "get_data_range",
+        lambda *a, **kw: {"first_timestamp": 0, "last_timestamp": 0, "record_count": 1},
+    )
+    monkeypatch.setattr(
+        svc, "get_symbol_metadata",
+        lambda sym, exch: {"lotsize": 75, "instrumenttype": "FUTIDX", "strike": None, "expiry": "28NOV24"},
+    )
+    job_id, status, run = run_job(
+        strategy_code=DSL_ALWAYS_LONG, symbols=["NFO:NIFTYFUT"], exchange="NFO",
+        sizing_type="fixed_qty", sizing_value=1, initial_capital=2_000_000,
+    )
+    assert status == "completed", run.error_message
+    t = db_session().query(BacktestTrade).filter_by(job_id=job_id).first()
+    assert t.quantity == 75  # one lot
+    fp = json.loads(run.data_fingerprint)["NFO:NIFTYFUT"]
+    assert fp["instrument"]["lot_size"] == 75 and fp["instrument"]["kind"] == "FUT"
+    db_session.remove()
+
+
+def test_missing_lot_size_is_noted(monkeypatch):
+    data = {"FOOFUT": bars_for(4, n=40)}
+    monkeypatch.setattr(svc, "get_ohlcv", lambda symbol, **kw: data[symbol].copy())
+    monkeypatch.setattr(
+        svc, "get_data_range",
+        lambda *a, **kw: {"first_timestamp": 0, "last_timestamp": 0, "record_count": 1},
+    )
+    monkeypatch.setattr(svc, "get_symbol_metadata", lambda sym, exch: None)
+    job_id, status, run = run_job(
+        strategy_code=DSL_ALWAYS_LONG, symbols=["NFO:FOOFUT"], exchange="NFO",
+    )
+    assert status == "completed", run.error_message
+    assert any("lot size unknown" in n for n in json.loads(run.metrics_json)["notes"])
+    db_session.remove()

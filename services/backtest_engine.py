@@ -135,8 +135,16 @@ class EngineConfig:
     #: "auto", a preset name from portfolio/costs.py, or None for the flat brokerage_bps
     cost_preset: str | None = None
     cost_overrides: dict = field(default_factory=dict)
-    #: instrument kind for cost selection ("EQ", "FUT", "CE", "PE")
+    #: default instrument kind for cost selection ("EQ", "FUT", "CE", "PE")
     instrument: str = "EQ"
+    #: per-symbol contract data: {"NFO:NIFTY..FUT": {"lot_size": 75, "kind": "FUT",
+    #: "strike": None, "expiry": "..."}}. Missing symbols are cash equity, lot size 1.
+    instruments: dict = field(default_factory=dict)
+    #: margin blocked per unit of futures notional, and per unit of short-option strike value
+    margin_pct_fut: float = 12.0
+    margin_pct_short_opt: float = 15.0
+    #: buying power multiple for MIS equity (1 = fully funded)
+    intraday_leverage: float = 1.0
     interval: str = "1m"
     params: dict = field(default_factory=dict)
 
@@ -418,13 +426,27 @@ class Engine:
         self.cancel_check = cancel_check
         self.symbols = list(bars)
         self.exchange = {s: (s.split(":")[0] if ":" in s else "NSE") for s in self.symbols}
+        self.inst: dict[str, dict] = {}
+        for s_ in self.symbols:
+            info = dict((cfg.instruments or {}).get(s_, {}))
+            kind = str(info.get("kind") or "").upper()
+            if not kind:
+                tail = s_.split(":")[-1].upper()
+                is_fo = self.exchange[s_] in ("NFO", "BFO", "MCX", "CDS", "BCD", "NCDEX")
+                kind = "FUT" if is_fo and tail.endswith("FUT") else (
+                    tail[-2:] if is_fo and tail[-2:] in ("CE", "PE") else cfg.instrument)
+            lot = int(info.get("lot_size") or 1)
+            self.inst[s_] = {
+                "kind": kind, "lot": max(1, lot), "strike": info.get("strike"),
+                "expiry": info.get("expiry"),
+            }
         self.schedules: dict[str, Any] = {}
         if cfg.cost_preset:
             costs = _load_costs()
             for s_ in self.symbols:
                 name = cfg.cost_preset
                 if name == "auto":
-                    name = costs.auto_preset(cfg.product_type, self.exchange[s_], cfg.instrument)
+                    name = costs.auto_preset(cfg.product_type, self.exchange[s_], self.inst[s_]["kind"])
                 self.schedules[s_] = costs.schedule_for(name, cfg.cost_overrides)
 
         self.frames: dict[str, pd.DataFrame] = {}
@@ -470,10 +492,35 @@ class Engine:
         self._oid = 0
 
     # ---- helpers ----
+    def _is_fut(self, s: str) -> bool:
+        return self.inst[s]["kind"] == "FUT"
+
+    def _pos_value(self, s: str, p: Position) -> float:
+        px = self.last_close.get(s, p.avg_price)
+        # futures settle daily: the book carries only unrealised P&L, not the notional
+        return p.qty * (px - p.avg_price) if self._is_fut(s) else p.qty * px
+
     def equity_now(self) -> float:
-        return self.cash + sum(
-            p.qty * self.last_close.get(s, p.avg_price) for s, p in self.positions.items() if p
-        )
+        return self.cash + sum(self._pos_value(s, p) for s, p in self.positions.items() if p)
+
+    def _unit_margin(self, s: str, side: str, price: float) -> float:
+        """Capital blocked per unit when opening: 0 means 'fully paid in cash' (use the cash check)."""
+        kind = self.inst[s]["kind"]
+        if kind == "FUT":
+            return price * self.cfg.margin_pct_fut / 100.0
+        if kind in ("CE", "PE") and side == SELL:
+            ref = self.inst[s]["strike"] or price
+            return float(ref) * self.cfg.margin_pct_short_opt / 100.0
+        return 0.0
+
+    def margin_used(self) -> float:
+        total = 0.0
+        for s, p in self.positions.items():
+            if not p:
+                continue
+            side = BUY if p.qty > 0 else SELL
+            total += abs(p.qty) * self._unit_margin(s, side, self.last_close.get(s, p.avg_price))
+        return total
 
     def submit(self, order: Order) -> int:
         self._oid += 1
@@ -504,7 +551,9 @@ class Engine:
     def _apply_fill(self, s: str, side: str, qty: float, price: float, cost: float,
                     order: Order | None, reason: str, market: bool) -> None:
         sign = 1.0 if side == BUY else -1.0
-        self.cash -= sign * qty * price + cost
+        fut = self._is_fut(s)
+        # futures never pay the notional: cash moves only by fees now and by realised P&L on close
+        self.cash -= cost if fut else sign * qty * price + cost
         p = self.positions.get(s)
         t = self.timeline[self.k]
         if not p:
@@ -523,6 +572,8 @@ class Engine:
         alloc_entry = p.entry_cost * closed / abs(p.qty)
         direction = 1.0 if p.qty > 0 else -1.0
         gross = (price - p.avg_price) * closed * direction
+        if fut:
+            self.cash += gross
         total_cost = part_cost + alloc_entry
         pnl = gross - total_cost
         base = p.avg_price * closed
@@ -576,14 +627,34 @@ class Engine:
     def _resolve_qty(self, o: Order, price: float, p: Position | None) -> float:
         if o.qty == _CLOSE_ALL:
             return abs(p.qty) if p else 0.0
+        lot = self.inst[o.symbol]["lot"]
+        derivative = self.inst[o.symbol]["kind"] != "EQ"
         if o.qty is not None:
-            return float(o.qty)
-        if o.pct is not None:
-            return float(math.floor(self.equity_now() * (o.pct / 100.0) / price)) if price > 0 else 0.0
-        return calculate_position_qty(
-            self.cfg.sizing_type, self.cfg.sizing_value, self.equity_now(), price,
-            self.cfg.initial_capital,
-        )
+            qty = float(o.qty)
+        else:
+            budget_pct = o.pct
+            if budget_pct is None and self.cfg.sizing_type == "fixed_qty":
+                # fixed_qty counts LOTS for contracts with a lot size
+                return float(self.cfg.sizing_value) * lot
+            unit = self._unit_margin(o.symbol, o.side, price) or price
+            if budget_pct is not None:
+                qty = math.floor(self.equity_now() * budget_pct / 100.0 / unit) if unit > 0 else 0.0
+            elif lot > 1 or derivative:
+                if self.cfg.sizing_type == "fixed_capital":
+                    budget = self.cfg.sizing_value
+                elif self.cfg.sizing_type == "kelly_vol":
+                    budget = self.equity_now() * min(0.25, max(0.02, self.cfg.sizing_value))
+                else:
+                    budget = self.equity_now() * self.cfg.sizing_value / 100.0
+                qty = math.floor(budget / unit) if unit > 0 else 0.0
+            else:
+                return calculate_position_qty(
+                    self.cfg.sizing_type, self.cfg.sizing_value, self.equity_now(), price,
+                    self.cfg.initial_capital,
+                )
+        if lot > 1:
+            qty = math.floor(qty / lot) * lot
+        return float(qty)
 
     def _process_pending(self) -> None:
         keep: list[Order] = []
@@ -614,7 +685,8 @@ class Engine:
             wanted = qty
             cap = self.cfg.max_volume_pct
             if cap and cap > 0:
-                room = math.floor(b.volume * cap / 100.0)
+                lot = self.inst[o.symbol]["lot"]
+                room = math.floor(b.volume * cap / 100.0 / lot) * lot
                 if room < 1:
                     keep.append(o)
                     continue
@@ -634,11 +706,16 @@ class Engine:
                 ) >= max(1, int(self.cfg.max_positions or 1)):
                     self._reject("max_positions")
                     continue
-                if (
+                unit_m = self._unit_margin(o.symbol, o.side, price)
+                if unit_m > 0 and self.cfg.enforce_cash:
+                    if opens_qty * unit_m > self.equity_now() - self.margin_used() + _EPS:
+                        self._reject("insufficient_margin")
+                        continue
+                elif (
                     o.side == BUY
                     and self.cfg.enforce_cash
                     and not (p and p.qty < 0)  # cash includes short proceeds; skip when covering
-                    and qty * price + cost > self.cash + _EPS
+                    and qty * price + cost > self.cash + _EPS + self._leverage_room()
                 ):
                     self._reject("insufficient_cash")
                     continue
@@ -650,6 +727,12 @@ class Engine:
                     o.pct = None
                 keep.append(o)
         self.pending = keep
+
+    def _leverage_room(self) -> float:
+        lev = self.cfg.intraday_leverage
+        if self.cfg.product_type == "MIS" and lev and lev > 1:
+            return (lev - 1.0) * max(0.0, self.equity_now())
+        return 0.0
 
     def _levels(self, p: Position):
         long = p.qty > 0
@@ -774,6 +857,13 @@ class Engine:
                     if any(is_mis_square_off_bar(t, self.exchange[s]) for s in self.cur_bar):
                         self.pending = []
 
+            for s in self.symbols:
+                n_own = len(self.c[s])
+                if k < self.T - 1 and self.own[s][k] == n_own - 1:
+                    # last bar of this contract/listing: settle at its final close, drop its orders
+                    self._force_close(s, "Contract Expiry / Last Bar", at_close=True)
+                    self.pending = [o for o in self.pending if o.symbol != s]
+
             if k == self.T - 1:
                 for s in list(self.positions):
                     self._force_close(s, "End of Backtest", at_close=True)
@@ -797,6 +887,7 @@ class Engine:
                 "max_positions": "orders rejected: max_positions limit reached",
                 "insufficient_cash": "orders rejected: insufficient cash",
                 "short_disabled": "orders rejected: shorting disabled",
+                "insufficient_margin": "orders rejected: insufficient margin",
             }
             for key, n in self.rejections.items():
                 self.notes.append(f"{n} {labels.get(key, key)}")
