@@ -1,0 +1,559 @@
+{
+  "communities": {
+    "0": [
+      "api_account_services_funds",
+      "api_account_services_holdings",
+      "api_account_services_margin",
+      "api_account_services_orderbook",
+      "api_account_services_positionbook",
+      "api_account_services_tradebook",
+      "api_analyzer_services_analyzerstatus",
+      "api_analyzer_services_analyzertoggle",
+      "api_analyzer_services_pnlsymbols",
+      "api_chart_services_chart",
+      "api_market_calendar_holidays",
+      "api_market_calendar_timings",
+      "api_market_data_depth",
+      "api_market_data_history",
+      "api_market_data_intervals",
+      "api_market_data_multiquotes",
+      "api_market_data_quotes",
+      "api_market_data_ticker",
+      "api_options_services_multioptiongreeks",
+      "api_options_services_optionchain",
+      "api_options_services_optiongreeks",
+      "api_options_services_optionsymbol",
+      "api_options_services_syntheticfuture",
+      "api_order_information_openposition",
+      "api_order_information_orderstatus",
+      "api_order_management_basketorder",
+      "api_order_management_cancelallorder",
+      "api_order_management_cancelgttorder",
+      "api_order_management_cancelorder",
+      "api_order_management_closeposition",
+      "api_order_management_gttorderbook",
+      "api_order_management_modifygttorder",
+      "api_order_management_modifyorder",
+      "api_order_management_optionsmultiorder",
+      "api_order_management_optionsorder",
+      "api_order_management_placegttorder",
+      "api_order_management_placeorder",
+      "api_order_management_placesmartorder",
+      "api_order_management_splitorder",
+      "api_rate_limiting",
+      "api_readme",
+      "api_symbol_services_expiry",
+      "api_symbol_services_instruments",
+      "api_symbol_services_search",
+      "api_symbol_services_symbol",
+      "api_telegram_services_readme",
+      "api_utility_services_ping",
+      "api_websocket_streaming_depth",
+      "api_websocket_streaming_order_updates",
+      "api_websocket_streaming_quote"
+    ],
+    "1": [
+      "audit_websocket_keepalive_audit_md",
+      "blueprints_health",
+      "broker_integration_guide",
+      "database_health_db",
+      "frontend_src_api_health",
+      "frontend_src_pages_healthmonitor",
+      "health_monitor_react_frontend",
+      "health_monitoring_implementation",
+      "index",
+      "mcp_tool_reference",
+      "scanner_architecture",
+      "services_market_data_service",
+      "services_websocket_client",
+      "services_websocket_service",
+      "services_whatsapp_bot_service",
+      "utils_health_monitor",
+      "utils_logging",
+      "websocket_architecture",
+      "websocket_proxy_base_adapter",
+      "websocket_proxy_broker_factory",
+      "websocket_proxy_connection_manager",
+      "websocket_proxy_server",
+      "websocket_quote_feed",
+      "whatsapp"
+    ],
+    "2": [
+      "db_health_db",
+      "db_logs_db",
+      "userguide_24_pnl_tracker_readme",
+      "userguide_25_latency_monitor_readme",
+      "userguide_26_traffic_logs_readme",
+      "userguide_27_security_settings_readme",
+      "userguide_28_two_factor_auth_readme",
+      "userguide_29_troubleshooting_readme",
+      "userguide_30_faqs_readme",
+      "userguide_31_tools_readme",
+      "userguide_symbol_format_readme"
+    ],
+    "3": [
+      "migration_flask_to_fastapi_migration_plan",
+      "sandbox_execution_engine_executionengine",
+      "sandbox_fund_manager_fundmanager",
+      "sandbox_holdings_manager_holdingsmanager",
+      "sandbox_order_manager_ordermanager",
+      "sandbox_squareoff_manager_squareoffmanager",
+      "services_flow_executor_service",
+      "services_place_order_service",
+      "utils_event_bus"
+    ],
+    "4": [
+      "openalgo_ta",
+      "prompt_indicators_volume",
+      "ta_adl",
+      "ta_cmf",
+      "ta_kvo",
+      "ta_mfi",
+      "ta_obv",
+      "ta_vwap"
+    ],
+    "5": [
+      "broker_contract",
+      "broker_deltaexchange",
+      "superpowers_decisions_adr_0003",
+      "superpowers_problem_challenges_solutions",
+      "superpowers_roadmap_phased_roadmap",
+      "superpowers_specs_global_market_architecture"
+    ],
+    "6": [
+      "broker_dhan_api_gtt_api",
+      "broker_zerodha_api_gtt_api",
+      "database_gtt_db",
+      "plans_gtt_orders_implementation_plan",
+      "sandbox_gtt_manager"
+    ],
+    "7": [
+      "database_strategy_position_db",
+      "plans_strategy_risk_management_prd",
+      "services_strategy_order_poller",
+      "services_strategy_position_tracker",
+      "services_strategy_risk_engine"
+    ],
+    "8": [
+      "design_32_master_contract_async_task",
+      "design_32_master_contract_db_schema",
+      "design_32_master_contract_trigger",
+      "design_33_broker_folder_structure",
+      "design_34_app_startup_sequence"
+    ],
+    "9": [
+      "app_py",
+      "install_install_sh",
+      "userguide_04_installation_readme",
+      "userguide_05_first_time_setup_readme"
+    ],
+    "10": [
+      "audit_cache_audit",
+      "database_auth_db_auth_cache",
+      "database_auth_db_broker_cache"
+    ],
+    "11": [
+      "audit_websocket_broker_priority",
+      "broker_dhan_sandbox_adapter",
+      "database_master_contract_cache_hook"
+    ],
+    "12": [
+      "frontend_hooks_useliveprice",
+      "frontend_hooks_usemarketdata",
+      "frontend_lib_marketdatamanager"
+    ],
+    "13": [
+      "superpowers_audit_coupling_inventory",
+      "superpowers_audit_coupling_inventory_main",
+      "superpowers_audit_coupling_inventory_scan"
+    ],
+    "14": [
+      "userguide_06_broker_connection_readme",
+      "userguide_10_placing_first_order_readme",
+      "userguide_15_analyzer_mode_readme"
+    ],
+    "15": [
+      "api_websocket_streaming_ltp",
+      "architecture_diagram"
+    ],
+    "16": [
+      "api_whatsapp_services_notify",
+      "api_whatsapp_services_readme"
+    ],
+    "17": [
+      "audit_deep_security_audit_report",
+      "database_historify_db_copy_query"
+    ],
+    "18": [
+      "audit_public_ip_security_audit_2026_04",
+      "websocket_proxy_server_last_message_time"
+    ],
+    "19": [
+      "audit_websocket_integration_guidelines_md",
+      "concept_fallback_chain"
+    ],
+    "20": [
+      "audit_websocket_token_refresh_audit_md",
+      "concept_3am_cycle"
+    ],
+    "21": [
+      "broker_adapter_contract",
+      "superpowers_architecture"
+    ],
+    "22": [
+      "design_33_broker_api_data",
+      "design_54_scalping_terminal"
+    ],
+    "23": [
+      "design_33_broker_api_order",
+      "design_42_action_center_architecture"
+    ],
+    "24": [
+      "design_33_broker_streaming_websocket",
+      "design_52_broker_factory"
+    ],
+    "25": [
+      "design_36_rate_limiting_architecture",
+      "design_39_strategy_module_architecture"
+    ],
+    "26": [
+      "design_43_telegram_bot_components",
+      "design_53_event_bus"
+    ],
+    "27": [
+      "docker_start_sh",
+      "restx_api_init"
+    ],
+    "28": [
+      "portfolio_engine",
+      "superpowers_plans_portfolio_hardening"
+    ],
+    "29": [
+      "release_v2_0_0_7",
+      "release_v2_0_0_8"
+    ],
+    "30": [
+      "release_v2_0_1_0",
+      "remote_mcp"
+    ],
+    "31": [
+      "release_v2_0_1_1",
+      "whatsapp_bot"
+    ],
+    "32": [
+      "release_v2_0_1_4",
+      "scalping_terminal"
+    ],
+    "33": [
+      "scripts_check_docs_freshness",
+      "superpowers_plans_docs_freshness"
+    ],
+    "34": [
+      "services_telegram_bot_service",
+      "telegram_chart_rendering"
+    ],
+    "35": [
+      "superpowers_decisions_adr_0001",
+      "superpowers_decisions_adr_0002"
+    ],
+    "36": [
+      "userguide_09_api_key_management_readme",
+      "userguide_22_action_center_readme"
+    ],
+    "37": [
+      "userguide_12_smart_orders_readme",
+      "userguide_16_tradingview_integration_readme"
+    ],
+    "38": [
+      "userguide_21_flow_visual_builder_readme",
+      "userguide_23_telegram_bot_readme"
+    ],
+    "39": [
+      "xtsapi_compositedge_plugin",
+      "xtsapi_xts_integration"
+    ],
+    "40": [
+      "audit_websocket_frontend_management_md"
+    ],
+    "41": [
+      "changelog"
+    ],
+    "42": [
+      "database_historify_db"
+    ],
+    "43": [
+      "database_sandbox_db_sandboxorders"
+    ],
+    "44": [
+      "database_sandbox_db_sandboxpositions"
+    ],
+    "45": [
+      "database_token_db_enhanced_broker_symbol_cache"
+    ],
+    "46": [
+      "db_openalgo_db"
+    ],
+    "47": [
+      "design_06_websockets_readme_md"
+    ],
+    "48": [
+      "design_07_sandbox_readme"
+    ],
+    "49": [
+      "design_08_historify_readme"
+    ],
+    "50": [
+      "design_09_rest_api_readme"
+    ],
+    "51": [
+      "design_10_flow_architecture_readme"
+    ],
+    "52": [
+      "design_11_docker_readme"
+    ],
+    "53": [
+      "design_13_chartink_readme"
+    ],
+    "54": [
+      "design_16_centralized_logging_readme"
+    ],
+    "55": [
+      "design_17_connection_pooling_readme"
+    ],
+    "56": [
+      "design_19_placeorder_flow_readme"
+    ],
+    "57": [
+      "design_32_master_contract_overview"
+    ],
+    "58": [
+      "design_32_master_contract_status_db"
+    ],
+    "59": [
+      "design_33_broker_api_auth"
+    ],
+    "60": [
+      "design_33_broker_mapping_transform"
+    ],
+    "61": [
+      "design_37_apikey_architecture"
+    ],
+    "62": [
+      "design_38_python_strategies_hosting"
+    ],
+    "63": [
+      "design_41_mcp_architecture"
+    ],
+    "64": [
+      "design_44_pnl_tracker_architecture"
+    ],
+    "65": [
+      "openalgo_api"
+    ],
+    "66": [
+      "openalgo_python_sdk"
+    ],
+    "67": [
+      "sandbox_position_manager_positionmanager"
+    ],
+    "68": [
+      "userguide_02_why_build_with_openalgo_readme"
+    ],
+    "69": [
+      "userguide_03_key_concepts_readme"
+    ],
+    "70": [
+      "userguide_03_system_requirements_readme"
+    ],
+    "71": [
+      "userguide_13_basket_orders_readme"
+    ]
+  },
+  "cohesion": {
+    "0": 0.04,
+    "1": 0.10507246376811594,
+    "2": 0.2,
+    "3": 0.2222222222222222,
+    "4": 0.25,
+    "5": 0.3333333333333333,
+    "6": 0.5,
+    "7": 0.4,
+    "8": 0.4,
+    "9": 0.5,
+    "10": 0.6666666666666666,
+    "11": 0.6666666666666666,
+    "12": 0.6666666666666666,
+    "13": 1.0,
+    "14": 0.6666666666666666,
+    "15": 1.0,
+    "16": 1.0,
+    "17": 1.0,
+    "18": 1.0,
+    "19": 1.0,
+    "20": 1.0,
+    "21": 1.0,
+    "22": 1.0,
+    "23": 1.0,
+    "24": 1.0,
+    "25": 1.0,
+    "26": 1.0,
+    "27": 1.0,
+    "28": 1.0,
+    "29": 1.0,
+    "30": 1.0,
+    "31": 1.0,
+    "32": 1.0,
+    "33": 1.0,
+    "34": 1.0,
+    "35": 1.0,
+    "36": 1.0,
+    "37": 1.0,
+    "38": 1.0,
+    "39": 1.0,
+    "40": 1.0,
+    "41": 1.0,
+    "42": 1.0,
+    "43": 1.0,
+    "44": 1.0,
+    "45": 1.0,
+    "46": 1.0,
+    "47": 1.0,
+    "48": 1.0,
+    "49": 1.0,
+    "50": 1.0,
+    "51": 1.0,
+    "52": 1.0,
+    "53": 1.0,
+    "54": 1.0,
+    "55": 1.0,
+    "56": 1.0,
+    "57": 1.0,
+    "58": 1.0,
+    "59": 1.0,
+    "60": 1.0,
+    "61": 1.0,
+    "62": 1.0,
+    "63": 1.0,
+    "64": 1.0,
+    "65": 1.0,
+    "66": 1.0,
+    "67": 1.0,
+    "68": 1.0,
+    "69": 1.0,
+    "70": 1.0,
+    "71": 1.0
+  },
+  "gods": [
+    {
+      "id": "api_readme",
+      "label": "OpenAlgo API Documentation",
+      "degree": 52
+    },
+    {
+      "id": "index",
+      "label": "Documentation Map",
+      "degree": 8
+    },
+    {
+      "id": "openalgo_ta",
+      "label": "OpenAlgo TA Module",
+      "degree": 7
+    },
+    {
+      "id": "websocket_architecture",
+      "label": "WebSocket Architecture",
+      "degree": 6
+    },
+    {
+      "id": "health_monitoring_implementation",
+      "label": "Health Monitoring Implementation",
+      "degree": 4
+    },
+    {
+      "id": "health_monitor_react_frontend",
+      "label": "Health Monitor React Frontend",
+      "degree": 4
+    },
+    {
+      "id": "websocket_proxy_server",
+      "label": "WebSocket Proxy Server",
+      "degree": 4
+    },
+    {
+      "id": "websocket_proxy_connection_manager",
+      "label": "ConnectionManager",
+      "degree": 4
+    },
+    {
+      "id": "plans_gtt_orders_implementation_plan",
+      "label": "GTT Orders Implementation Plan",
+      "degree": 4
+    },
+    {
+      "id": "scanner_architecture",
+      "label": "Scanner Architecture",
+      "degree": 3
+    }
+  ],
+  "surprises": [
+    {
+      "source": "broker_cache",
+      "target": "OpenAlgo Cache Architecture Audit",
+      "source_files": [
+        "database/auth_db.py",
+        "audit/CACHE_AUDIT.md"
+      ],
+      "confidence": "INFERRED",
+      "relation": "semantically_similar_to",
+      "why": "inferred connection - not explicitly stated in source; crosses file types (doc \u2194 code); connects across different repos/directories; semantically similar concepts with no structural link"
+    },
+    {
+      "source": "OpenAlgo Architecture Diagram",
+      "target": "OpenAlgo API Documentation",
+      "source_files": [
+        "architecture-diagram.png",
+        "api/README.md"
+      ],
+      "confidence": "INFERRED",
+      "relation": "references",
+      "why": "inferred connection - not explicitly stated in source; crosses file types (doc \u2194 image); connects across different repos/directories; bridges separate communities; peripheral node `OpenAlgo Architecture Diagram` unexpectedly reaches hub `OpenAlgo API Documentation`"
+    },
+    {
+      "source": "Health Monitor React Frontend",
+      "target": "Health Blueprint",
+      "source_files": [
+        "HEALTH_MONITOR_REACT_FRONTEND.md",
+        "blueprints/health.py"
+      ],
+      "confidence": "INFERRED",
+      "relation": "references",
+      "why": "inferred connection - not explicitly stated in source; crosses file types (doc \u2194 code); connects across different repos/directories"
+    },
+    {
+      "source": "WebSocket Architecture",
+      "target": "Market Data Service",
+      "source_files": [
+        "websocket-architecture.md",
+        "services/market_data_service.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "references",
+      "why": "crosses file types (doc \u2194 code); connects across different repos/directories; peripheral node `Market Data Service` unexpectedly reaches hub `WebSocket Architecture`"
+    },
+    {
+      "source": "WebSocket Architecture",
+      "target": "Broker Factory",
+      "source_files": [
+        "websocket-architecture.md",
+        "websocket_proxy/broker_factory.py"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "references",
+      "why": "crosses file types (doc \u2194 code); connects across different repos/directories; peripheral node `Broker Factory` unexpectedly reaches hub `WebSocket Architecture`"
+    }
+  ],
+  "tokens": {
+    "input": 685366,
+    "output": 26746
+  }
+}

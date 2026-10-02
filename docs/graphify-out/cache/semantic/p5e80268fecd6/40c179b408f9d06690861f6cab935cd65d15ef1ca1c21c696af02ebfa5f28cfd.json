@@ -1,0 +1,1 @@
+{"nodes": [{"id": "audit_deep_security_audit_report", "label": "OpenAlgo Deep Codebase Security Audit Report", "file_type": "document", "source_file": "audit/DEEP_SECURITY_AUDIT_REPORT.md", "rationale": "Detailed security audit focusing on SQL injection, input validation, and crypto integration impact."}], "edges": [], "hyperedges": []}

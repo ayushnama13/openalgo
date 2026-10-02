@@ -1,0 +1,1 @@
+{"nodes": [{"id": "superpowers_decisions_adr_0003", "label": "ADR-0003: In-tree broker model (no out-of-tree plugins)", "file_type": "document", "source_file": "superpowers/decisions/2026-07-13-in-tree-broker-model.md", "rationale": "Supersedes out-of-tree plugin model to match existing practice and simplify the contract boundary."}], "edges": [], "hyperedges": []}

@@ -1,0 +1,1 @@
+{"nodes": [{"id": "audit_public_ip_security_audit_2026_04", "label": "OpenAlgo Public IP Security Audit", "file_type": "document", "source_file": "audit/PUBLIC_IP_SECURITY_AUDIT_2026-04.md", "rationale": "Audit focused on application-layer security for internet-exposed deployments."}], "edges": [], "hyperedges": []}

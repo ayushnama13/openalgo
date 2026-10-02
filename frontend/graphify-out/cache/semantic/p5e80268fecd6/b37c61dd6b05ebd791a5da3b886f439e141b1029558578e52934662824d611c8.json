@@ -1,0 +1,1 @@
+{"nodes": [{"id": "docs_frontend_session_management", "label": "Session Management", "file_type": "document", "source_file": "docs/frontend/session-management.md", "rationale": "Architecture and flow for multi-device session handling."}], "edges": [], "hyperedges": []}

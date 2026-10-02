@@ -1,0 +1,1 @@
+{"nodes": [{"id": "audit_cache_audit", "label": "OpenAlgo Cache Architecture Audit", "file_type": "document", "source_file": "audit/CACHE_AUDIT.md", "rationale": "Comprehensive audit of in-memory caching, persistence, and security risks in OpenAlgo."}], "edges": [], "hyperedges": []}
