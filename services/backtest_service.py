@@ -32,6 +32,7 @@ from services.backtest_fill_engine import (
     is_mis_square_off_bar,
     simulate_order_fill,
 )
+from services.strategy_sandbox import run_strategy_sandboxed
 from utils.logging import get_logger
 
 # Import openalgo.ta (Rust-backed indicator library pinned in pyproject.toml).
@@ -168,29 +169,11 @@ def execute_strategy_dsl(strategy_code: str, df: pd.DataFrame) -> pd.DataFrame:
     to set `signal` column (1 = BUY, -1 = SELL/EXIT, 2 = SHORT, -2 = COVER)
     or `buy_signal` / `sell_signal` columns.
     """
-    exec_globals = {
-        "pd": pd,
-        "np": np,
-        "ta": ta,
-        "df": df,
-    }
-
-    # Safe execution environment
-    exec(strategy_code, exec_globals)
-
-    if "strategy" in exec_globals and callable(exec_globals["strategy"]):
-        res = exec_globals["strategy"](df.copy())
-        if isinstance(res, pd.DataFrame):
-            df = res
-
-    # Standardize signal column
-    if "buy_signal" in df.columns and "sell_signal" in df.columns:
-        df["signal"] = 0
-        df.loc[df["buy_signal"].astype(bool), "signal"] = 1
-        df.loc[df["sell_signal"].astype(bool), "signal"] = -1
-    elif "signal" not in df.columns:
-        df["signal"] = 0
-
+    # Runs in a sandboxed child process (see services/strategy_sandbox.py).
+    signals = run_strategy_sandboxed(strategy_code, df)
+    df = df.copy()
+    for col in signals.columns:
+        df[col] = signals[col].to_numpy()
     return df
 
 
