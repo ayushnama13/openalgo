@@ -64,6 +64,11 @@ class BacktestRun(Base):
     batch_id = Column(String(64), nullable=True, index=True)
     batch_name = Column(String(128), nullable=True)
     batch_seq = Column(Integer, nullable=False, default=0)
+    # Reproducibility: engine/cost/parameter options, a hash of the strategy code and a
+    # fingerprint of the exact bars used, so a result can be traced back to its inputs.
+    engine_options = Column(Text, nullable=True)
+    code_hash = Column(String(64), nullable=True)
+    data_fingerprint = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Asia/Kolkata")))
     completed_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
@@ -89,6 +94,8 @@ class BacktestTrade(Base):
     entry_reason = Column(String(128), nullable=True)
     exit_reason = Column(String(128), nullable=True)
     costs = Column(Float, nullable=False, default=0.0)
+    mae_pct = Column(Float, nullable=True)  # worst unrealised move against the position, %
+    mfe_pct = Column(Float, nullable=True)  # best unrealised move in favour, %
 
 
 class BacktestEquityCurve(Base):

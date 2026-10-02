@@ -1,5 +1,6 @@
 # services/backtest_service.py
 
+import hashlib
 import json
 import math
 import os
@@ -74,7 +75,7 @@ _MAX_SYMBOLS = int(os.getenv("BACKTEST_MAX_SYMBOLS", "50"))
 _TRADE_COLUMNS = {
     "job_id", "symbol", "exchange", "action", "entry_time", "entry_price", "exit_time",
     "exit_price", "quantity", "pnl", "pnl_pct", "holding_period_bars", "entry_reason",
-    "exit_reason", "costs",
+    "exit_reason", "costs", "mae_pct", "mfe_pct",
 }
 
 
@@ -187,6 +188,73 @@ def execute_strategy_dsl(strategy_code: str, df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+_ENGINE_OPTION_TYPES: dict[str, type | tuple] = {
+    "spread_bps": (int, float),
+    "impact_bps": (int, float),
+    "max_volume_pct": (int, float),
+    "trail_pct": (int, float),
+    "cost_preset": str,
+    "cost_overrides": dict,
+    "allow_short": bool,
+    "enforce_cash": bool,
+    "instrument": str,
+    "params": dict,
+}
+
+
+def sanitize_engine_options(options: dict | None) -> dict:
+    """Whitelist and type-check the optional engine knobs; reject anything else."""
+    if not options:
+        return {}
+    if not isinstance(options, dict):
+        raise ValueError("engine_options must be an object")
+    clean: dict[str, Any] = {}
+    for key, value in options.items():
+        expected = _ENGINE_OPTION_TYPES.get(key)
+        if expected is None:
+            raise ValueError(f"Unknown engine option {key!r}; allowed: {sorted(_ENGINE_OPTION_TYPES)}")
+        if value is None:
+            continue
+        if isinstance(value, bool) and expected is not bool:
+            raise ValueError(f"engine option {key!r} has the wrong type")
+        if not isinstance(value, expected):
+            raise ValueError(f"engine option {key!r} has the wrong type")
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and (
+            not math.isfinite(value) or value < 0
+        ):
+            raise ValueError(f"engine option {key!r} must be a non-negative number")
+        clean[key] = value
+    preset = clean.get("cost_preset")
+    if preset and preset != "auto":
+        from portfolio.costs import PRESETS
+
+        if preset not in PRESETS:
+            raise ValueError(f"Unknown cost_preset {preset!r}; have {['auto', *sorted(PRESETS)]}")
+    if clean.get("max_volume_pct") is not None and not 0 < clean["max_volume_pct"] <= 100:
+        raise ValueError("max_volume_pct must be in (0, 100]")
+    try:
+        json.dumps(clean)
+    except TypeError as exc:
+        raise ValueError("engine_options must be JSON-serialisable") from exc
+    return clean
+
+
+def _data_fingerprint(bars: dict[str, pd.DataFrame]) -> dict:
+    """Per symbol: bar count, first/last timestamp, and a hash of the OHLCV values."""
+    out = {}
+    for key, df in bars.items():
+        digest = hashlib.sha256(
+            pd.util.hash_pandas_object(df, index=False).to_numpy().tobytes()
+        ).hexdigest()
+        out[key] = {
+            "bars": int(len(df)),
+            "first": str(df["timestamp"].iloc[0]),
+            "last": str(df["timestamp"].iloc[-1]),
+            "sha256": digest,
+        }
+    return out
+
+
 def run_backtest_pipeline(
     job_id: str,
     name: str,
@@ -207,7 +275,7 @@ def run_backtest_pipeline(
     take_profit_pct: float | None,
     daily_loss_limit: float | None,
     max_positions: int,
-    strategy_params: dict | None = None,
+    engine_options: dict | None = None,
 ):
     """
     Main background execution function for running a backtest job.
@@ -311,8 +379,11 @@ def run_backtest_pipeline(
             "daily_loss_limit": daily_loss_limit,
             "max_positions": max_positions or 1,
             "interval": interval,
-            "params": strategy_params or {},
+            **(engine_options or {}),
         }
+        run_record.code_hash = hashlib.sha256(strategy_code.encode("utf-8")).hexdigest()
+        run_record.data_fingerprint = json.dumps(_data_fingerprint(bars_by_symbol))
+        session.commit()
 
         def _on_progress(pct: float, ts: str, eq: float, n_trades: int) -> None:
             _emit_progress(job_id, pct, ts, eq, n_trades, **emit_kwargs)
@@ -422,6 +493,7 @@ def start_backtest_batch(
     take_profit_pct: float | None = None,
     daily_loss_limit: float | None = None,
     max_positions: int = 5,
+    engine_options: dict | None = None,
 ) -> dict:
     """Fans one run request out across N timeframes.
 
@@ -429,6 +501,7 @@ def start_backtest_batch(
     interval is a batch of one (batch_id = job_id), so the results UI and the
     job history need no special casing for legacy runs.
     """
+    engine_options = sanitize_engine_options(engine_options)
     if not intervals:
         intervals = [interval]
     # Dedupe while preserving the requested order — the batch_seq tab order
@@ -523,6 +596,7 @@ def start_backtest_batch(
                 take_profit_pct=take_profit_pct,
                 daily_loss_limit=daily_loss_limit,
                 max_positions=max_positions,
+                engine_options=json.dumps(engine_options) if engine_options else None,
                 batch_id=run_batch_id,
                 batch_name=name,
                 batch_seq=batch_seq,
@@ -551,6 +625,7 @@ def start_backtest_batch(
                 take_profit_pct=take_profit_pct,
                 daily_loss_limit=daily_loss_limit,
                 max_positions=max_positions,
+                engine_options=engine_options,
             )
             with _ACTIVE_JOBS_LOCK:
                 _JOB_FUTURES[job_id] = future
@@ -585,6 +660,7 @@ def start_backtest_job(
     take_profit_pct: float | None = None,
     daily_loss_limit: float | None = None,
     max_positions: int = 5,
+    engine_options: dict | None = None,
 ) -> str:
     """Submits a single backtest job (a batch of one) and returns its job_id."""
     batch = start_backtest_batch(
@@ -606,6 +682,7 @@ def start_backtest_job(
         take_profit_pct=take_profit_pct,
         daily_loss_limit=daily_loss_limit,
         max_positions=max_positions,
+        engine_options=engine_options,
     )
     return batch["jobs"][0]["job_id"]
 

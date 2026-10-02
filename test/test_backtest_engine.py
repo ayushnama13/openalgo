@@ -251,3 +251,45 @@ def test_mae_mfe_recorded():
     t = res.trades[0]
     assert t["mfe_pct"] == pytest.approx(8.0)
     assert t["mae_pct"] == pytest.approx(-4.0)
+
+
+def test_cost_preset_charges_statutory_costs():
+    df = make_df([100] * 6)
+    res = run(
+        {"NSE:A": df},
+        Scripted({0: lambda c: c.buy("NSE:A", qty=100), 3: lambda c: c.close("NSE:A")}),
+        cost_preset="india_intraday_nse",
+    )
+    t = res.trades[0]
+    # brokerage 2 x Rs 3 (0.03% of 10k) + STT 0.025% of sell (2.5) + others: well above 0, below 1% of value
+    assert 5 < t["costs"] < 100
+    assert res.equity[-1]["equity"] == pytest.approx(100000 + t["pnl"], abs=0.05)
+
+
+def test_auto_preset_picks_by_product():
+    df = make_df([100] * 6)
+    script = {0: lambda c: c.buy("NSE:A", qty=100), 3: lambda c: c.close("NSE:A")}
+    cnc = run({"NSE:A": df}, Scripted(script), cost_preset="auto", product_type="CNC")
+    mis = run({"NSE:A": df}, Scripted(script), cost_preset="auto", product_type="MIS")
+    # delivery charges 0.1% STT on both legs, so it costs more than intraday
+    assert cnc.trades[0]["costs"] > mis.trades[0]["costs"]
+
+
+def test_volume_cap_creates_partial_fills():
+    df = make_df([100] * 8)
+    df["volume"] = 100
+    res = run(
+        {"NSE:A": df},
+        Scripted({0: lambda c: c.buy("NSE:A", qty=100)}),
+        max_volume_pct=30, initial_capital=1_000_000,
+    )
+    # 30 shares per bar -> position builds over several bars, then closes at the end
+    assert sum(t["quantity"] for t in res.trades) == pytest.approx(100)
+
+
+def test_spread_and_impact_worsen_fills():
+    df = make_df([100] * 6)
+    script = {0: lambda c: c.buy("NSE:A", qty=10), 3: lambda c: c.close("NSE:A")}
+    base = run({"NSE:A": df}, Scripted(script))
+    wide = run({"NSE:A": df}, Scripted(script), spread_bps=20, impact_bps=50)
+    assert wide.trades[0]["pnl"] < base.trades[0]["pnl"]

@@ -170,3 +170,33 @@ def test_missing_symbol_is_skipped_with_note(monkeypatch, three_symbols):
     assert status == "completed", run.error_message
     assert any("CCC" in n for n in json.loads(run.metrics_json)["notes"])
     db_session.remove()
+
+
+def test_engine_options_applied_and_reproducibility_recorded(three_symbols):
+    job_id, status, run = run_job(
+        strategy_code=DSL_ALWAYS_LONG, symbols=["NSE:AAA"], product_type="CNC",
+        sizing_type="fixed_qty", sizing_value=10,
+        engine_options={"cost_preset": "auto", "spread_bps": 10},
+    )
+    assert status == "completed", run.error_message
+    assert json.loads(run.engine_options) == {"cost_preset": "auto", "spread_bps": 10}
+    assert len(run.code_hash) == 64
+    fp = json.loads(run.data_fingerprint)["NSE:AAA"]
+    assert fp["bars"] == 120 and len(fp["sha256"]) == 64
+    t = db_session().query(BacktestTrade).filter_by(job_id=job_id).first()
+    assert t.costs > 0  # statutory charges applied
+    assert t.mae_pct is not None and t.mfe_pct is not None
+    db_session.remove()
+
+
+def test_bad_engine_options_rejected():
+    with pytest.raises(ValueError, match="Unknown engine option"):
+        svc.sanitize_engine_options({"os_system": 1})
+    with pytest.raises(ValueError, match="cost_preset"):
+        svc.sanitize_engine_options({"cost_preset": "nope"})
+    with pytest.raises(ValueError, match="max_volume_pct"):
+        svc.sanitize_engine_options({"max_volume_pct": 250})
+    with pytest.raises(ValueError, match="non-negative"):
+        svc.sanitize_engine_options({"spread_bps": -1})
+    with pytest.raises(ValueError, match="wrong type"):
+        svc.sanitize_engine_options({"allow_short": 1})

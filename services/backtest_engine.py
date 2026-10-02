@@ -61,6 +61,23 @@ try:
 except ImportError:  # child process: services/ itself is on sys.path
     from backtest_fill_engine import is_mis_square_off_bar, simulate_order_fill
 
+def _load_costs():
+    """Load portfolio/costs.py by path: it is pure, but the portfolio package is not."""
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    name = "oa_backtest_costs"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = Path(__file__).resolve().parent.parent / "portfolio" / "costs.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod  # dataclasses need the module registered while it executes
+    spec.loader.exec_module(mod)
+    return mod
+
+
 BUY = "BUY"
 SELL = "SELL"
 _EPS = 1e-9
@@ -109,6 +126,17 @@ class EngineConfig:
     max_positions: int = 1
     allow_short: bool = True
     enforce_cash: bool = True
+    #: half of this is added to slippage on every fill (a buy pays up, a sell gives up)
+    spread_bps: float = 0.0
+    #: square-root market impact: extra bps = impact_bps * sqrt(qty / bar volume)
+    impact_bps: float = 0.0
+    #: cap each fill at this % of the bar's volume; the rest stays pending (partial fills)
+    max_volume_pct: float | None = None
+    #: "auto", a preset name from portfolio/costs.py, or None for the flat brokerage_bps
+    cost_preset: str | None = None
+    cost_overrides: dict = field(default_factory=dict)
+    #: instrument kind for cost selection ("EQ", "FUT", "CE", "PE")
+    instrument: str = "EQ"
     interval: str = "1m"
     params: dict = field(default_factory=dict)
 
@@ -390,6 +418,14 @@ class Engine:
         self.cancel_check = cancel_check
         self.symbols = list(bars)
         self.exchange = {s: (s.split(":")[0] if ":" in s else "NSE") for s in self.symbols}
+        self.schedules: dict[str, Any] = {}
+        if cfg.cost_preset:
+            costs = _load_costs()
+            for s_ in self.symbols:
+                name = cfg.cost_preset
+                if name == "auto":
+                    name = costs.auto_preset(cfg.product_type, self.exchange[s_], cfg.instrument)
+                self.schedules[s_] = costs.schedule_for(name, cfg.cost_overrides)
 
         self.frames: dict[str, pd.DataFrame] = {}
         ts_dt: dict[str, pd.DatetimeIndex] = {}
@@ -449,12 +485,20 @@ class Engine:
         self.rejections[reason] = self.rejections.get(reason, 0) + 1
 
     def _fill_price(self, s, action, price_type, limit, trigger, b: Bar, qty):
-        return simulate_order_fill(
+        slip = self.cfg.slippage_bps + self.cfg.spread_bps / 2.0
+        if self.cfg.impact_bps and b.volume > 0:
+            slip += self.cfg.impact_bps * math.sqrt(min(1.0, qty / b.volume))
+        sched = self.schedules.get(s)
+        filled, price, cost = simulate_order_fill(
             action=action, price_type=price_type, limit_price=limit, trigger_price=trigger,
             bar_open=b.open, bar_high=b.high, bar_low=b.low, bar_close=b.close,
-            volume=b.volume, slippage_bps=self.cfg.slippage_bps,
-            brokerage_bps=self.cfg.brokerage_bps, quantity=qty,
+            volume=b.volume, slippage_bps=slip,
+            brokerage_bps=0.0 if sched else self.cfg.brokerage_bps, quantity=qty,
         )
+        if filled and sched:
+            value = price * qty
+            cost = sched.charge(value if action == BUY else 0.0, value if action == SELL else 0.0, 1)
+        return filled, price, cost
 
     # ---- book keeping ----
     def _apply_fill(self, s: str, side: str, qty: float, price: float, cost: float,
@@ -567,6 +611,14 @@ class Engine:
             elif not p and o.side == SELL and not self.cfg.allow_short:
                 self._reject("short_disabled")
                 continue
+            wanted = qty
+            cap = self.cfg.max_volume_pct
+            if cap and cap > 0:
+                room = math.floor(b.volume * cap / 100.0)
+                if room < 1:
+                    keep.append(o)
+                    continue
+                qty = min(qty, float(room))
             filled, price, cost = self._fill_price(
                 o.symbol, o.side, o.price_type, o.limit_price, o.trigger_price, b, qty
             )
@@ -592,6 +644,11 @@ class Engine:
                     continue
             reason = o.tag or ("Signal Exit" if closing_dir else "Signal")
             self._apply_fill(o.symbol, o.side, qty, price, cost, o, reason, o.price_type == "MARKET")
+            if qty < wanted - _EPS:  # partial fill: remainder waits for the next bar
+                if o.qty != _CLOSE_ALL:
+                    o.qty = wanted - qty
+                    o.pct = None
+                keep.append(o)
         self.pending = keep
 
     def _levels(self, p: Position):
