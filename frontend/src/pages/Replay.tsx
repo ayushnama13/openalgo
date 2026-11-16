@@ -1,36 +1,21 @@
-import { ChevronDown, LayoutGrid, Play, History, Eye, Layers, Database } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router'
 import { Navbar } from '@/components/layout/Navbar'
+import {
+  type ReplayPanelTab,
+  type ReplayPosition,
+  ReplaySidePanel,
+} from '@/components/replay/ReplaySidePanel'
+import {
+  type AvailableEntry,
+  type ClockState,
+  type LayoutPreset,
+  ReplayTopBar,
+  type SessionDraft,
+  timePart,
+} from '@/components/replay/ReplayTopBar'
 import { ChartPane } from '@/components/trading/ChartPane'
-import { Depth20Panel } from '@/components/trading/Depth20Panel'
 import { DrawingRail } from '@/components/trading/DrawingRail'
-import { RightWatchlist } from '@/components/trading/RightWatchlist'
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '@/components/ui/dialog'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
-import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import type { DrawStats, TradingTerminal } from '@/lib/trading/terminal'
-import { cn } from '@/lib/utils'
 import { showToast } from '@/utils/toast'
 
 const NO_DRAW: DrawStats = {
@@ -41,15 +26,6 @@ const NO_DRAW: DrawStats = {
   magnet: false,
   tool: null,
   shortcuts: {},
-}
-
-interface LayoutPreset {
-  id: string
-  label: string
-  cols: string
-  rows: string
-  areas: string
-  cells: string[]
 }
 
 const LAYOUTS: LayoutPreset[] = [
@@ -97,60 +73,30 @@ const LAYOUTS: LayoutPreset[] = [
 ]
 
 const LAYOUT_KEY = 'oa-replay-layout'
+const PANEL_KEY = 'oa-replay-panel-collapsed'
 
-function LayoutIcon({ preset, className }: { preset: LayoutPreset; className?: string }) {
-  return (
-    <span
-      className={cn('grid h-4 w-4 gap-px', className)}
-      style={{
-        gridTemplateColumns: preset.cols,
-        gridTemplateRows: preset.rows,
-        gridTemplateAreas: preset.areas,
-      }}
-      aria-hidden="true"
-    >
-      {preset.cells.map((c) => (
-        <span key={c} style={{ gridArea: c }} className="rounded-[1px] bg-current" />
-      ))}
-    </span>
-  )
+/** Stable stand-in for "no tape row yet"; a null would put the depth ladder in live mode. */
+const NO_DEPTH_ROW: Record<string, unknown> = {}
+
+const DEFAULT_DRAFT: SessionDraft = {
+  date: '2026-08-10',
+  start: '09:15:00',
+  end: '15:30:00',
+  watchlist: 'NIFTY, RELIANCE',
 }
 
-interface ClockState {
-  current_time: string
-  start_time: string
-  end_time: string
-  is_playing: boolean
-  speed: number
-  session_date: string
-  watchlist: string[]
-}
+const splitSymbols = (text: string) =>
+  text
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
 
 interface SymbolState {
   timestamp?: string
   ltp?: number
   volume?: number
   oi?: number
-  bid_1?: number
-  bid_qty_1?: number
-  bid_2?: number
-  bid_qty_2?: number
-  bid_3?: number
-  bid_qty_3?: number
-  bid_4?: number
-  bid_qty_4?: number
-  bid_5?: number
-  bid_qty_5?: number
-  ask_1?: number
-  ask_qty_1?: number
-  ask_2?: number
-  ask_qty_2?: number
-  ask_3?: number
-  ask_qty_3?: number
-  ask_4?: number
-  ask_qty_4?: number
-  ask_5?: number
-  ask_qty_5?: number
+  [depthField: string]: unknown
 }
 
 interface FillResult {
@@ -173,12 +119,6 @@ interface DemoTrade {
   timestamp: string
   current_ltp?: number
   pnl?: number
-}
-
-interface AvailableEntry {
-  symbol: string
-  date: string
-  row_count: number
 }
 
 async function fetchCSRF(): Promise<string> {
@@ -240,17 +180,14 @@ export default function Replay() {
   const firstLtpRef = useRef<Record<string, number>>({})
 
   /** Click a watchlist row: select it for the replay widgets and load it in the focused pane. */
-  const selectWatchSymbol = useCallback(
-    async (sym: string) => {
-      setSelectedSymbol(sym)
-      const t = activeRef.current
-      if (!t) return
-      const rows = await t.search(sym, undefined, 10)
-      const row = rows.find((r) => r.symbol.toUpperCase() === sym.toUpperCase())
-      if (row) t.loadSymbol(row)
-    },
-    []
-  )
+  const selectWatchSymbol = useCallback(async (sym: string) => {
+    setSelectedSymbol(sym)
+    const t = activeRef.current
+    if (!t) return
+    const rows = await t.search(sym, undefined, 10)
+    const row = rows.find((r) => r.symbol.toUpperCase() === sym.toUpperCase())
+    if (row) t.loadSymbol(row)
+  }, [])
 
   useEffect(() => {
     localStorage.setItem(LAYOUT_KEY, layoutId)
@@ -283,19 +220,41 @@ export default function Replay() {
 
   // Replay clock state & controls
   const [clock, setClock] = useState<ClockState | null>(null)
-  const [sessionDate, setSessionDate] = useState('2026-08-10')
-  const [startTime, setStartTime] = useState('09:15:00')
-  const [endTime, setEndTime] = useState('15:30:00')
-  const [watchlistInput, setWatchlistInput] = useState('NIFTY, RELIANCE')
+  // Session settings as typed in the Session popover. `appliedDraft` is what the
+  // server clock was last known to run, so the bar can flag unapplied edits.
+  const [draft, setDraft] = useState<SessionDraft>(DEFAULT_DRAFT)
+  const [appliedDraft, setAppliedDraft] = useState<SessionDraft>(DEFAULT_DRAFT)
+  const draftSyncedRef = useRef(false)
   const [autoPauseOnFill] = useState(true)
 
-  const replayWatchlist = useMemo(() => {
-    if (clock?.watchlist && clock.watchlist.length) return clock.watchlist
-    return watchlistInput
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-  }, [clock, watchlistInput])
+  const draftDirty =
+    draft.date !== appliedDraft.date ||
+    draft.start !== appliedDraft.start ||
+    draft.end !== appliedDraft.end ||
+    draft.watchlist !== appliedDraft.watchlist
+
+  // The inputs are hidden in a popover, so start them from the session the
+  // clock is already running instead of fixed defaults. The watchlist is left
+  // as typed: the server expands it (NIFTY adds its option strikes).
+  useEffect(() => {
+    if (!clock || draftSyncedRef.current) return
+    draftSyncedRef.current = true
+    const fromClock = {
+      date: clock.session_date || DEFAULT_DRAFT.date,
+      start: timePart(clock.start_time) || DEFAULT_DRAFT.start,
+      end: timePart(clock.end_time) || DEFAULT_DRAFT.end,
+    }
+    setDraft((prev) => ({ ...prev, ...fromClock }))
+    setAppliedDraft((prev) => ({ ...prev, ...fromClock }))
+  }, [clock])
+
+  // Keyed by content: the status poll delivers a new array every second, and
+  // an unstable list would restart the watchlist poll each time.
+  const clockWatchlistKey = (clock?.watchlist ?? []).join(',')
+  const replayWatchlist = useMemo(
+    () => splitSymbols(clockWatchlistKey || draft.watchlist),
+    [clockWatchlistKey, draft.watchlist]
+  )
 
   /** Poll replay state for every watchlist symbol; change is vs. session start. */
   useEffect(() => {
@@ -350,37 +309,16 @@ export default function Replay() {
     }
   }, [replayWatchlist])
 
-  // Floating Widgets Toggles & Drag State
-  const [showDepthDOM, setShowDepthDOM] = useState(false)
-  const [showScalperWidget, setShowScalperWidget] = useState(true)
-  const [depthPos, setDepthPos] = useState({ x: 16, y: 70 })
-  const [isDraggingDepth, setIsDraggingDepth] = useState(false)
-  const dragRef = useRef({ startX: 0, startY: 0, initialX: 16, initialY: 70 })
+  // Docked side panel
+  const [panelCollapsed, setPanelCollapsed] = useState(() => {
+    const saved = localStorage.getItem(PANEL_KEY)
+    return saved != null ? saved === '1' : window.innerWidth < 1024
+  })
+  const [panelTab, setPanelTab] = useState<ReplayPanelTab>('watchlist')
 
   useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!isDraggingDepth) return
-      const dx = e.clientX - dragRef.current.startX
-      const dy = e.clientY - dragRef.current.startY
-      setDepthPos({
-        x: Math.max(0, dragRef.current.initialX + dx),
-        y: Math.max(0, dragRef.current.initialY + dy),
-      })
-    }
-
-    const handleMouseUp = () => {
-      setIsDraggingDepth(false)
-    }
-
-    if (isDraggingDepth) {
-      window.addEventListener('mousemove', handleMouseMove)
-      window.addEventListener('mouseup', handleMouseUp)
-    }
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove)
-      window.removeEventListener('mouseup', handleMouseUp)
-    }
-  }, [isDraggingDepth])
+    localStorage.setItem(PANEL_KEY, panelCollapsed ? '1' : '0')
+  }, [panelCollapsed])
 
   // Available Data
   const [availableData, setAvailableData] = useState<AvailableEntry[] | null>(null)
@@ -391,7 +329,32 @@ export default function Replay() {
   // Demo Order Simulation & PnL
   const [simQty, setSimQty] = useState('1')
   const [demoTrades, setDemoTrades] = useState<DemoTrade[]>([])
-  const totalPnL = demoTrades.reduce((sum, t) => sum + (t.pnl || 0), 0)
+
+  // Price every fill at render. The selected symbol is refreshed each second
+  // by fetchSymbolState; other symbols take the watchlist quote, so a row
+  // never shows a P&L frozen at the moment its symbol was deselected.
+  const positions = useMemo<ReplayPosition[]>(
+    () =>
+      demoTrades.map((trade) => {
+        const quote = replayMarketData[trade.symbol.toUpperCase()]?.ltp
+        const ltp =
+          trade.symbol === selectedSymbol
+            ? (trade.current_ltp ?? quote)
+            : (quote ?? trade.current_ltp)
+        const mult = trade.action === 'BUY' ? 1 : -1
+        return {
+          id: trade.id,
+          symbol: trade.symbol,
+          action: trade.action,
+          quantity: trade.quantity,
+          fill_price: trade.fill_price,
+          ltp,
+          pnl: ltp != null ? (ltp - trade.fill_price) * trade.quantity * mult : (trade.pnl ?? 0),
+        }
+      }),
+    [demoTrades, replayMarketData, selectedSymbol]
+  )
+  const totalPnL = positions.reduce((sum, p) => sum + p.pnl, 0)
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -465,31 +428,32 @@ export default function Replay() {
   }, [fetchAvailable])
 
   const handleUseAvailable = (entry: AvailableEntry) => {
-    setSessionDate(entry.date)
-    setWatchlistInput((prev) => {
-      const list = prev
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean)
-      if (list.includes(entry.symbol)) return prev
-      return [...list, entry.symbol].join(', ')
+    setDraft((prev) => {
+      const list = splitSymbols(prev.watchlist)
+      return {
+        ...prev,
+        date: entry.date,
+        watchlist: list.includes(entry.symbol)
+          ? prev.watchlist
+          : [...list, entry.symbol].join(', '),
+      }
     })
-    showToast.info(`Added ${entry.symbol} (${entry.date}) to watchlist — configure session to apply`)
+    showToast.info(
+      `Added ${entry.symbol} (${entry.date}) to the session draft. Open Session and apply it.`
+    )
   }
 
   const handleConfigureSession = async () => {
-    const list = watchlistInput
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
+    const submitted = draft
     try {
       const res = await apiPost('/api/replay/session', {
-        date: sessionDate,
-        start_time: startTime,
-        end_time: endTime,
-        watchlist: list,
+        date: submitted.date,
+        start_time: submitted.start,
+        end_time: submitted.end,
+        watchlist: splitSymbols(submitted.watchlist),
       })
       if (res.ok) {
+        setAppliedDraft(submitted)
         showToast.success('Replay session configured successfully')
         fetchStatus()
       } else {
@@ -537,7 +501,9 @@ export default function Replay() {
           }
           setDemoTrades((prev) => [newTrade, ...prev])
           const qtyNote =
-            data.status === 'partial' ? ` (partial ${data.filled_qty}, ${data.unfilled_qty} unfilled)` : ''
+            data.status === 'partial'
+              ? ` (partial ${data.filled_qty}, ${data.unfilled_qty} unfilled)`
+              : ''
           const depthNote = data.depth_used === false ? ' - no depth on tape, LTP used' : ''
           showToast.success(`Demo ${action} filled @ ${data.fill_price}${qtyNote}${depthNote}`)
           if (autoPauseOnFill && clock?.is_playing) {
@@ -580,8 +546,10 @@ export default function Replay() {
   }
 
   const handleQuickJump = (timeStr: string) => {
-    if (!sessionDate) return
-    const targetIso = `${sessionDate}T${timeStr}+05:30`
+    // Jump within the session the clock is running, not the unapplied draft.
+    const date = clock?.session_date || appliedDraft.date
+    if (!date) return
+    const targetIso = `${date}T${timeStr}+05:30`
     handleControl('seek', { timestamp: targetIso })
   }
 
@@ -590,222 +558,26 @@ export default function Replay() {
   return (
     <>
       <Navbar />
-      <div className="flex flex-1 flex-col overflow-hidden">
-        {/* Replay Control & Session Toolbar */}
-        <div className="border-b bg-background/95 px-4 py-2 space-y-2">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              {clock && (
-                <div className="flex items-center gap-2">
-                  <Badge variant={clock.is_playing ? 'default' : 'secondary'} className="gap-1.5">
-                    <span className={cn('h-2 w-2 rounded-full', clock.is_playing ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400')} />
-                    {clock.is_playing ? 'Playing' : 'Paused'}
-                  </Badge>
-                  <span className="font-mono text-xs font-semibold text-primary">
-                    {clock.current_time}
-                  </span>
-                  <Badge variant="outline" className="text-xs">{clock.speed}x</Badge>
-                </div>
-              )}
-            </div>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <ReplayTopBar
+          clock={clock}
+          progress={getScrubberProgress()}
+          onControl={handleControl}
+          onSeekPercent={handleScrubberChange}
+          onQuickJump={handleQuickJump}
+          draft={draft}
+          draftDirty={draftDirty}
+          onDraftChange={(patch) => setDraft((prev) => ({ ...prev, ...patch }))}
+          onApplySession={handleConfigureSession}
+          layouts={LAYOUTS}
+          layoutId={layoutId}
+          onLayoutChange={setLayoutId}
+          available={availableData}
+          onUseAvailable={handleUseAvailable}
+        />
 
-            {/* Playback Controls */}
-            {clock && (
-              <div className="flex items-center gap-1.5">
-                {clock.is_playing ? (
-                  <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => handleControl('pause')}>
-                    Pause
-                  </Button>
-                ) : (
-                  <Button size="sm" className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700" onClick={() => handleControl('play')}>
-                    <Play className="h-3 w-3 mr-1" /> Play
-                  </Button>
-                )}
-                <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => handleControl('step', { seconds: 1 })}>
-                  +1s
-                </Button>
-                <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => handleControl('step', { seconds: 5 })}>
-                  +5s
-                </Button>
-                <div className="h-4 w-px bg-border mx-1" />
-                {[0.5, 1, 2, 5, 10, 20, 60].map((spd) => (
-                  <Button
-                    key={spd}
-                    size="sm"
-                    variant={clock.speed === spd ? 'default' : 'outline'}
-                    className="h-7 px-2 text-[10px]"
-                    onClick={() => handleControl('speed', { speed: spd })}
-                  >
-                    {spd}x
-                  </Button>
-                ))}
-              </div>
-            )}
-
-            {/* Toolbar Action Toggles & Layout selector */}
-            <div className="flex items-center gap-2">
-              <Button
-                variant={showDepthDOM ? 'default' : 'outline'}
-                size="sm"
-                className="h-8 gap-1.5 text-xs"
-                onClick={() => setShowDepthDOM((v) => !v)}
-              >
-                <Eye className="h-3.5 w-3.5" /> Market Depth
-              </Button>
-
-              <Button
-                variant={showScalperWidget ? 'default' : 'outline'}
-                size="sm"
-                className="h-8 gap-1.5 text-xs"
-                onClick={() => setShowScalperWidget((v) => !v)}
-              >
-                <Layers className="h-3.5 w-3.5" /> Scalper Bar
-              </Button>
-
-              {/* Tape Archives & Admin Redirect Dialog */}
-              <Dialog>
-                <DialogTrigger asChild>
-                  <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
-                    <Database className="h-3.5 w-3.5" /> Tapes
-                  </Button>
-                </DialogTrigger>
-                <DialogContent className="max-w-md">
-                  <DialogHeader>
-                    <DialogTitle className="flex items-center gap-2">
-                      <History className="h-5 w-5" /> Tape Archives & Recording
-                    </DialogTitle>
-                  </DialogHeader>
-                  <div className="space-y-4 py-2 text-xs">
-                    <div className="rounded-lg border p-3 bg-muted/30 space-y-2">
-                      <div className="font-semibold">Automatic Recording Active</div>
-                      <p className="text-muted-foreground text-[11px]">
-                        All watchlist symbols are automatically recorded second-by-second when a session is configured. To change recording settings or targets, visit the Admin panel.
-                      </p>
-                      <Button asChild size="sm" className="w-full h-7 text-xs">
-                        <Link to="/admin/replay">Open Recording Settings (Admin)</Link>
-                      </Button>
-                    </div>
-
-                    <div className="border-t pt-3 space-y-2">
-                      <div className="font-semibold text-muted-foreground">Available Recorded Tapes:</div>
-                      {availableData && availableData.length > 0 ? (
-                        <div className="max-h-48 overflow-y-auto space-y-1">
-                          {availableData.map((entry) => (
-                            <button
-                              key={`${entry.symbol}:${entry.date}`}
-                              type="button"
-                              onClick={() => handleUseAvailable(entry)}
-                              className="w-full flex items-center justify-between text-xs font-mono border rounded px-2 py-1.5 hover:bg-muted/40 text-left"
-                            >
-                              <span>{entry.symbol}</span>
-                              <span className="text-muted-foreground">{entry.date}</span>
-                              <span className="text-muted-foreground">{entry.row_count} rows</span>
-                            </button>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="text-muted-foreground">No recorded tape data available.</p>
-                      )}
-                    </div>
-                  </div>
-                </DialogContent>
-              </Dialog>
-
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="sm" className="h-8 gap-1.5">
-                    <LayoutGrid className="h-4 w-4" />
-                    <span className="text-xs font-medium">Layout</span>
-                    <ChevronDown className="h-3.5 w-3.5 opacity-60" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-56">
-                  <div className="grid grid-cols-4 gap-1 p-1">
-                    {LAYOUTS.map((l) => (
-                      <DropdownMenuItem
-                        key={l.id}
-                        onSelect={() => setLayoutId(l.id)}
-                        title={l.label}
-                        className={cn(
-                          'flex aspect-square flex-col items-center justify-center gap-1 rounded border',
-                          l.id === layoutId
-                            ? 'border-primary bg-primary/10 text-primary'
-                            : 'text-muted-foreground'
-                        )}
-                      >
-                        <LayoutIcon preset={l} />
-                        <span className="text-[9px] font-medium">{l.cells.length}</span>
-                      </DropdownMenuItem>
-                    ))}
-                  </div>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          </div>
-
-          {/* Interactive Session Timeline Scrubber & Quick Jumps */}
-          {clock && (
-            <div className="flex flex-wrap items-center gap-3 pt-1 border-t text-xs">
-              <span className="text-[10px] text-muted-foreground font-mono">09:15 AM</span>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                step="0.1"
-                value={getScrubberProgress()}
-                onChange={(e) => handleScrubberChange(parseFloat(e.target.value))}
-                className="flex-1 h-1.5 accent-primary bg-muted rounded cursor-pointer"
-              />
-              <span className="text-[10px] text-muted-foreground font-mono">03:30 PM</span>
-
-              {/* Quick Jump Buttons */}
-              <div className="flex items-center gap-1 pl-2">
-                <span className="text-[10px] text-muted-foreground mr-1">Jump:</span>
-                <Button size="sm" variant="ghost" className="h-6 px-1.5 text-[10px]" onClick={() => handleQuickJump('09:15:00')}>
-                  09:15
-                </Button>
-                <Button size="sm" variant="ghost" className="h-6 px-1.5 text-[10px]" onClick={() => handleQuickJump('10:30:00')}>
-                  10:30
-                </Button>
-                <Button size="sm" variant="ghost" className="h-6 px-1.5 text-[10px]" onClick={() => handleQuickJump('12:00:00')}>
-                  12:00
-                </Button>
-                <Button size="sm" variant="ghost" className="h-6 px-1.5 text-[10px]" onClick={() => handleQuickJump('14:30:00')}>
-                  14:30
-                </Button>
-                <Button size="sm" variant="ghost" className="h-6 px-1.5 text-[10px]" onClick={() => handleQuickJump('15:30:00')}>
-                  15:30
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {/* Session Configuration Bar */}
-          <div className="flex flex-wrap items-center gap-2 pt-1 border-t text-xs">
-            <div className="flex items-center gap-1.5">
-              <span className="text-muted-foreground">Date:</span>
-              <Input className="h-7 w-28 text-xs font-mono" value={sessionDate} onChange={(e) => setSessionDate(e.target.value)} />
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-muted-foreground">Start:</span>
-              <Input className="h-7 w-20 text-xs font-mono" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-muted-foreground">End:</span>
-              <Input className="h-7 w-20 text-xs font-mono" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
-            </div>
-            <div className="flex items-center gap-1.5 flex-1 min-w-[200px]">
-              <span className="text-muted-foreground">Watchlist:</span>
-              <Input className="h-7 text-xs font-mono" value={watchlistInput} onChange={(e) => setWatchlistInput(e.target.value)} />
-            </div>
-            <Button size="sm" className="h-7 text-xs" onClick={handleConfigureSession}>
-              Apply Session
-            </Button>
-          </div>
-        </div>
-
-        {/* Main Terminal Area with Drawing Rail + Maximized Chart Grid + Floating Widgets */}
-        <main className="flex min-h-0 flex-1 relative">
+        {/* Drawing rail, chart grid and the docked side panel */}
+        <main className="flex min-h-0 flex-1">
           {showRail && apiKey && wsUrl && (
             <DrawingRail
               stats={railStats}
@@ -818,11 +590,12 @@ export default function Replay() {
             />
           )}
 
-          {/* Maximized Chart Grid Area */}
-          <div className="flex flex-col min-h-0 flex-1 relative">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             {noApiKey ? (
-              <div className="flex h-full flex-col items-center justify-center gap-2 text-center p-8">
-                <p className="text-sm text-muted-foreground">No API key found for charting terminal.</p>
+              <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
+                <p className="text-sm text-muted-foreground">
+                  No API key found for charting terminal.
+                </p>
                 <a href="/apikey" className="text-sm font-medium text-primary underline">
                   Generate an API key
                 </a>
@@ -857,102 +630,26 @@ export default function Replay() {
                 Loading trading terminal panes...
               </div>
             )}
-
-            {/* TradingView / Dhan Style Floating Buy/Sell Scalper Bar (Top-Left of Chart) */}
-            {showScalperWidget && (
-              <div className="absolute top-3 left-3 z-30 flex items-center shadow-xl rounded-md overflow-hidden border bg-background/95 backdrop-blur-sm text-xs font-mono">
-                {/* Symbol selector dropdown */}
-                {clock?.watchlist && clock.watchlist.length > 0 && (
-                  <div className="border-r border-border bg-muted/30 px-1">
-                    <Select value={selectedSymbol} onValueChange={setSelectedSymbol}>
-                      <SelectTrigger className="h-8 w-24 text-[11px] border-0 shadow-none font-sans font-bold">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {clock.watchlist.map((s) => (
-                          <SelectItem key={s} value={s}>
-                            {s}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                )}
-
-                {/* Sell Button */}
-                <button
-                  type="button"
-                  onClick={() => handleSimulateOrderCustom('SELL')}
-                  className="flex flex-col items-center justify-center px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold transition-colors cursor-pointer"
-                >
-                  <span className="text-xs font-mono">{symbolState?.ltp ?? '—'}</span>
-                  <span className="text-[9px] tracking-wider uppercase opacity-90">SELL</span>
-                </button>
-
-                {/* Quantity Input */}
-                <div className="flex items-center px-2 bg-background border-x border-border">
-                  <input
-                    type="number"
-                    value={simQty}
-                    onChange={(e) => setSimQty(e.target.value)}
-                    className="w-12 text-center bg-transparent font-bold focus:outline-none text-xs font-mono"
-                    title="Quantity"
-                  />
-                </div>
-
-                {/* Buy Button */}
-                <button
-                  type="button"
-                  onClick={() => handleSimulateOrderCustom('BUY')}
-                  className="flex flex-col items-center justify-center px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold transition-colors cursor-pointer"
-                >
-                  <span className="text-xs font-mono">{symbolState?.ltp ?? '—'}</span>
-                  <span className="text-[9px] tracking-wider uppercase opacity-90">BUY</span>
-                </button>
-
-                {/* Positions PnL & Reset */}
-                <div className="flex items-center gap-2 px-3 bg-muted/20 border-l border-border text-[11px]">
-                  <span className={cn('font-bold', totalPnL >= 0 ? 'text-emerald-500' : 'text-rose-500')}>
-                    PnL: ₹{totalPnL.toFixed(2)} ({demoTrades.length})
-                  </span>
-                  {demoTrades.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setDemoTrades([])}
-                      className="text-[10px] text-rose-400 hover:underline cursor-pointer"
-                      title="Reset trades"
-                    >
-                      Reset
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Floating Market Depth / DOM Widget */}
-            {showDepthDOM && (
-              <div
-                className="absolute z-30 w-80 max-w-[calc(100%-1.5rem)] select-none"
-                style={{
-                  left: `${depthPos.x}px`,
-                  top: `${depthPos.y}px`,
-                }}
-              >
-                <Depth20Panel
-                  symbol={selectedSymbol}
-                  exchange="NSE"
-                  replayData={symbolState}
-                  onClose={() => setShowDepthDOM(false)}
-                />
-              </div>
-            )}
           </div>
-          <RightWatchlist
+
+          <ReplaySidePanel
+            collapsed={panelCollapsed}
+            onToggleCollapsed={() => setPanelCollapsed((v) => !v)}
+            tab={panelTab}
+            onTabChange={setPanelTab}
             symbols={replayWatchlist}
             selectedSymbol={selectedSymbol}
             onSelectSymbol={selectWatchSymbol}
-            marketData={replayMarketData}
-            className="z-20"
+            onTicketSymbol={setSelectedSymbol}
+            quotes={replayMarketData}
+            depthRow={symbolState ?? NO_DEPTH_ROW}
+            positions={positions}
+            totalPnL={totalPnL}
+            onResetPositions={() => setDemoTrades([])}
+            qty={simQty}
+            onQtyChange={setSimQty}
+            ltp={symbolState?.ltp}
+            onOrder={handleSimulateOrderCustom}
           />
         </main>
       </div>
