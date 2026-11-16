@@ -74,12 +74,23 @@ def _list_part_files(symbol: str, date_str: str) -> list[str]:
     )
 
 
-def save_events(symbol: str, date_str: str, events: list[dict]) -> None:
+def list_day_files(symbol: str, date_str: str) -> list[str]:
+    """Return the legacy file, if present, followed by the day's part files."""
+    legacy = get_parquet_path(symbol, date_str)
+    return ([legacy] if os.path.exists(legacy) else []) + _list_part_files(symbol, date_str)
+
+
+def save_events(
+    symbol: str, date_str: str, events: list[dict], bump_index: bool = True
+) -> int:
     """
     Append `events` as a new part file. Never rewrites existing data.
+
+    Returns the number of rows written (rows with an unparseable timestamp are
+    dropped, so this can be lower than ``len(events)``).
     """
     if not events:
-        return
+        return 0
 
     day_dir = get_day_dir(symbol, date_str, create=True)
     df_new = pd.DataFrame(events)
@@ -87,7 +98,7 @@ def save_events(symbol: str, date_str: str, events: list[dict]) -> None:
         df_new["timestamp"] = pd.to_datetime(df_new["timestamp"], errors="coerce", utc=True)
         df_new = df_new.dropna(subset=["timestamp"])
         if df_new.empty:
-            return
+            return 0
 
     # Nanosecond clock + pid keeps part names unique across the Flask process
     # and the out-of-process websocket proxy without any coordination.
@@ -99,13 +110,16 @@ def save_events(symbol: str, date_str: str, events: list[dict]) -> None:
     df_new.to_parquet(tmp_path, index=False)
     os.replace(tmp_path, final_path)
 
-    _bump_index(symbol, date_str, day_dir, len(df_new))
+    if bump_index:
+        _bump_index(symbol, date_str, day_dir, len(df_new))
 
     try:
         from replay.dal import invalidate_day
         invalidate_day(symbol, date_str)
     except Exception:
         logger.exception("[ReplayStorage] Failed to invalidate DAL cache")
+
+    return len(df_new)
 
 
 def _bump_index(symbol: str, date_str: str, day_dir: str, added_rows: int) -> None:
@@ -130,6 +144,33 @@ def _bump_index(symbol: str, date_str: str, day_dir: str, added_rows: int) -> No
         except Exception:
             db.rollback()
             logger.exception(f"[ReplayStorage] Failed to update index for {symbol} {date_str}")
+        finally:
+            db.close()
+
+
+def bump_index_many(items: list[tuple[str, str, str, int]]) -> None:
+    """Apply row-count increments for many symbol-days in one transaction."""
+    if not items:
+        return
+    with _index_lock:
+        db = SessionLocal()
+        try:
+            for symbol, date_str, day_dir, added_rows in items:
+                row = db.query(SymbolDateIndex).filter_by(
+                    symbol=symbol.upper(), date=date_str
+                ).first()
+                if row:
+                    row.row_count = (row.row_count or 0) + added_rows
+                    row.file_path = day_dir
+                else:
+                    db.add(SymbolDateIndex(
+                        symbol=symbol.upper(), date=date_str,
+                        file_path=day_dir, row_count=added_rows,
+                    ))
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("[ReplayStorage] Failed to update replay index batch")
         finally:
             db.close()
 
@@ -165,34 +206,64 @@ def load_day_df(symbol: str, date_str: str, columns: list[str] | None = None) ->
     5 levels writes 5), so frames are aligned by column name and missing levels
     come back as NaN.
     """
-    frames: list[pd.DataFrame] = []
+    return load_day_df_from_paths(symbol, date_str, list_day_files(symbol, date_str), columns)
 
-    legacy = get_parquet_path(symbol, date_str)
-    paths = ([legacy] if os.path.exists(legacy) else []) + _list_part_files(symbol, date_str)
 
-    for path in paths:
-        try:
-            frames.append(pd.read_parquet(path, columns=columns))
-        except Exception:
-            # A single corrupt part must not take out the whole day.
-            logger.exception(f"[ReplayStorage] Skipping unreadable part {path}")
+def load_day_df_from_paths(
+    symbol: str, date_str: str, paths: list[str], columns: list[str] | None = None
+) -> pd.DataFrame:
+    """Load exactly the listed paths, retrying once if compaction removes one."""
+    for attempt in range(2):
+        frames: list[pd.DataFrame] = []
+        vanished = False
+        for path in paths:
+            try:
+                frames.append(_read_part(path, columns))
+            except FileNotFoundError:
+                vanished = True
+                break
+            except Exception:
+                logger.exception(f"[ReplayStorage] Skipping unreadable part {path}")
+
+        if vanished and attempt == 0:
+            paths = list_day_files(symbol, date_str)
+            continue
+        if vanished:
+            paths = list_day_files(symbol, date_str)
+            frames = []
+            for path in paths:
+                try:
+                    frames.append(_read_part(path, columns))
+                except FileNotFoundError:
+                    logger.exception(f"[ReplayStorage] Part vanished during retry: {path}")
+                except Exception:
+                    logger.exception(f"[ReplayStorage] Skipping unreadable part {path}")
+        break
 
     if not frames:
         return pd.DataFrame(columns=columns or EMPTY_COLUMNS)
 
     df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
-
+    if columns is not None:
+        df = df.reindex(columns=columns)
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
         df = df.dropna(subset=["timestamp"])
-        # Identical (timestamp, ltp, volume) rows are genuine duplicates from an
-        # overlapping flush; two different ticks sharing a second are not, so the
-        # de-dup key is never the timestamp alone.
         subset = [c for c in ("timestamp", "ltp", "volume") if c in df.columns]
         df = df.drop_duplicates(subset=subset, keep="last")
         df = df.sort_values("timestamp", kind="stable").reset_index(drop=True)
-
     return df
+
+
+def _read_part(path: str, columns: list[str] | None) -> pd.DataFrame:
+    try:
+        return pd.read_parquet(path, columns=columns)
+    except FileNotFoundError:
+        raise
+    except Exception:
+        # Some parts predate a requested field; absent fields align as NaN.
+        frame = pd.read_parquet(path)
+        return frame.reindex(columns=columns) if columns is not None else frame
 
 
 def compact_day(symbol: str, date_str: str) -> int:
@@ -216,7 +287,7 @@ def compact_day(symbol: str, date_str: str) -> int:
     tmp_path = os.path.join(day_dir, ".compact.tmp")
     final_path = os.path.join(day_dir, f"part-{time.time_ns()}-{os.getpid()}-compacted.parquet")
 
-    df.to_parquet(tmp_path, index=False)
+    df.to_parquet(tmp_path, index=False, compression="zstd")
     os.replace(tmp_path, final_path)
 
     for path in parts:
