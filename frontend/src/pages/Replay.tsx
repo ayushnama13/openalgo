@@ -303,24 +303,35 @@ export default function Replay() {
     let alive = true
     let timer: ReturnType<typeof setInterval> | undefined
 
+    // One batched request for the whole watchlist (the endpoint caps at 200
+    // symbols per call) instead of one request per symbol.
+    const BATCH = 200
     const poll = async () => {
       const rows: Record<string, { ltp?: number; percentChange?: number }> = {}
+      const chunks: string[][] = []
+      for (let i = 0; i < replayWatchlist.length; i += BATCH) {
+        chunks.push(replayWatchlist.slice(i, i + BATCH))
+      }
       await Promise.all(
-        replayWatchlist.map(async (sym) => {
+        chunks.map(async (chunk) => {
           try {
-            const res = await fetch(`/api/replay/state?symbol=${encodeURIComponent(sym)}`, {
-              credentials: 'include',
-            })
+            const res = await fetch(
+              `/api/replay/states?symbols=${encodeURIComponent(chunk.join(','))}`,
+              { credentials: 'include' }
+            )
             if (!res.ok) return
-            const data = (await res.json()) as { state?: { ltp?: number } }
-            const ltp = data.state?.ltp
-            if (ltp == null) return
-            const key = sym.toUpperCase()
-            if (firstLtpRef.current[key] == null) firstLtpRef.current[key] = ltp
-            const base = firstLtpRef.current[key]
-            rows[key] = {
-              ltp,
-              percentChange: base > 0 ? ((ltp - base) / base) * 100 : undefined,
+            const data = (await res.json()) as {
+              states?: Record<string, { ltp?: number | null } | null>
+            }
+            for (const [key, state] of Object.entries(data.states ?? {})) {
+              const ltp = state?.ltp
+              if (ltp == null) continue
+              if (firstLtpRef.current[key] == null) firstLtpRef.current[key] = ltp
+              const base = firstLtpRef.current[key]
+              rows[key] = {
+                ltp,
+                percentChange: base > 0 ? ((ltp - base) / base) * 100 : undefined,
+              }
             }
           } catch {
             /* next cycle */
