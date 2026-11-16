@@ -26,7 +26,10 @@ IST = pytz.timezone("Asia/Kolkata")
 # restarts, so this cache is deliberately small — the previous lru_cache(128)
 # had an ~8 GB ceiling. Override with REPLAY_DAY_CACHE_SIZE if you have the RAM.
 _DAY_CACHE_MAX = max(1, int(os.getenv("REPLAY_DAY_CACHE_SIZE", "6")))
-_SLIM_CACHE_MAX = max(1, int(os.getenv("REPLAY_SLIM_CACHE_SIZE", "256")))
+# Slim (timestamp/ltp/volume/oi) frames for the batched watchlist lookup. A busy
+# symbol-day is ~100k rows x 4 columns, about 3 MB, so 64 entries tops out near
+# 200 MB while still covering a full NIFTY chain watchlist (43 symbols).
+_SLIM_CACHE_MAX = max(1, int(os.getenv("REPLAY_SLIM_CACHE_SIZE", "64")))
 
 # Today's file is still being appended to, so its cache entry must expire quickly.
 # Past days are immutable once the session ends and are cached until evicted.
@@ -106,10 +109,31 @@ def _cached_load_day_df(symbol: str, date_str: str) -> pd.DataFrame:
 
 
 def invalidate_day(symbol: str, date_str: str) -> None:
-    """Drop one symbol-day from the cache (called after every write)."""
+    """Drop one symbol-day from the cache (compaction or deletion rewrote its files)."""
     with _day_cache_lock:
         _day_cache.pop((symbol.upper(), date_str), None)
         _slim_cache.pop((symbol.upper(), date_str), None)
+
+
+def mark_day_stale(symbol: str, date_str: str) -> None:
+    """Note that a part file was appended to a symbol-day (called after every flush).
+
+    Today's entry is kept and only flagged, so the next read loads just the new
+    part instead of the whole day again. Any other date is dropped outright:
+    past days are served without a freshness check, so a late write to one has
+    to evict it.
+    """
+    key = (symbol.upper(), date_str)
+    is_today = date_str == _today_str()
+    with _day_cache_lock:
+        for cache in (_day_cache, _slim_cache):
+            entry = cache.get(key)
+            if entry is None:
+                continue
+            if is_today:
+                cache[key] = (0.0, entry[1], entry[2])
+            else:
+                cache.pop(key, None)
 
 
 def clear_dal_cache() -> None:

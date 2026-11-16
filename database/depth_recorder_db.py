@@ -218,6 +218,9 @@ def init_db():
     except Exception:
         logger.exception("depth_recorder_db: migration failed")
         db_session.rollback()
+    finally:
+        # Boot runs outside a request: release the connection the checks opened.
+        db_session.remove()
 
 
 # ---------------------------------------------------------------------------

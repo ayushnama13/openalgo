@@ -114,10 +114,10 @@ def save_events(
         _bump_index(symbol, date_str, day_dir, len(df_new))
 
     try:
-        from replay.dal import invalidate_day
-        invalidate_day(symbol, date_str)
+        from replay.dal import mark_day_stale
+        mark_day_stale(symbol, date_str)
     except Exception:
-        logger.exception("[ReplayStorage] Failed to invalidate DAL cache")
+        logger.exception("[ReplayStorage] Failed to flag the DAL cache entry as stale")
 
     return len(df_new)
 

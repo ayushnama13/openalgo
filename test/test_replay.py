@@ -331,20 +331,34 @@ def test_live_cache_refreshes_only_new_parts(monkeypatch):
 
     symbol = "ZZTREFRESH"
     today = datetime.now(IST).strftime("%Y-%m-%d")
-    real_invalidate = dal.invalidate_day
-    monkeypatch.setattr(dal, "invalidate_day", lambda *_: None)
-    try:
-        save_events(symbol, today, [{"timestamp": f"{today}T09:15:00+05:30", "ltp": 1}])
-        dal.clear_dal_cache()
-        first = dal._cached_load_day_df(symbol, today)
-        save_events(symbol, today, [{"timestamp": f"{today}T09:15:01+05:30", "ltp": 2}])
-        monkeypatch.setattr(dal, "_LIVE_DAY_TTL_SECONDS", 0)
-        refreshed = dal._cached_load_day_df(symbol, today)
-        assert list(refreshed["ltp"]) == [1, 2]
-        assert len(storage.list_day_files(symbol, today)) == 2
-        assert len(first) == 1
-    finally:
-        monkeypatch.setattr(dal, "invalidate_day", real_invalidate)
+    save_events(symbol, today, [{"timestamp": f"{today}T09:15:00+05:30", "ltp": 1}])
+    dal.clear_dal_cache()
+    first = dal._cached_load_day_df(symbol, today)
+    assert len(first) == 1
+
+    # A flush flags today's entry stale (it does not evict it), so the refresh
+    # must read ONLY the part that was added, well inside the normal TTL.
+    loaded: list[list[str]] = []
+    real_loader = dal.load_day_df_from_paths
+
+    def tracking_loader(sym, date_str, paths, columns=None):
+        loaded.append(list(paths))
+        return real_loader(sym, date_str, paths, columns)
+
+    monkeypatch.setattr(dal, "load_day_df_from_paths", tracking_loader)
+    save_events(symbol, today, [{"timestamp": f"{today}T09:15:01+05:30", "ltp": 2}])
+    refreshed = dal._cached_load_day_df(symbol, today)
+    assert list(refreshed["ltp"]) == [1, 2]
+    all_paths = storage.list_day_files(symbol, today)
+    assert len(all_paths) == 2
+    assert loaded == [[all_paths[-1]]]
+
+    # A late write to a past day evicts it instead (past days are never re-checked).
+    past = "2026-08-11"
+    save_events(symbol, past, [{"timestamp": f"{past}T09:15:00+05:30", "ltp": 5}])
+    assert len(dal._cached_load_day_df(symbol, past)) == 1
+    save_events(symbol, past, [{"timestamp": f"{past}T09:15:01+05:30", "ltp": 6}])
+    assert list(dal._cached_load_day_df(symbol, past)["ltp"]) == [5, 6]
 
 
 def test_storage_retries_when_part_disappears_between_list_and_read(monkeypatch):

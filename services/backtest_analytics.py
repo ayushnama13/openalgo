@@ -24,7 +24,9 @@ _TRADING_DAYS_PER_YEAR = 252.0
 _BENCHMARK_CACHE = OrderedDict()
 _BENCHMARK_CACHE_LOCK = threading.Lock()
 _BENCHMARK_CACHE_TTL = 600
-_BENCHMARK_CACHE_MAX = 32
+# Entries are stored column-wise (timestamp list + float array): a 1m benchmark
+# over a year is ~95k points, about 8 MB that way against ~25 MB as row dicts.
+_BENCHMARK_CACHE_MAX = 8
 
 
 def periods_per_year_for_interval(interval: str | None) -> float:
@@ -286,7 +288,10 @@ def get_benchmark_comparison(
         cached = _BENCHMARK_CACHE.get(key)
         if cached and now - cached[0] < _BENCHMARK_CACHE_TTL:
             _BENCHMARK_CACHE.move_to_end(key)
-            return [dict(row) for row in cached[1]]
+            return [
+                {"timestamp": ts, "benchmark_equity": eq}
+                for ts, eq in zip(cached[1], cached[2].tolist(), strict=True)
+            ]
         if cached:
             _BENCHMARK_CACHE.pop(key, None)
     try:
@@ -324,11 +329,15 @@ def get_benchmark_comparison(
                 "benchmark_equity": round(float(eq), 2),
             })
         with _BENCHMARK_CACHE_LOCK:
-            _BENCHMARK_CACHE[key] = (now, results)
+            _BENCHMARK_CACHE[key] = (
+                now,
+                [row["timestamp"] for row in results],
+                np.asarray([row["benchmark_equity"] for row in results], dtype="float64"),
+            )
             _BENCHMARK_CACHE.move_to_end(key)
             while len(_BENCHMARK_CACHE) > _BENCHMARK_CACHE_MAX:
                 _BENCHMARK_CACHE.popitem(last=False)
-        return [dict(row) for row in results]
+        return results
     except Exception as e:
         logger.exception(f"Error fetching benchmark comparison: {e}")
         return []
