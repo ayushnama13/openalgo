@@ -157,6 +157,9 @@ def migrate(status_only=False):
                     conn.commit()
                     conn.exec_driver_sql("VACUUM")
                     conn.commit()
+                    # In WAL mode the main file only shrinks once the log is folded back in.
+                    conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+                    conn.commit()
                     summary["auto_vacuum"] = conn.exec_driver_sql("PRAGMA auto_vacuum").scalar()
                     print(f"Database size: {before} -> {_file_size(engine)} bytes")
         return summary
