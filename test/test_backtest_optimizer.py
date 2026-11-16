@@ -14,6 +14,7 @@ import database.backtest_db as bdb
 import services.backtest_optimizer as optim
 import services.backtest_service as svc
 from database.backtest_db import BacktestOptimization, db_session
+from services.strategy_sandbox import BacktestCancelled, run_tasks_sandboxed
 
 CODE = """
 class Cross(Strategy):
@@ -169,6 +170,94 @@ def test_walk_forward_rejects_bad_windows():
         optim.run_walk_forward(CODE, {"NSE:X": make_bars()}, BASE,
                                {"param_space": {"fast": [3]}, "train_pct": 90, "test_pct": 50},
                                1e5, "15m")
+
+
+def test_parallel_task_results_match_serial_and_progress(monkeypatch):
+    bars = {"NSE:X": make_bars(180)}
+    tasks = [{"id": i, "params": {"fast": fast, "slow": 20}, "start": None, "end": None}
+             for i, fast in enumerate((3, 5, 8, 10, 12))]
+    progress = []
+    one = run_tasks_sandboxed(CODE, bars, BASE, tasks, workers=1)
+    three = run_tasks_sandboxed(CODE, bars, BASE, tasks, workers=3, progress_cb=progress.append)
+    assert one["timeline"] == three["timeline"]
+    assert list(one["tasks"]) == list(three["tasks"]) == list(range(5))
+    for task_id in one["tasks"]:
+        left, right = one["tasks"][task_id], three["tasks"][task_id]
+        assert left["trades"] == right["trades"]
+        assert np.array_equal(left["equity"], right["equity"])
+    assert progress == sorted(progress)
+    assert progress[-1] == 100.0
+
+
+def test_parallel_task_failure_is_per_task():
+    tasks = [{"id": 1, "params": {}, "start": None, "end": None},
+             {"id": 2, "params": {}, "start": None, "end": None}]
+    code = "if PARAMS.get('fail'): raise RuntimeError('task boom')\n" + CODE
+    tasks[0]["params"] = {"fail": True}
+    tasks[1]["params"] = {"fast": 5, "slow": 20}
+    result = run_tasks_sandboxed(code, {"NSE:X": make_bars(100)}, BASE, tasks, workers=2)
+    assert "task boom" in result["tasks"][1]["error"]
+    assert "equity" in result["tasks"][2]
+
+
+def test_parallel_child_crash_reaps_all_processes(monkeypatch):
+    from services import strategy_sandbox as sandbox
+
+    started = []
+    real_popen = sandbox.subprocess.Popen
+
+    def tracking_popen(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        started.append(proc)
+        return proc
+
+    monkeypatch.setattr(sandbox.subprocess, "Popen", tracking_popen)
+    tasks = [{"id": i, "params": {}, "start": None, "end": None} for i in range(3)]
+    with pytest.raises(ValueError, match="Strategy failed"):
+        run_tasks_sandboxed("raise SystemExit(3)", {"NSE:X": make_bars(80)}, BASE, tasks, workers=3)
+    assert len(started) == 3
+    assert all(proc.poll() is not None for proc in started)
+
+
+def test_parallel_cancel_reaps_all_processes(monkeypatch):
+    from services import strategy_sandbox as sandbox
+
+    started = []
+    real_popen = sandbox.subprocess.Popen
+
+    def tracking_popen(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        started.append(proc)
+        return proc
+
+    class CancelAfterStart:
+        def is_set(self):
+            return len(started) == 3
+
+    monkeypatch.setattr(sandbox.subprocess, "Popen", tracking_popen)
+    tasks = [{"id": i, "params": {}, "start": None, "end": None} for i in range(3)]
+    with pytest.raises(BacktestCancelled):
+        run_tasks_sandboxed("while True: pass", {"NSE:X": make_bars(80)}, BASE, tasks,
+                            workers=3, cancel_event=CancelAfterStart())
+    assert len(started) == 3
+    assert all(proc.poll() is not None for proc in started)
+
+
+def test_backtest_optimizer_worker_environment(monkeypatch):
+    from services import strategy_sandbox as sandbox
+
+    monkeypatch.setenv("BACKTEST_OPT_WORKERS", "2")
+    tasks = [{"id": i, "params": {}, "start": None, "end": None} for i in range(2)]
+    children = []
+    original = sandbox._supervise_children
+
+    def track(specs, *args, **kwargs):
+        children.extend(specs)
+        return original(specs, *args, **kwargs)
+
+    monkeypatch.setattr(sandbox, "_supervise_children", track)
+    run_tasks_sandboxed("pass", {"NSE:X": make_bars(60)}, BASE, tasks)
+    assert len(children) == 2
 
 
 # ---- background job through the service ----

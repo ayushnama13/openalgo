@@ -170,7 +170,8 @@ def _build_strategy(code, bars, cfg, symbols, pd, np, ta, be):
 
 def _load_bars(job, workdir, pd):
     fmt = job["fmt"]
-    return {sym: _read(os.path.join(workdir, f"bars_{i}.{fmt}"), fmt, pd)
+    bars_dir = job.get("bars_dir", workdir)
+    return {sym: _read(os.path.join(bars_dir, f"bars_{i}.{fmt}"), fmt, pd)
             for i, sym in enumerate(job["symbols"])}
 
 

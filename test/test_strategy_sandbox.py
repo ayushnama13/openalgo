@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from services.strategy_sandbox import run_strategy_sandboxed
+from services.strategy_sandbox import run_strategy_sandboxed, run_tasks_sandboxed
 
 
 @pytest.fixture
@@ -80,3 +80,19 @@ def test_bad_signal_values_rejected(df):
 def test_dropping_rows_rejected(df):
     with pytest.raises(ValueError, match="rows"):
         run_strategy_sandboxed("def strategy(df):\n    df = df.iloc[:10].copy()\n    df['signal']=0\n    return df\n", df)
+
+
+def test_tasks_sandbox_runs_with_one_worker(df):
+    frame = df.copy()
+    frame.insert(0, "timestamp", pd.date_range("2024-01-01", periods=len(frame), freq="15min")
+                 .strftime("%Y-%m-%d %H:%M:%S"))
+    config = {
+        "initial_capital": 100000.0, "sizing_type": "pct_equity", "sizing_value": 50,
+        "product_type": "NRML", "max_positions": 1, "interval": "15m",
+    }
+    task = {"id": 7, "params": {}, "start": None, "end": None}
+    result = run_tasks_sandboxed(
+        "df['signal'] = 0", {"NSE:X": frame}, config, [task], workers=1,
+    )
+    assert list(result["tasks"]) == [7]
+    assert "equity" in result["tasks"][7]
