@@ -15,6 +15,7 @@ import {
   fetchRecorderStatus,
   fetchStats,
   fetchTicks,
+  pruneOldTicks,
   setDepthLevel,
   startRecorder,
   stopRecorder,
@@ -26,6 +27,14 @@ import DepthAnalytics from '@/components/depth-recorder/DepthAnalytics'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -350,6 +359,9 @@ export default function DepthRecorder() {
   const [depthLevel, setDepthLevelState] = useState<number>(5)
   const [loading, setLoading] = useState(false)
   const [tab, setTab] = useState('recorders')
+  const [pruneOpen, setPruneOpen] = useState(false)
+  const [pruneDays, setPruneDays] = useState('30')
+  const [pruning, setPruning] = useState(false)
   const pollerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const fetchStatusesCb = useCallback(async () => {
@@ -454,6 +466,34 @@ export default function DepthRecorder() {
 
   const recordingCount = statuses.filter((s) => s.status === 'recording').length
 
+  // The prune endpoint only accepts a whole number of days >= 1.
+  const pruneDaysValue = /^\d+$/.test(pruneDays.trim()) ? Number(pruneDays.trim()) : 0
+  const pruneDaysValid = pruneDaysValue >= 1
+
+  const handlePrune = async () => {
+    if (!pruneDaysValid || pruning) return
+    setPruning(true)
+    try {
+      const res = await pruneOldTicks(pruneDaysValue)
+      if (res.status === 'success') {
+        const deleted = res.deleted ?? 0
+        showToast.success(
+          deleted > 0
+            ? `Deleted ${deleted.toLocaleString('en-IN')} ticks older than ${pruneDaysValue} days`
+            : `No ticks older than ${pruneDaysValue} days`
+        )
+        setPruneOpen(false)
+        fetchStatsCb()
+      } else {
+        showToast.error(res.message || 'Failed to delete old depth data')
+      }
+    } catch {
+      showToast.error('Failed to delete old depth data')
+    } finally {
+      setPruning(false)
+    }
+  }
+
   return (
     <div className="py-6 space-y-6">
       {/* ── Header ── */}
@@ -495,7 +535,7 @@ export default function DepthRecorder() {
         <>
           {/* ── Global Stats ── */}
           {stats && (
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
               {[
                 {
                   label: 'Total Ticks',
@@ -535,8 +575,66 @@ export default function DepthRecorder() {
                   <div className="text-xl font-bold font-mono">{value}</div>
                 </div>
               ))}
+              <div className="rounded-xl border border-border bg-card/60 backdrop-blur px-4 py-3">
+                <div className="mb-1">
+                  <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Storage
+                  </span>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => setPruneOpen(true)}
+                >
+                  Delete old data...
+                </Button>
+              </div>
             </div>
           )}
+
+          <Dialog open={pruneOpen} onOpenChange={(open) => !pruning && setPruneOpen(open)}>
+            <DialogContent className="sm:max-w-md">
+              <DialogHeader>
+                <DialogTitle>Delete old depth data</DialogTitle>
+                <DialogDescription>
+                  Removes recorded ticks for every symbol from before the chosen number of days ago.
+                  Today's recording is never touched.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <label htmlFor="depth-prune-days">Delete ticks older than</label>
+                <Input
+                  id="depth-prune-days"
+                  type="number"
+                  min={1}
+                  step={1}
+                  inputMode="numeric"
+                  value={pruneDays}
+                  onChange={(e) => setPruneDays(e.target.value)}
+                  disabled={pruning}
+                  className="h-8 w-20 font-mono"
+                />
+                <span>days</span>
+              </div>
+              {!pruneDaysValid && (
+                <p className="text-xs text-rose-400">Enter a whole number of days, 1 or more.</p>
+              )}
+              <p className="text-sm text-rose-400">This cannot be undone.</p>
+              <DialogFooter>
+                <Button variant="outline" disabled={pruning} onClick={() => setPruneOpen(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  variant="destructive"
+                  disabled={!pruneDaysValid || pruning}
+                  onClick={handlePrune}
+                >
+                  {pruning ? 'Deleting...' : 'Delete'}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
 
           {/* ── Add Recorder ── */}
           <Card className="border-border bg-card/60 backdrop-blur">
