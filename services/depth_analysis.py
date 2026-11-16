@@ -74,8 +74,12 @@ def _cache_get(symbol: str, exchange: str, day: str) -> dict | None:
         if hit is None:
             return None
         age = (datetime.now() - hit["built_at"]).total_seconds()
-        today = datetime.now(pytz.timezone("Asia/Kolkata")).date().isoformat()
-        if day >= today and age > CACHE_TTL_SECONDS:
+        # An entry is final only if it was BUILT after its day ended (IST). One
+        # built while the day was still being recorded holds a partial session
+        # and must expire like a live entry, even once the date has rolled over.
+        built_day = hit["built_at"].astimezone(pytz.timezone("Asia/Kolkata")).date().isoformat()
+        final = built_day > day[:10]
+        if not final and age > CACHE_TTL_SECONDS:
             _session_cache.pop(k, None)
             return None
         _session_cache.move_to_end(k)

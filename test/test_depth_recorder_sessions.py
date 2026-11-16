@@ -34,7 +34,9 @@ def setup_function():
 def teardown_function():
     da.clear_session_cache()
     drdb.db_session.remove()
+    # Leave empty tables behind, not a table-less database, so test order never matters.
     drdb.Base.metadata.drop_all(bind=drdb.engine)
+    drdb.Base.metadata.create_all(bind=drdb.engine)
 
 
 def test_batch_summaries_and_summary_queries_match_raw_ticks():
@@ -91,12 +93,20 @@ def test_past_day_cache_is_immutable_and_today_expires(monkeypatch):
     import services.depth_analysis as module
 
     today = datetime.now(drdb.IST).date().isoformat()
-    past = (datetime.now(drdb.IST).date() - timedelta(days=1)).isoformat()
-    value = {"built_at": datetime.now() - timedelta(seconds=module.CACHE_TTL_SECONDS + 5)}
+    past = (datetime.now(drdb.IST).date() - timedelta(days=3)).isoformat()
+    stale = datetime.now() - timedelta(seconds=module.CACHE_TTL_SECONDS + 5)
+    value = {"built_at": stale}
     module._cache_set(SYMBOL_A, EXCHANGE, past, value)
     module._cache_set(SYMBOL_B, EXCHANGE, today, value)
+    # Built after the day ended: final, survives the TTL.
     assert module._cache_get(SYMBOL_A, EXCHANGE, past) is value
     assert module._cache_get(SYMBOL_B, EXCHANGE, today) is None
+
+    # Built DURING its own day (partial session), read after the date rolled
+    # over: must expire, not be served as the whole day.
+    partial = {"built_at": datetime.now() - timedelta(days=3)}
+    module._cache_set(SYMBOL_B, EXCHANGE, past, partial)
+    assert module._cache_get(SYMBOL_B, EXCHANGE, past) is None
 
 
 def test_flat_tuple_rows_match_flat_dict_rows():

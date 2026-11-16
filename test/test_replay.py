@@ -353,7 +353,7 @@ def test_live_cache_refreshes_only_new_parts(monkeypatch):
     assert len(all_paths) == 2
     assert loaded == [[all_paths[-1]]]
 
-    # A late write to a past day evicts it instead (past days are never re-checked).
+    # A late write to a past day is picked up the same way.
     past = "2026-08-11"
     save_events(symbol, past, [{"timestamp": f"{past}T09:15:00+05:30", "ltp": 5}])
     assert len(dal._cached_load_day_df(symbol, past)) == 1
@@ -457,3 +457,36 @@ def _cleanup_test_tapes():
         db.commit()
     finally:
         db.close()
+
+
+def test_entry_loaded_during_its_day_is_not_final_after_rollover(monkeypatch):
+    """A tape cached mid-session must not be served as the full day once the date changes."""
+    from replay import dal, storage
+
+    symbol = "ZZTROLL"
+    day = "2026-08-12"
+    mid_session = IST.localize(datetime(2026, 8, 12, 14, 0)).timestamp()
+    next_day = IST.localize(datetime(2026, 8, 13, 9, 0)).timestamp()
+    assert not dal._is_final(mid_session, day)
+    assert dal._is_final(next_day, day)
+
+    clock = {"now": mid_session}
+    monkeypatch.setattr(dal.time, "time", lambda: clock["now"])
+    save_events(symbol, day, [{"timestamp": f"{day}T13:59:00+05:30", "ltp": 1}])
+    dal.clear_dal_cache()
+    assert list(dal._cached_load_day_df(symbol, day)["ltp"]) == [1]
+
+    # The recorder runs in another process: its flush never reaches this cache.
+    monkeypatch.setattr(dal, "mark_day_stale", lambda *_: None)
+    save_events(symbol, day, [{"timestamp": f"{day}T15:29:00+05:30", "ltp": 2}])
+
+    clock["now"] = next_day
+    assert list(dal._cached_load_day_df(symbol, day)["ltp"]) == [1, 2]
+    states = dal.get_ltp_states([symbol], IST.localize(datetime(2026, 8, 12, 15, 30)))
+    assert states[symbol]["ltp"] == 2.0
+
+    # Loaded after the day ended: final now, no further directory listing.
+    monkeypatch.setattr(dal, "list_day_files", lambda *_: (_ for _ in ()).throw(AssertionError))
+    clock["now"] = next_day + 3600
+    assert len(dal._cached_load_day_df(symbol, day)) == 2
+    assert storage.MAX_DEPTH_LEVELS == 20

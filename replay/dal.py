@@ -48,26 +48,36 @@ def _today_str() -> str:
     return datetime.now(IST).strftime("%Y-%m-%d")
 
 
+def _is_final(loaded_at: float, date_str: str) -> bool:
+    """True when the entry was loaded after ``date_str`` ended (IST).
+
+    "Is the date in the past right now" is not enough: an entry loaded at 14:00
+    on its own day is a partial tape, and the recorder (another process) cannot
+    tell this process to drop it when the date rolls over.
+    """
+    return datetime.fromtimestamp(loaded_at, IST).strftime("%Y-%m-%d") > date_str
+
+
 def _cached_load(
     cache: OrderedDict, max_size: int, symbol: str, date_str: str,
     columns: list[str] | None = None,
 ) -> pd.DataFrame:
     """Bounded day cache shared by the full-frame and slim caches.
 
-    Past days are immutable and served until evicted. Today's entry expires
-    after the live TTL and is then refreshed incrementally: only part files
-    that appeared since the last load are read.
+    An entry loaded after its day ended is final and served until evicted.
+    Anything loaded while the day could still be written to expires after the
+    live TTL and is then refreshed incrementally: only part files that
+    appeared since the last load are read.
     """
     key = (symbol.upper(), date_str)
     now = time.time()
-    is_today = date_str == _today_str()
 
     with _day_cache_lock:
         entry = cache.get(key)
         if entry is not None:
             cache.move_to_end(key)
             loaded_at, df, paths = entry
-            if not is_today or (now - loaded_at) < _LIVE_DAY_TTL_SECONDS:
+            if _is_final(loaded_at, date_str) or (now - loaded_at) < _LIVE_DAY_TTL_SECONDS:
                 return df
 
     # Loaded outside the lock: reading a day can take seconds and must not block
@@ -118,22 +128,15 @@ def invalidate_day(symbol: str, date_str: str) -> None:
 def mark_day_stale(symbol: str, date_str: str) -> None:
     """Note that a part file was appended to a symbol-day (called after every flush).
 
-    Today's entry is kept and only flagged, so the next read loads just the new
-    part instead of the whole day again. Any other date is dropped outright:
-    past days are served without a freshness check, so a late write to one has
-    to evict it.
+    The entry is kept and only flagged (load time reset), so the next read
+    loads just the new part instead of the whole day again.
     """
     key = (symbol.upper(), date_str)
-    is_today = date_str == _today_str()
     with _day_cache_lock:
         for cache in (_day_cache, _slim_cache):
             entry = cache.get(key)
-            if entry is None:
-                continue
-            if is_today:
+            if entry is not None:
                 cache[key] = (0.0, entry[1], entry[2])
-            else:
-                cache.pop(key, None)
 
 
 def clear_dal_cache() -> None:
