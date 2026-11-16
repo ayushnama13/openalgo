@@ -303,9 +303,10 @@ export default function Replay() {
     let alive = true
     let timer: ReturnType<typeof setInterval> | undefined
 
-    // One batched request for the whole watchlist (the endpoint caps at 200
-    // symbols per call) instead of one request per symbol.
-    const BATCH = 200
+    // One batched request for the whole watchlist instead of one per symbol.
+    // 100 per call keeps the query string well inside the server's request
+    // line limit (the endpoint itself accepts up to 200).
+    const BATCH = 100
     const poll = async () => {
       const rows: Record<string, { ltp?: number; percentChange?: number }> = {}
       const chunks: string[][] = []
