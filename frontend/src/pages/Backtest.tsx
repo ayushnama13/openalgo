@@ -57,6 +57,12 @@ import {
   type EngineOptionsState,
 } from '@/lib/backtestEngineOptions'
 import {
+  appendPage,
+  JOBS_MAX_LIMIT,
+  JOBS_PAGE_SIZE,
+  mergeFirstPage,
+} from '@/lib/backtestJobsPaging'
+import {
   type FullJobDetails,
   type ResultsData,
   useStrategyBacktestStore,
@@ -354,6 +360,10 @@ export default function Backtest() {
 
   // Jobs
   const [jobs, setJobs] = useState<JobSummary[]>([])
+  const [jobsTotal, setJobsTotal] = useState(0)
+  const [jobsLoadingMore, setJobsLoadingMore] = useState(false)
+  // Rows currently loaded, readable from loadJobs without making it depend on `jobs`.
+  const jobsLoadedRef = useRef(0)
   const [jobsOpen, setJobsOpen] = useState(false)
   const [runningJobIds, setRunningJobIds] = useState<Set<string>>(new Set())
 
@@ -422,25 +432,74 @@ export default function Backtest() {
     }
   }, [])
 
-  const loadJobs = useCallback(async () => {
-    try {
-      const response = await fetch('/backtest/api/jobs', { credentials: 'include' })
-      const data = await response.json()
-      if (data.status === 'success') {
-        setJobs(data.jobs || [])
+  const fetchJobsPage = useCallback(async (offset: number, limit: number) => {
+    const response = await fetch(`/backtest/api/jobs?limit=${limit}&offset=${offset}`, {
+      credentials: 'include',
+    })
+    const data = await response.json()
+    if (data.status !== 'success') return null
+    const rows = (data.jobs || []) as JobSummary[]
+    return { jobs: rows, total: Number(data.total ?? rows.length) }
+  }, [])
+
+  // The history list is paged. By default only the newest page is refreshed
+  // (that is where running jobs live) and merged over what is on screen;
+  // `all` refetches every row already loaded, for deletes, cancels and purges.
+  const loadJobs = useCallback(
+    async (opts?: { all?: boolean }) => {
+      try {
+        const all = opts?.all === true
+        const want = all ? Math.max(JOBS_PAGE_SIZE, jobsLoadedRef.current) : JOBS_PAGE_SIZE
+        let fresh: JobSummary[] = []
+        let total = 0
+        for (let offset = 0; offset < want; offset += JOBS_MAX_LIMIT) {
+          const limit = Math.min(JOBS_MAX_LIMIT, want - offset)
+          const page = await fetchJobsPage(offset, limit)
+          if (!page) return
+          fresh = appendPage(fresh, page.jobs)
+          total = page.total
+          if (page.jobs.length < limit) break
+        }
+        setJobs((prev) => (all ? fresh : mergeFirstPage(prev, fresh, JOBS_PAGE_SIZE)))
+        setJobsTotal(total)
         const newRunning = new Set<string>()
-        for (const job of (data.jobs || []) as JobSummary[]) {
+        for (const job of fresh) {
           if (job.status === 'pending' || job.status === 'running') {
             newRunning.add(job.job_id)
             setActiveJobId(job.job_id)
           }
         }
         setRunningJobIds(newRunning)
+      } catch {
+        // ignore - jobs panel is optional
+      }
+    },
+    [fetchJobsPage]
+  )
+
+  useEffect(() => {
+    jobsLoadedRef.current = jobs.length
+  }, [jobs])
+
+  const loadMoreJobs = async () => {
+    setJobsLoadingMore(true)
+    try {
+      const page = await fetchJobsPage(jobs.length, JOBS_PAGE_SIZE)
+      if (page) {
+        setJobs((prev) => appendPage(prev, page.jobs))
+        setJobsTotal(page.total)
+      } else {
+        showToast.error('Failed to load more jobs')
       }
     } catch {
-      // ignore - jobs panel is optional
+      showToast.error('Failed to load more jobs')
+    } finally {
+      setJobsLoadingMore(false)
     }
-  }, [])
+  }
+
+  // Runs on the server; never less than what is loaded (total can lag a new run).
+  const jobCount = Math.max(jobsTotal, jobs.length)
 
   useEffect(() => {
     loadCatalog()
@@ -742,7 +801,7 @@ export default function Backtest() {
       const data = await response.json()
       if (data.status === 'success') {
         showToast.success('Job deleted')
-        loadJobs()
+        loadJobs({ all: true })
       }
     } catch {
       showToast.error('Failed to delete job')
@@ -760,7 +819,7 @@ export default function Backtest() {
       const data = await response.json()
       if (data.status === 'success') {
         showToast.success('Batch deleted')
-        loadJobs()
+        loadJobs({ all: true })
       }
     } catch {
       showToast.error('Failed to delete batch')
@@ -874,7 +933,7 @@ export default function Backtest() {
         })
       }
       showToast.info('Cancel requests sent for queued/active jobs')
-      loadJobs()
+      loadJobs({ all: true })
     } catch {
       showToast.error('Failed to cancel active jobs')
     }
@@ -891,7 +950,7 @@ export default function Backtest() {
       const data = await response.json()
       if (data.status === 'success') {
         showToast.info('Job cancelled')
-        loadJobs()
+        loadJobs({ all: true })
       } else {
         showToast.error(data.message || 'Failed to cancel job')
       }
@@ -922,7 +981,7 @@ export default function Backtest() {
             </Button>
           )}
           <Button variant="outline" onClick={() => setJobsOpen(true)}>
-            <History className="h-4 w-4" /> Job History ({jobs.length})
+            <History className="h-4 w-4" /> Job History ({jobCount.toLocaleString('en-IN')})
           </Button>
           <Button variant="outline" onClick={() => navigate('/backtest/optimizations')}>
             Optimizations
@@ -1361,6 +1420,11 @@ export default function Backtest() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <History className="h-5 w-5" /> Backtest Job History
+              {jobs.length < jobCount && (
+                <span className="text-sm font-normal text-muted-foreground">
+                  ({jobs.length.toLocaleString('en-IN')} of {jobCount.toLocaleString('en-IN')})
+                </span>
+              )}
             </DialogTitle>
             <DialogDescription>
               Past runs with status and key metrics. Click a row to open its results page.
@@ -1542,6 +1606,19 @@ export default function Backtest() {
             </div>
           </div>
 
+          {jobs.length < jobCount && (
+            <div className="flex flex-wrap items-center justify-center gap-3 text-sm text-muted-foreground">
+              <Button variant="outline" size="sm" disabled={jobsLoadingMore} onClick={loadMoreJobs}>
+                {jobsLoadingMore
+                  ? 'Loading...'
+                  : `Load ${Math.min(JOBS_PAGE_SIZE, jobCount - jobs.length).toLocaleString('en-IN')} more`}
+              </Button>
+              <span>
+                Showing {jobs.length.toLocaleString('en-IN')} of {jobCount.toLocaleString('en-IN')}
+              </span>
+            </div>
+          )}
+
           <DialogFooter>
             <Button
               variant="outline"
@@ -1554,7 +1631,7 @@ export default function Backtest() {
                   body: JSON.stringify({ days_to_keep: 30 }),
                 })
                 showToast.success('Old runs purged (retention 30 days)')
-                loadJobs()
+                loadJobs({ all: true })
               }}
             >
               <Trash2 className="h-4 w-4" /> Purge runs older than 30 days
