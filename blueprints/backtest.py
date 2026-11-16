@@ -9,13 +9,15 @@ import pytz
 from flask import Blueprint, jsonify, render_template_string, request
 
 from database.backtest_db import (
-    BacktestEquityCurve,
     BacktestOptimization,
     BacktestRun,
     BacktestStrategy,
     BacktestTrade,
     cleanup_old_runs,
     db_session,
+    delete_equity_curves,
+    load_equity_curve,
+    reclaim_space,
 )
 from database.historify_db import (
     get_available_symbols,
@@ -49,16 +51,38 @@ backtest_bp = Blueprint("backtest_api", __name__, url_prefix="/backtest/api")
 # Server-side cap for equity curves on the batch overlay — 7 timeframes of 1m
 # over a year is ~500k raw points, far too heavy for one chart request.
 MAX_CURVE_POINTS = 2000
+# /results and /compare cap; pass ?full=1 to /results for every point.
+RESULTS_CURVE_POINTS = 5000
 
 
 def _downsample_curve(rows: list, limit: int = MAX_CURVE_POINTS) -> list:
     """Evenly downsample a list of curve points to at most ``limit`` entries."""
-    n = len(rows)
-    if n <= limit:
+    if len(rows) <= limit:
         return rows
-    step = n / limit
-    idxs = sorted({min(n - 1, int(i * step)) for i in range(limit)} | {n - 1})
-    return [rows[i] for i in idxs]
+    return [rows[i] for i in _downsample_indices(len(rows), limit)]
+
+
+def _downsample_indices(n: int, limit: int) -> list[int]:
+    """Positions of at most ``limit`` evenly spaced points out of ``n`` (last always kept)."""
+    if n <= limit:
+        return list(range(n))
+    step = (n - 1) / (limit - 1) if limit > 1 else n
+    return sorted({min(n - 1, int(i * step)) for i in range(limit - 1)} | {n - 1})
+
+
+def _equity_points(curve: dict, fields: tuple[str, ...], limit: int | None) -> list[dict]:
+    """Row dicts for the chart, downsampled BEFORE any per-point object is built."""
+    n = len(curve["timestamp"])
+    idxs = range(n) if limit is None else _downsample_indices(n, limit)
+    columns = {}
+    for key in fields:
+        values = curve[key]
+        if hasattr(values, "tolist"):  # numpy -> plain Python floats in one call
+            values = values[list(idxs)].tolist() if limit is not None else values.tolist()
+        else:
+            values = [values[i] for i in idxs]
+        columns[key] = values
+    return [dict(zip(fields, row, strict=True)) for row in zip(*(columns[k] for k in fields), strict=True)]
 
 
 @backtest_bp.route("/catalog", methods=["GET"])
@@ -217,7 +241,16 @@ def list_jobs():
     """Returns list of past backtest runs with summary metadata."""
     session = db_session()
     try:
-        runs = session.query(BacktestRun).order_by(BacktestRun.created_at.desc()).all()
+        limit = min(2000, max(1, request.args.get("limit", 500, type=int)))
+        offset = max(0, request.args.get("offset", 0, type=int))
+        total = session.query(BacktestRun.job_id).count()
+        runs = session.query(
+            BacktestRun.job_id, BacktestRun.name, BacktestRun.status, BacktestRun.symbols,
+            BacktestRun.exchange, BacktestRun.interval, BacktestRun.start_date, BacktestRun.end_date,
+            BacktestRun.initial_capital, BacktestRun.created_at, BacktestRun.completed_at,
+            BacktestRun.metrics_json, BacktestRun.batch_id, BacktestRun.batch_name,
+            BacktestRun.batch_seq, BacktestRun.error_message,
+        ).order_by(BacktestRun.created_at.desc()).limit(limit).offset(offset).all()
         results = []
         for r in runs:
             metrics = json.loads(r.metrics_json) if r.metrics_json else {}
@@ -243,7 +276,7 @@ def list_jobs():
                 "batch_seq": r.batch_seq or 0,
                 "error_message": r.error_message,
             })
-        return jsonify({"status": "success", "jobs": results})
+        return jsonify({"status": "success", "jobs": results, "total": total})
     except Exception as e:
         logger.exception(f"Error listing backtest jobs: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -372,26 +405,14 @@ def get_batch_curves(batch_id):
 
         curves = []
         for r in runs:
-            eq_rows = (
-                session.query(BacktestEquityCurve)
-                .filter_by(job_id=r.job_id)
-                .order_by(BacktestEquityCurve.id.asc())
-                .all()
-            )
-            points = [
-                {
-                    "timestamp": eq.timestamp,
-                    "equity": eq.equity,
-                    "drawdown_pct": eq.drawdown_pct,
-                }
-                for eq in eq_rows
-            ]
+            curve = load_equity_curve(session, r.job_id)
+            points = _equity_points(curve, ("timestamp", "equity", "drawdown_pct"), 2000) if curve else []
             curves.append({
                 "job_id": r.job_id,
                 "interval": r.interval,
                 "batch_seq": r.batch_seq or 0,
                 "status": r.status,
-                "points": _downsample_curve(points),
+                "points": points,
             })
 
         return jsonify({"status": "success", "batch_id": batch_id, "curves": curves})
@@ -429,10 +450,11 @@ def delete_batch(batch_id):
         # Stop anything still running or queued first: a live pipeline holds its
         # own session and would keep writing rows back after the delete.
         cancel_batch(batch_id)
-        session.query(BacktestEquityCurve).filter(BacktestEquityCurve.job_id.in_(job_ids)).delete(synchronize_session=False)
+        delete_equity_curves(session, job_ids)
         session.query(BacktestTrade).filter(BacktestTrade.job_id.in_(job_ids)).delete(synchronize_session=False)
         session.query(BacktestRun).filter(BacktestRun.batch_id == batch_id).delete(synchronize_session=False)
         session.commit()
+        reclaim_space()
         return jsonify({"status": "success", "message": f"Batch {batch_id} and {len(job_ids)} runs deleted successfully"})
     except Exception as e:
         session.rollback()
@@ -501,10 +523,11 @@ def delete_job(job_id):
         # Stop the run before removing its rows, otherwise the live pipeline
         # keeps its own session open and writes status back after the delete.
         cancel_job(job_id)
-        session.query(BacktestEquityCurve).filter_by(job_id=job_id).delete()
+        delete_equity_curves(session, [job_id])
         session.query(BacktestTrade).filter_by(job_id=job_id).delete()
         session.query(BacktestRun).filter_by(job_id=job_id).delete()
         session.commit()
+        reclaim_space()
         return jsonify({"status": "success", "message": f"Job {job_id} deleted successfully"})
     except Exception as e:
         session.rollback()
@@ -541,14 +564,18 @@ def get_results(job_id):
         metrics = json.loads(run.metrics_json) if run.metrics_json else {}
 
         # Fetch Equity Curve
-        eq_rows = session.query(BacktestEquityCurve).filter_by(job_id=job_id).order_by(BacktestEquityCurve.id.asc()).all()
-        equity_curve = [{
-            "timestamp": eq.timestamp,
-            "equity": eq.equity,
-            "drawdown_pct": eq.drawdown_pct,
-            "cash": eq.cash,
-            "positions_value": eq.positions_value,
-        } for eq in eq_rows]
+        curve = load_equity_curve(session, job_id)
+        full = request.args.get("full") == "1"
+        equity_points_total = len(curve["timestamp"]) if curve else 0
+        equity_curve = (
+            _equity_points(
+                curve,
+                ("timestamp", "equity", "drawdown_pct", "cash", "positions_value"),
+                None if full else RESULTS_CURVE_POINTS,
+            )
+            if curve
+            else []
+        )
 
         # Fetch Trades Log
         trade_rows = session.query(BacktestTrade).filter_by(job_id=job_id).order_by(BacktestTrade.id.asc()).all()
@@ -581,6 +608,7 @@ def get_results(job_id):
             interval=run.interval,
             initial_capital=run.initial_capital,
         )
+        benchmark_curve = benchmark_curve if full else _downsample_curve(benchmark_curve, RESULTS_CURVE_POINTS)
 
         return jsonify({
             "status": "success",
@@ -590,6 +618,8 @@ def get_results(job_id):
             "equity_curve": equity_curve,
             "trades": trades,
             "benchmark_curve": benchmark_curve,
+            "equity_points_total": equity_points_total,
+            "equity_downsampled": len(equity_curve) < equity_points_total,
         })
     except Exception as e:
         logger.exception(f"Error fetching results for job {job_id}: {e}")
@@ -616,8 +646,8 @@ def compare_jobs():
                 continue
             metrics = json.loads(run.metrics_json) if run.metrics_json else {}
 
-            eq_rows = session.query(BacktestEquityCurve).filter_by(job_id=jid).order_by(BacktestEquityCurve.id.asc()).all()
-            equity_curve = [{"timestamp": eq.timestamp, "equity": eq.equity} for eq in eq_rows]
+            curve = load_equity_curve(session, jid)
+            equity_curve = _equity_points(curve, ("timestamp", "equity"), RESULTS_CURVE_POINTS) if curve else []
 
             comparison_results.append({
                 "job_id": jid,
@@ -974,6 +1004,7 @@ def delete_optimization(opt_id):
             return jsonify({"status": "error", "message": "Cancel it before deleting"}), 409
         session.delete(rec)
         session.commit()
+        reclaim_space()
         return jsonify({"status": "success"})
     except Exception as e:
         session.rollback()
@@ -1033,15 +1064,12 @@ def get_analytics(job_id):
         run = session.query(BacktestRun).filter_by(job_id=job_id).first()
         if not run:
             return jsonify({"status": "error", "message": "Job not found"}), 404
-        eq_rows = (
-            session.query(BacktestEquityCurve).filter_by(job_id=job_id)
-            .order_by(BacktestEquityCurve.id.asc()).all()
-        )
-        if not eq_rows:
+        curve = load_equity_curve(session, job_id)
+        if not curve:
             return jsonify({"status": "error", "message": "Run has no equity curve yet"}), 409
-        idx = pd.to_datetime([r.timestamp for r in eq_rows])
-        equity = pd.Series([r.equity for r in eq_rows], index=idx)
-        positions = pd.Series([r.positions_value for r in eq_rows], index=idx)
+        idx = pd.to_datetime(curve["timestamp"])
+        equity = pd.Series(curve["equity"], index=idx)
+        positions = pd.Series(curve["positions_value"], index=idx)
         ppy = periods_per_year_for_interval(run.interval)
         return jsonify({
             "status": "success",

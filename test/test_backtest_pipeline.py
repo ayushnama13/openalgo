@@ -22,11 +22,13 @@ import database.backtest_db as bdb
 import services.backtest_fill_engine as fill
 import services.backtest_service as svc
 from database.backtest_db import (
+    BacktestEquityBlob,
     BacktestEquityCurve,
     BacktestRun,
     BacktestTrade,
     cleanup_old_runs,
     db_session,
+    load_equity_curve,
 )
 from services.backtest_analytics import periods_per_year_for_interval
 
@@ -36,6 +38,7 @@ def _isolated_backtest_db():
     bdb.init_backtest_db()
     session = db_session()
     session.query(BacktestEquityCurve).delete()
+    session.query(BacktestEquityBlob).delete()
     session.query(BacktestTrade).delete()
     session.query(BacktestRun).delete()
     session.commit()
@@ -43,6 +46,7 @@ def _isolated_backtest_db():
     yield
     session = db_session()
     session.query(BacktestEquityCurve).delete()
+    session.query(BacktestEquityBlob).delete()
     session.query(BacktestTrade).delete()
     session.query(BacktestRun).delete()
     session.commit()
@@ -366,14 +370,14 @@ def strategy(df):
 
     assert status == "completed", f"status={status}"
     trades = db_session().query(BacktestTrade).filter_by(job_id=job_id).count()
-    curve = db_session().query(BacktestEquityCurve).filter_by(job_id=job_id).count()
+    curve = load_equity_curve(db_session(), job_id)
     metrics = json.loads(
         db_session().query(BacktestRun).filter_by(job_id=job_id).first().metrics_json or "{}"
     )
     db_session.remove()
 
     assert trades > 0
-    assert curve == 200
+    assert len(curve["timestamp"]) == 200
     assert metrics["total_trades"] == trades
     assert "monthly_heatmap" in metrics
 
@@ -488,10 +492,7 @@ def test_start_backtest_batch_fan_out(monkeypatch):
     # sibling names disambiguate the timeframe
     assert [r.name for r in runs] == ["mtf sweep (1m)", "mtf sweep (5m)", "mtf sweep (1h)"]
     assert all(r.metrics_json and "avg_holding_minutes" in r.metrics_json for r in runs)
-    session.query(BacktestEquityCurve).filter(
-        BacktestEquityCurve.job_id.in_([r.job_id for r in runs])
-    ).count()
-    assert session.query(BacktestEquityCurve).count() == 150 * 3
+    assert sum(len(load_equity_curve(session, r.job_id)["timestamp"]) for r in runs) == 150 * 3
     db_session.remove()
 
 

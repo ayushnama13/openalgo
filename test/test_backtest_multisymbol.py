@@ -13,16 +13,19 @@ os.environ.setdefault("BACKTEST_DATABASE_URL", "sqlite:////tmp/opencode/backtest
 import database.backtest_db as bdb
 import services.backtest_service as svc
 from database.backtest_db import (
+    BacktestEquityBlob,
     BacktestEquityCurve,
     BacktestRun,
     BacktestTrade,
     db_session,
+    load_equity_curve,
 )
 
 
 def _clear():
     s = db_session()
     s.query(BacktestEquityCurve).delete()
+    s.query(BacktestEquityBlob).delete()
     s.query(BacktestTrade).delete()
     s.query(BacktestRun).delete()
     s.commit()
@@ -131,9 +134,9 @@ def test_event_strategy_class_multi_symbol(three_symbols):
     assert status == "completed", run.error_message
     s = db_session()
     n_trades = s.query(BacktestTrade).filter_by(job_id=job_id).count()
-    curve = s.query(BacktestEquityCurve).filter_by(job_id=job_id).count()
+    curve = load_equity_curve(s, job_id)
     assert n_trades > 0
-    assert curve == 120
+    assert len(curve["timestamp"]) == 120
     metrics = json.loads(run.metrics_json)
     assert metrics["total_trades"] == n_trades
     db_session.remove()

@@ -194,7 +194,7 @@ def mode_engine(job, workdir, code, pd, np, ta):
 
     pd.DataFrame(result.trades, columns=_TRADE_COLS).to_json(
         os.path.join(workdir, "trades.json"), orient="records")
-    pd.DataFrame(result.equity).to_json(os.path.join(workdir, "equity.json"), orient="records")
+    _write(pd.DataFrame(result.equity), os.path.join(workdir, "equity." + job["fmt"]), job["fmt"])
     with open(os.path.join(workdir, "meta.json"), "w") as fh:
         json.dump({"notes": result.notes, "logs": result.logs,
                    "rejections": result.rejections, "cancelled": result.cancelled}, fh)

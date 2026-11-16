@@ -1,6 +1,9 @@
 # services/backtest_analytics.py
 
 import math
+import threading
+import time
+from collections import OrderedDict
 from typing import Any, Optional
 
 import numpy as np
@@ -18,6 +21,10 @@ logger = get_logger(__name__)
 # which makes cross-timeframe comparison meaningless.
 _TRADING_MINUTES_PER_DAY = 375.0
 _TRADING_DAYS_PER_YEAR = 252.0
+_BENCHMARK_CACHE = OrderedDict()
+_BENCHMARK_CACHE_LOCK = threading.Lock()
+_BENCHMARK_CACHE_TTL = 600
+_BENCHMARK_CACHE_MAX = 32
 
 
 def periods_per_year_for_interval(interval: str | None) -> float:
@@ -273,6 +280,15 @@ def get_benchmark_comparison(
     """
     Retrieves benchmark OHLCV and returns benchmark equity curve aligned with initial capital.
     """
+    key = (start_time_epoch, end_time_epoch, interval, float(initial_capital), benchmark_symbol, benchmark_exchange)
+    now = time.monotonic()
+    with _BENCHMARK_CACHE_LOCK:
+        cached = _BENCHMARK_CACHE.get(key)
+        if cached and now - cached[0] < _BENCHMARK_CACHE_TTL:
+            _BENCHMARK_CACHE.move_to_end(key)
+            return [dict(row) for row in cached[1]]
+        if cached:
+            _BENCHMARK_CACHE.pop(key, None)
     try:
         bench_df = get_ohlcv(
             symbol=benchmark_symbol,
@@ -307,7 +323,12 @@ def get_benchmark_comparison(
                 "timestamp": ts,
                 "benchmark_equity": round(float(eq), 2),
             })
-        return results
+        with _BENCHMARK_CACHE_LOCK:
+            _BENCHMARK_CACHE[key] = (now, results)
+            _BENCHMARK_CACHE.move_to_end(key)
+            while len(_BENCHMARK_CACHE) > _BENCHMARK_CACHE_MAX:
+                _BENCHMARK_CACHE.popitem(last=False)
+        return [dict(row) for row in results]
     except Exception as e:
         logger.exception(f"Error fetching benchmark comparison: {e}")
         return []

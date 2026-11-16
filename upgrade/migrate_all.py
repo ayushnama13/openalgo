@@ -75,6 +75,7 @@ MIGRATIONS = [
     ("migrate_depth_sessions.py", "Depth Recorder Daily Session Summaries"),
     ("migrate_backtest_batch.py", "Backtest Batch Multi-Timeframe Grouping"),
     ("migrate_backtest_engine_v2.py", "Backtest Engine Reproducibility & MAE/MFE Columns"),
+    ("migrate_backtest_storage.py", "Backtest Equity Blob Storage & Space Reclaim"),
     ("migrate_replay_storage.py", "Replay Mode Storage Indexes & Auto-Record List"),
 ]
 

@@ -17,11 +17,11 @@ import pandas as pd
 import pytz
 
 from database.backtest_db import (
-    BacktestEquityCurve,
     BacktestRun,
     BacktestStrategy,
     BacktestTrade,
     db_session,
+    save_equity_curve,
 )
 from database.historify_db import (
     get_data_range,
@@ -466,6 +466,7 @@ def run_backtest_pipeline(
                 engine_cfg,
                 cancel_event=cancel_event,
                 progress_cb=_on_progress,
+                equity_as="frame",
             )
         except BacktestCancelled:
             run_record.status = "cancelled"
@@ -476,13 +477,13 @@ def run_backtest_pipeline(
 
         run_notes.extend(out["notes"])
         trades_list: list[dict[str, Any]] = [{"job_id": job_id, **t} for t in out["trades"]]
-        equity_records: list[dict[str, Any]] = [{"job_id": job_id, **e} for e in out["equity"]]
-        current_equity = equity_records[-1]["equity"]
+        equity_frame = out["equity"]
+        current_equity = float(equity_frame["equity"].iloc[-1])
 
         # Save Trade and Equity Records to DB
         equity_series = pd.Series(
-            data=[e["equity"] for e in equity_records],
-            index=pd.to_datetime([e["timestamp"] for e in equity_records]),
+            data=equity_frame["equity"].to_numpy(dtype="float64"),
+            index=pd.to_datetime(equity_frame["timestamp"]),
         )
 
         # Calculate metrics
@@ -496,23 +497,14 @@ def run_backtest_pipeline(
         cummax = equity_series.cummax()
         drawdowns = ((equity_series - cummax) / cummax) * 100.0
 
-        equity_objs = []
-        for eq_rec, dd in zip(equity_records, drawdowns, strict=True):
-            equity_objs.append(BacktestEquityCurve(
-                job_id=job_id,
-                timestamp=eq_rec["timestamp"],
-                equity=eq_rec["equity"],
-                drawdown_pct=round(float(dd), 2),
-                cash=eq_rec["cash"],
-                positions_value=eq_rec["positions_value"],
-            ))
-
-        trade_objs = [
-            BacktestTrade(**{k: v for k, v in t.items() if k in _TRADE_COLUMNS}) for t in trades_list
-        ]
-
-        session.bulk_save_objects(equity_objs)
-        session.bulk_save_objects(trade_objs)
+        save_equity_curve(
+            session, job_id, equity_frame["timestamp"].tolist(),
+            equity_frame["equity"].to_numpy(), np.round(drawdowns.to_numpy(), 2),
+            equity_frame["cash"].to_numpy(), equity_frame["positions_value"].to_numpy(),
+        )
+        session.bulk_insert_mappings(
+            BacktestTrade, [{k: v for k, v in t.items() if k in _TRADE_COLUMNS} for t in trades_list]
+        )
 
         run_record.status = "completed"
         run_record.completed_at = datetime.now(pytz.timezone("Asia/Kolkata"))

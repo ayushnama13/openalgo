@@ -1,5 +1,6 @@
 # database/backtest_db.py
 
+import io
 import json
 import os
 from datetime import datetime, timedelta
@@ -11,6 +12,7 @@ from sqlalchemy import (
     Float,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     create_engine,
@@ -110,6 +112,14 @@ class BacktestEquityCurve(Base):
     positions_value = Column(Float, nullable=False, default=0.0)
 
 
+class BacktestEquityBlob(Base):
+    __tablename__ = "backtest_equity_blob"
+
+    job_id = Column(String(64), primary_key=True)
+    n_points = Column(Integer, nullable=False)
+    data = Column(LargeBinary, nullable=False)
+
+
 class BacktestOptimization(Base):
     """A parameter sweep or walk-forward study over one strategy."""
 
@@ -139,15 +149,120 @@ class BacktestStrategy(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Asia/Kolkata")), onupdate=lambda: datetime.now(pytz.timezone("Asia/Kolkata")))
 
 
-# Create index on job_id for performance
-Index("idx_backtest_trades_job_id", BacktestTrade.job_id)
-Index("idx_backtest_equity_job_id", BacktestEquityCurve.job_id)
+# Create index on batch_id for performance
 Index("idx_backtest_runs_batch_id", BacktestRun.batch_id)
+
+
+def _wall_clock_seconds(timestamps):
+    """Encode naive IST 'YYYY-MM-DD HH:MM:SS' wall-clock stamps as int64 epoch seconds.
+
+    Vectorised: a 1m run over a few years is ~500k points, and a per-element
+    conversion costs seconds.
+    """
+    import pandas as pd
+
+    idx = pd.DatetimeIndex(pd.to_datetime(list(timestamps)))
+    if idx.tz is None:
+        idx = idx.tz_localize("Asia/Kolkata")
+    epoch = pd.Timestamp("1970-01-01", tz="UTC")
+    return ((idx - epoch) // pd.Timedelta(seconds=1)).to_numpy(dtype="int64")
+
+
+def save_equity_curve(session, job_id, timestamps, equity, drawdown_pct, cash, positions_value):
+    """Store one run's equity curve as a single compressed row (does not commit)."""
+    import numpy as np
+
+    ts = _wall_clock_seconds(timestamps)
+    arrays = {
+        "ts": ts,
+        "equity": np.asarray(equity, dtype=np.float64),
+        "drawdown_pct": np.asarray(drawdown_pct, dtype=np.float64),
+        "cash": np.asarray(cash, dtype=np.float64),
+        "positions_value": np.asarray(positions_value, dtype=np.float64),
+    }
+    if any(len(a) != len(ts) for a in arrays.values()):
+        raise ValueError("equity curve arrays must all have the same length")
+    payload = io.BytesIO()
+    np.savez_compressed(payload, **arrays)
+    session.merge(BacktestEquityBlob(job_id=job_id, n_points=len(ts), data=payload.getvalue()))
+
+
+def load_equity_curve(session, job_id):
+    """Return one run's curve as {"timestamp": [str], "equity"/...: ndarray}, or None.
+
+    Reads the compressed blob; runs stored before the blob format fall back to
+    the legacy one-row-per-bar table.
+    """
+    import numpy as np
+    import pandas as pd
+
+    blob = session.query(BacktestEquityBlob).filter_by(job_id=job_id).first()
+    if blob:
+        with np.load(io.BytesIO(blob.data), allow_pickle=False) as loaded:
+            return {
+                "timestamp": pd.to_datetime(loaded["ts"], unit="s", utc=True).tz_convert("Asia/Kolkata").tz_localize(None).strftime("%Y-%m-%d %H:%M:%S").tolist(),
+                **{key: loaded[key].copy() for key in ("equity", "drawdown_pct", "cash", "positions_value")},
+            }
+    rows = session.query(
+        BacktestEquityCurve.timestamp, BacktestEquityCurve.equity,
+        BacktestEquityCurve.drawdown_pct, BacktestEquityCurve.cash,
+        BacktestEquityCurve.positions_value,
+    ).filter_by(job_id=job_id).order_by(BacktestEquityCurve.id.asc()).all()
+    if not rows:
+        return None
+    return {
+        "timestamp": [r.timestamp for r in rows],
+        **{key: np.asarray([getattr(r, key) for r in rows], dtype=np.float64)
+           for key in ("equity", "drawdown_pct", "cash", "positions_value")},
+    }
+
+
+def delete_equity_curves(session, job_ids):
+    if not job_ids:
+        return
+    session.query(BacktestEquityBlob).filter(BacktestEquityBlob.job_id.in_(job_ids)).delete(synchronize_session=False)
+    session.query(BacktestEquityCurve).filter(BacktestEquityCurve.job_id.in_(job_ids)).delete(synchronize_session=False)
+
+
+def reclaim_space(max_pages: int = 4000):
+    """Hand up to ``max_pages`` free pages back to the filesystem (SQLite only).
+
+    Needs ``auto_vacuum = INCREMENTAL`` (set by init_backtest_db on new files
+    and by upgrade/migrate_backtest_storage.py on existing ones); otherwise it
+    is a harmless no-op. Never raises.
+    """
+    if not BACKTEST_DATABASE_URL.startswith("sqlite"):
+        return
+    pages = max(0, int(max_pages))
+    if pages == 0:
+        return
+    try:
+        raw = engine.raw_connection()
+        try:
+            cursor = raw.cursor()
+            # The pragma frees ONE page per statement step: it only reaches
+            # max_pages if the cursor is driven to completion.
+            cursor.execute(f"PRAGMA incremental_vacuum({pages})")
+            cursor.fetchall()
+            cursor.close()
+            raw.commit()
+        finally:
+            raw.close()
+    except Exception:
+        logger.exception("Failed to reclaim backtest database space")
 
 
 def init_backtest_db():
     """Initialize backtest database tables."""
     try:
+        if BACKTEST_DATABASE_URL.startswith("sqlite"):
+            db_path = engine.url.database
+            is_new_file = not db_path or db_path == ":memory:" or not os.path.exists(db_path) or os.path.getsize(db_path) == 0
+            with engine.connect() as conn:
+                if is_new_file:
+                    conn.exec_driver_sql("PRAGMA auto_vacuum=INCREMENTAL")
+                    conn.exec_driver_sql("VACUUM")
+                conn.commit()
         Base.metadata.create_all(bind=engine)
         logger.info("Initialized backtest database schema successfully.")
     except Exception as e:
@@ -170,10 +285,11 @@ def cleanup_old_runs(days_to_keep=30):
         old_runs = session.query(BacktestRun.job_id).filter(BacktestRun.created_at < cutoff_date).all()
         job_ids = [run.job_id for run in old_runs]
         if job_ids:
-            session.query(BacktestEquityCurve).filter(BacktestEquityCurve.job_id.in_(job_ids)).delete(synchronize_session=False)
+            delete_equity_curves(session, job_ids)
             session.query(BacktestTrade).filter(BacktestTrade.job_id.in_(job_ids)).delete(synchronize_session=False)
             session.query(BacktestRun).filter(BacktestRun.job_id.in_(job_ids)).delete(synchronize_session=False)
             session.commit()
+            reclaim_space()
             logger.info(f"Cleaned up {len(job_ids)} backtest runs older than {days_to_keep} days.")
     except Exception as e:
         session.rollback()

@@ -169,6 +169,7 @@ def run_backtest_sandboxed(
     mem_mb: int = 4096,
     cancel_event=None,
     progress_cb: Callable[[float, str, float, int], None] | None = None,
+    equity_as: str = "records",
 ) -> dict:
     """Run the multi-symbol engine on ``bars`` ({'NSE:SBIN': ohlcv frame}) in the sandbox.
 
@@ -192,9 +193,14 @@ def run_backtest_sandboxed(
         _run_child(tmp, job, strategy_code, timeout_s, cancel_event, _on_progress)
         meta = json.loads(Path(tmp, "meta.json").read_text())
         trades = json.loads(Path(tmp, "trades.json").read_text())
-        equity = json.loads(Path(tmp, "equity.json").read_text())
-    if not equity:
+        equity_path = Path(tmp, "equity." + fmt)
+        equity = pd.read_parquet(equity_path) if fmt == "parquet" else pd.read_csv(equity_path)
+    if equity.empty:
         raise ValueError("Backtest produced no equity curve")
+    if equity_as == "records":
+        equity = equity.to_dict(orient="records")
+    elif equity_as != "frame":
+        raise ValueError("equity_as must be 'records' or 'frame'")
     return {"trades": trades, "equity": equity, **meta}
 
 
