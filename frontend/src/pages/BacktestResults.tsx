@@ -410,7 +410,8 @@ function SingleResultsView({
     )
   }
 
-  const tradingDays = result.equity_curve.length ?? 0
+  // The chart curve is downsampled server-side; the bar count comes from the full run.
+  const tradingDays = result.equity_points_total ?? result.equity_curve.length ?? 0
 
   return (
     <div className="space-y-6">

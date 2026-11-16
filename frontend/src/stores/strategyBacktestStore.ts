@@ -66,6 +66,9 @@ export interface ResultsData {
   equity_curve: EquityPoint[]
   trades: BacktestTrade[]
   benchmark_curve: BenchmarkPoint[]
+  /** Bars in the full run; equity_curve is downsampled for charting past 5000 points. */
+  equity_points_total?: number
+  equity_downsampled?: boolean
 }
 
 export interface FullJobDetails {
