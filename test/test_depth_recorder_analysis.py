@@ -60,8 +60,7 @@ def _seed_session(n: int = 120, start: datetime | None = None, step_s: int = 1, 
         _tick(start + timedelta(seconds=i * step_s), ltp=2500.0 + (i % 5) * 0.05, **kw)
         for i in range(n)
     ]
-    drdb.db_session.bulk_insert_mappings(drdb.DepthTick, ticks)
-    drdb.db_session.commit()
+    drdb.batch_save_ticks(ticks)
 
 
 @pytest.fixture(autouse=True)
