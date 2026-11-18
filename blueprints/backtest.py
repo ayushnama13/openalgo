@@ -287,6 +287,58 @@ def cancel_backtest(job_id):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@backtest_bp.route("/cancel-active", methods=["POST"])
+@check_session_validity
+def cancel_active_backtests():
+    """Requests cancellation for every pending or running backtest."""
+    session = db_session()
+    try:
+        rows = session.query(BacktestRun.job_id, BacktestRun.batch_id).filter(
+            BacktestRun.status.in_(["pending", "running"])
+        ).all()
+    except Exception as e:
+        logger.exception(f"Error finding active backtest jobs: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db_session.remove()
+
+    jobs_by_batch = {}
+    standalone_jobs = []
+    for job_id, batch_id in rows:
+        if batch_id:
+            jobs_by_batch.setdefault(batch_id, []).append(job_id)
+        else:
+            standalone_jobs.append(job_id)
+
+    cancelled_jobs = set()
+    failed = []
+    for batch_id, job_ids in jobs_by_batch.items():
+        try:
+            cancelled_jobs.update(cancel_batch(batch_id))
+        except Exception as e:
+            logger.exception(f"Error cancelling active backtest batch {batch_id}: {e}")
+            failed.extend(job_ids)
+    for job_id in standalone_jobs:
+        try:
+            if cancel_job(job_id):
+                cancelled_jobs.add(job_id)
+            else:
+                failed.append(job_id)
+        except Exception as e:
+            logger.exception(f"Error cancelling active backtest job {job_id}: {e}")
+            failed.append(job_id)
+
+    eligible_jobs = {job_id for job_id, _ in rows}
+    cancelled_jobs.intersection_update(eligible_jobs)
+    failed.extend(job_id for job_id, batch_id in rows if batch_id and job_id not in cancelled_jobs and job_id not in failed)
+    return jsonify({
+        "status": "success",
+        "requested": len(rows),
+        "cancelled": len(cancelled_jobs),
+        "failed": failed,
+    })
+
+
 @backtest_bp.route("/jobs", methods=["GET"])
 @check_session_validity
 def list_jobs():
@@ -652,7 +704,13 @@ def delete_job(job_id):
 def cleanup_runs():
     """Purges old backtest runs according to retention policy."""
     data = request.get_json() or {}
-    days_to_keep = int(data.get("days_to_keep", 30))
+    raw_days_to_keep = data.get("days_to_keep", 30)
+    try:
+        days_to_keep = int(raw_days_to_keep)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "days_to_keep must be an integer greater than or equal to 1"}), 400
+    if isinstance(raw_days_to_keep, bool) or (isinstance(raw_days_to_keep, float) and not raw_days_to_keep.is_integer()) or days_to_keep < 1:
+        return jsonify({"status": "error", "message": "days_to_keep must be an integer greater than or equal to 1"}), 400
     try:
         cleanup_old_runs(days_to_keep=days_to_keep)
         return jsonify({"status": "success", "message": f"Cleaned up backtest runs older than {days_to_keep} days"})
@@ -801,7 +859,14 @@ def generate_tearsheet(batch_or_job_id):
             return jsonify({"status": "error", "message": "Job not found"}), 404
 
         metrics = json.loads(runs[0].metrics_json) if runs[0].metrics_json else {}
-        trades = session.query(BacktestTrade).filter_by(job_id=runs[0].job_id).limit(100).all()
+        trades = (
+            session.query(BacktestTrade)
+            .filter_by(job_id=runs[0].job_id)
+            .order_by(BacktestTrade.id.desc())
+            .limit(100)
+            .all()
+        )
+        trades.reverse()
         runs_view = [
             {
                 "job_id": r.job_id,

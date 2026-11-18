@@ -767,6 +767,89 @@ def test_backtest_routes_reject_anonymous_requests():
     assert checked >= len(rules)
 
 
+def _authenticated_backtest_client():
+    from datetime import datetime
+
+    from flask import Flask
+
+    from blueprints.backtest import backtest_bp
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.config["WTF_CSRF_ENABLED"] = False
+    app.register_blueprint(backtest_bp)
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["logged_in"] = True
+        sess["login_time"] = datetime.now(UTC).isoformat()
+    return client
+
+
+def test_tearsheet_returns_latest_100_trades_in_ascending_order():
+    session = db_session()
+    session.add(BacktestRun(
+        job_id="bt_tearsheet_latest", strategy_code="", symbols="[]",
+        name="Tearsheet", metrics_json="{}",
+    ))
+    session.add_all([
+        BacktestTrade(
+            job_id="bt_tearsheet_latest", symbol="TEST", action="BUY",
+            entry_time=f"trade-{i:03d}", entry_price=1, exit_time="exit",
+            exit_price=1, quantity=1, pnl=0, pnl_pct=0,
+        )
+        for i in range(150)
+    ])
+    session.commit()
+    db_session.remove()
+
+    response = _authenticated_backtest_client().get("/backtest/api/tearsheet/bt_tearsheet_latest")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "trade-000" not in html
+    assert "trade-050" in html
+    assert "trade-149" in html
+    assert html.index("trade-050") < html.index("trade-149")
+
+
+@pytest.mark.parametrize("days_to_keep", ["many", 0])
+def test_cleanup_route_rejects_invalid_days_to_keep(days_to_keep):
+    response = _authenticated_backtest_client().post(
+        "/backtest/api/cleanup", json={"days_to_keep": days_to_keep}
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["status"] == "error"
+
+
+def test_cancel_active_route_cancels_all_active_jobs(monkeypatch):
+    session = db_session()
+    session.add_all([
+        BacktestRun(
+            job_id=f"bt_old_pending_{i}", strategy_code="", symbols="[]",
+            status="pending",
+        )
+        for i in range(2)
+    ])
+    session.commit()
+    db_session.remove()
+    cancelled = []
+    import blueprints.backtest as backtest_routes
+
+    monkeypatch.setattr(backtest_routes, "cancel_job", lambda job_id: cancelled.append(job_id) or True)
+
+    response = _authenticated_backtest_client().post("/backtest/api/cancel-active", json={})
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "status": "success",
+        "requested": 2,
+        "cancelled": 2,
+        "failed": [],
+    }
+    assert set(cancelled) == {"bt_old_pending_0", "bt_old_pending_1"}
+
+
 def test_load_run_bars_forward_fill_drops_leading_nulls(monkeypatch):
     bars = make_bars(3)
     bars.loc[0, ["open", "high", "low", "close"]] = np.nan
