@@ -77,6 +77,7 @@ MIGRATIONS = [
     ("migrate_backtest_engine_v2.py", "Backtest Engine Reproducibility & MAE/MFE Columns"),
     ("migrate_backtest_storage.py", "Backtest Equity Blob Storage & Space Reclaim"),
     ("migrate_backtest_universe.py", "Backtest Universe Mode & Run Notes"),
+    ("migrate_backtest_strategy_settings.py", "Backtest Strategy Template Settings"),
     ("migrate_replay_storage.py", "Replay Mode Storage Indexes & Auto-Record List"),
 ]
 

@@ -153,6 +153,7 @@ class BacktestStrategy(Base):
     name = Column(String(128), nullable=False)
     description = Column(Text, nullable=True)
     strategy_code = Column(Text, nullable=False)
+    settings_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Asia/Kolkata")))
     updated_at = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Asia/Kolkata")), onupdate=lambda: datetime.now(pytz.timezone("Asia/Kolkata")))
 
