@@ -826,3 +826,31 @@ def test_end_of_backtest_auto_closes_open_position(monkeypatch):
     assert len(trades) == 1
     assert trades[0].exit_reason == "End of Backtest"
     db_session.remove()
+
+
+def test_track_future_forgets_a_run_that_finished_before_registration():
+    """A worker can finish before the submitter records its future; no stale entry may remain."""
+    from concurrent.futures import Future
+
+    done = Future()
+    done.set_result(None)
+    svc._track_future("race-done", done)
+    assert "race-done" not in svc._JOB_FUTURES
+
+    pending = Future()
+    svc._track_future("race-pending", pending)
+    assert svc._JOB_FUTURES["race-pending"] is pending
+    pending.set_result(None)
+    assert "race-pending" not in svc._JOB_FUTURES
+
+
+def test_track_future_keeps_a_newer_future_for_the_same_id():
+    from concurrent.futures import Future
+
+    old, new = Future(), Future()
+    svc._track_future("race-reuse", old)
+    svc._track_future("race-reuse", new)
+    old.set_result(None)
+    assert svc._JOB_FUTURES["race-reuse"] is new
+    new.cancel()
+    assert "race-reuse" not in svc._JOB_FUTURES

@@ -121,6 +121,25 @@ def unregister_active_job(job_id: str):
         _JOB_FUTURES.pop(job_id, None)
 
 
+def _track_future(job_id: str, future: Future) -> None:
+    """Remember a queued run's future until it finishes.
+
+    The worker can finish (and unregister) before the submitter gets here, so
+    removal is a done-callback, not only unregister_active_job: the callback
+    fires at once on an already-finished future, and so no stale entry is left.
+    It only removes the entry if it still holds this same future.
+    """
+
+    def _forget(done: Future) -> None:
+        with _ACTIVE_JOBS_LOCK:
+            if _JOB_FUTURES.get(job_id) is done:
+                del _JOB_FUTURES[job_id]
+
+    with _ACTIVE_JOBS_LOCK:
+        _JOB_FUTURES[job_id] = future
+    future.add_done_callback(_forget)
+
+
 def cancel_job(job_id: str) -> bool:
     """Cancels one run, whether it is already running or still queued.
 
@@ -758,8 +777,7 @@ def start_backtest_batch(
                 mode=mode,
                 **common,
             )
-            with _ACTIVE_JOBS_LOCK:
-                _JOB_FUTURES[job_id] = future
+            _track_future(job_id, future)
             jobs.append({**job_info, "status": "pending"})
 
         return {"batch_id": batch_id or jobs[0]["job_id"], "jobs": jobs, "skipped": skipped}
@@ -927,8 +945,7 @@ def start_optimization(
             unregister_active_job(opt_id)
 
     future = _BACKTEST_EXECUTOR.submit(work)
-    with _ACTIVE_JOBS_LOCK:
-        _JOB_FUTURES[opt_id] = future
+    _track_future(opt_id, future)
     return opt_id
 
 
