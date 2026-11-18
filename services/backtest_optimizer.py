@@ -182,6 +182,63 @@ def _period_sharpe(eq: np.ndarray) -> float:
     return float(r.mean() / sd) if sd > 0 else 0.0
 
 
+def rate_walk_forward(efficiency: float | None, profitable_windows: int | None,
+                      total_windows: int | None, oos_sharpe: float | None,
+                      oos_total_return_pct: float | None) -> dict:
+    """Rate a walk-forward result from already-computed aggregate metrics."""
+    reasons = []
+    checks = {
+        "efficiency": efficiency,
+        "profitable_windows": profitable_windows,
+        "total_windows": total_windows,
+        "oos_sharpe": oos_sharpe,
+    }
+    pass_checks = []
+    fail_reasons = []
+
+    if efficiency is None:
+        reasons.append("Efficiency could not be assessed because it is unavailable.")
+    elif efficiency >= 0.5:
+        reasons.append(f"Walk-forward efficiency was {efficiency:.2f} (at least 0.50).")
+        pass_checks.append(True)
+    else:
+        reasons.append(f"Walk-forward efficiency was {efficiency:.2f} (below 0.50).")
+        fail_reasons.append(efficiency < 0.3)
+        pass_checks.append(False)
+
+    if profitable_windows is None or total_windows is None or total_windows <= 0:
+        reasons.append("Profitable test windows could not be assessed because window results are unavailable.")
+        profitable_ratio = None
+    else:
+        profitable_ratio = profitable_windows / total_windows
+        reasons.append(f"{profitable_windows} of {total_windows} test windows were profitable.")
+        pass_checks.append(profitable_ratio >= 0.6)
+        fail_reasons.append(profitable_ratio < 0.4)
+
+    if oos_sharpe is None:
+        reasons.append("Out-of-sample Sharpe could not be assessed because it is unavailable.")
+    elif oos_sharpe > 0:
+        reasons.append(f"Out-of-sample Sharpe was positive ({oos_sharpe:.2f}).")
+        pass_checks.append(True)
+    else:
+        if oos_total_return_pct is None:
+            reasons.append("Out-of-sample total return could not be assessed because it is unavailable.")
+        if oos_sharpe <= 0 and oos_total_return_pct is not None and oos_total_return_pct < 0:
+            fail_reasons.append(True)
+            reasons.append("Out-of-sample Sharpe and total return were both non-positive.")
+        else:
+            reasons.append("Out-of-sample Sharpe was not positive.")
+        pass_checks.append(False)
+
+    if any(fail_reasons):
+        rating = "FAIL"
+    elif len(pass_checks) == 3 and all(pass_checks):
+        rating = "PASS"
+    else:
+        rating = "MARGINAL"
+    return {"rating": rating, "reasons": reasons, "checks": checks}
+
+
 # --------------------------------------------------------------------------
 # studies
 # --------------------------------------------------------------------------
@@ -323,6 +380,9 @@ def run_walk_forward(
     train_pct = float(spec.get("train_pct", 60))
     test_pct = float(spec.get("test_pct", 20))
     max_windows = int(spec.get("n_windows", 5))
+    window_mode = spec.get("window_mode", "rolling")
+    if window_mode not in ("rolling", "anchored"):
+        raise ValueError("window_mode must be 'rolling' or 'anchored'")
     if not (10 <= train_pct <= 90 and 5 <= test_pct <= 50 and train_pct + test_pct <= 100):
         raise ValueError("need 10<=train_pct<=90, 5<=test_pct<=50 and train_pct+test_pct<=100")
     if not 1 <= max_windows <= 20:
@@ -336,9 +396,15 @@ def run_walk_forward(
         raise ValueError("Not enough bars for the requested windows")
     windows = []
     start = 0
-    while start + train_len + test_len <= n and len(windows) < max_windows:
-        windows.append((start, start + train_len - 1, start + train_len, start + train_len + test_len - 1))
-        start += test_len
+    while len(windows) < max_windows:
+        current_train_len = train_len if not windows else (
+            train_len + len(windows) * test_len if window_mode == "anchored" else train_len
+        )
+        if start + current_train_len + test_len > n:
+            break
+        windows.append((start, start + current_train_len - 1,
+                        start + current_train_len, start + current_train_len + test_len - 1))
+        start = 0 if window_mode == "anchored" else start + test_len
     if not windows:
         raise ValueError("The window settings leave no complete train+test window")
 
@@ -438,9 +504,20 @@ def run_walk_forward(
     if rows and losing > len(rows) / 2:
         warnings.append(f"{losing} of {len(rows)} test windows lost money.")
 
+    evaluated = [r for r in rows if r.get("test_metrics") is not None]
+    assessed = [r for r in evaluated if r["test_metrics"].get("total_return_pct") is not None]
+    verdict = rate_walk_forward(
+        efficiency,
+        sum(1 for r in assessed if r["test_metrics"]["total_return_pct"] > 0) if assessed else None,
+        len(assessed) if assessed else None,
+        oos_metrics.get("sharpe_ratio") if oos_metrics else None,
+        oos_metrics.get("total_return_pct") if oos_metrics else None,
+    )
+
     return {
         "kind": "walk_forward",
         "objective": objective,
+        "window_mode": window_mode,
         "trials": len(combos),
         "windows": rows,
         "oos_metrics": oos_metrics,
@@ -452,6 +529,7 @@ def run_walk_forward(
         "deflated_sharpe": dsr,
         "param_names": list(spec["param_space"]),
         "warnings": warnings,
+        "verdict": verdict,
     }
 
 
@@ -608,6 +686,8 @@ def validate_spec(spec: dict) -> dict:
         return {**spec, "kind": kind, "multipliers": multipliers, "params": params}
     if spec.get("objective", "sharpe_ratio") not in _OBJECTIVES:
         raise ValueError(f"optimize.objective must be one of {sorted(_OBJECTIVES)}")
+    if kind == "walk_forward" and spec.get("window_mode", "rolling") not in ("rolling", "anchored"):
+        raise ValueError("optimize.window_mode must be 'rolling' or 'anchored'")
     build_param_combos(  # validates the space eagerly so bad input fails at submit time
         spec.get("param_space"), spec.get("method", "grid"),
         spec.get("max_trials", 100 if kind == "sweep" else 50), spec.get("seed", 0),
@@ -615,7 +695,10 @@ def validate_spec(spec: dict) -> dict:
     oos = spec.get("oos_pct")
     if oos is not None and not (isinstance(oos, (int, float)) and 5 <= oos <= 50):
         raise ValueError("optimize.oos_pct must be between 5 and 50")
-    return {**spec, "kind": kind}
+    normalized = {**spec, "kind": kind}
+    if kind == "walk_forward":
+        normalized["window_mode"] = spec.get("window_mode", "rolling")
+    return normalized
 
 
 def _now():

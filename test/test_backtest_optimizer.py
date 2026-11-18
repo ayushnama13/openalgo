@@ -177,6 +177,40 @@ def test_walk_forward_stitches_out_of_sample():
     assert res["oos_metrics"] is not None
     assert res["oos_equity"][0]["equity"] > 0
     assert res["walk_forward_efficiency"] is None or isinstance(res["walk_forward_efficiency"], float)
+    assert res["window_mode"] == "rolling"
+
+
+def test_walk_forward_anchored_windows_grow_from_first_timestamp():
+    bars = {"NSE:X": make_bars(900)}
+    spec = {"param_space": {"fast": [3], "slow": [15]}, "train_pct": 50,
+            "test_pct": 10, "n_windows": 3, "min_trades": 1, "window_mode": "anchored"}
+    result = optim.run_walk_forward(CODE, bars, BASE, spec, 100000.0, "15m")
+    first = make_bars(900)["timestamp"].iloc[0]
+    assert result["window_mode"] == "anchored"
+    assert all(window["train"][0] == first for window in result["windows"])
+    assert [window["train"][1] for window in result["windows"]] == sorted(
+        window["train"][1] for window in result["windows"]
+    )
+    assert result["windows"][1]["train"][1] > result["windows"][0]["train"][1]
+    assert result["windows"][2]["train"][1] > result["windows"][1]["train"][1]
+
+
+def test_walk_forward_window_mode_validation():
+    with pytest.raises(ValueError, match="window_mode"):
+        optim.validate_spec({"kind": "walk_forward", "param_space": {"x": [1]}, "window_mode": "bad"})
+    with pytest.raises(ValueError, match="window_mode"):
+        optim.run_walk_forward(CODE, {"NSE:X": make_bars()}, BASE,
+                               {"param_space": {"fast": [3]}, "window_mode": "bad"}, 1e5, "15m")
+
+
+@pytest.mark.parametrize("args, expected", [
+    ((0.7, 4, 5, 0.4, 3.0), "PASS"),
+    ((0.4, 3, 5, 0.1, 2.0), "MARGINAL"),
+    ((0.2, 1, 5, -0.1, -2.0), "FAIL"),
+    ((None, 4, 5, 0.4, 3.0), "MARGINAL"),
+])
+def test_walk_forward_verdict_helper(args, expected):
+    assert optim.rate_walk_forward(*args)["rating"] == expected
 
 
 def test_walk_forward_rejects_bad_windows():
