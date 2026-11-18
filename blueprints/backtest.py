@@ -1115,9 +1115,19 @@ def submit_optimization():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+def _opt_source_job(rec: BacktestOptimization) -> str | None:
+    """The run a robustness study was launched from, when the client recorded one."""
+    try:
+        source = (json.loads(rec.config_json or "{}").get("optimize") or {}).get("source_job_id")
+    except (ValueError, AttributeError):
+        return None
+    return source if isinstance(source, str) and len(source) <= 64 else None
+
+
 def _opt_summary(rec: BacktestOptimization) -> dict:
     return {
         "opt_id": rec.opt_id,
+        "source_job_id": _opt_source_job(rec),
         "name": rec.name,
         "kind": rec.kind,
         "status": rec.status,
