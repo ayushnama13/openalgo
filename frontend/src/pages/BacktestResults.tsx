@@ -16,6 +16,7 @@ import { FileChartColumn, Loader2, TrendingUp } from 'lucide-react'
 import type * as PlotlyTypes from 'plotly.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
+import { CompareRunsView, MAX_COMPARE } from '@/components/backtest/CompareRuns'
 import ScanResults, { SurvivorshipBanner } from '@/components/backtest/ScanResults'
 import SingleRunResults, { PLOT_CONFIG, PLOT_LAYOUT } from '@/components/backtest/SingleRunResults'
 import { Badge } from '@/components/ui/badge'
@@ -332,6 +333,25 @@ export default function BacktestResults() {
   const jobId = searchParams.get('job_id')
   const batchId = searchParams.get('batch_id')
   const tfParam = searchParams.get('tf')
+  const compareParam = searchParams.get('compare')
+
+  if (compareParam) {
+    const ids = [...new Set(compareParam.split(',').filter(Boolean))].slice(0, MAX_COMPARE)
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-foreground">Compare Runs</h1>
+            <p className="text-sm text-muted-foreground">Selected from the backtest history</p>
+          </div>
+          <Button size="sm" onClick={() => navigate('/backtest')}>
+            Back to Backtest
+          </Button>
+        </div>
+        <CompareRunsView jobIds={ids} />
+      </div>
+    )
+  }
 
   if (batchId) return <BatchResultsView batchId={batchId} initialTf={tfParam} />
 

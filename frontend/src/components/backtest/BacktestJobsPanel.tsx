@@ -10,9 +10,11 @@ import {
   Trash2,
 } from 'lucide-react'
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react'
+import { MAX_COMPARE, RunPreview } from '@/components/backtest/CompareRuns'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Dialog,
   DialogContent,
@@ -94,6 +96,8 @@ interface HistoryHandlers {
   onLoadMore(): void
   onToggleStar(job: JobSummary): void
   onEditNotes(job: JobSummary): void
+  onToggleSelect(jobId: string): void
+  onPreview(jobId: string | null): void
 }
 
 interface HistoryTableProps extends HistoryHandlers {
@@ -101,6 +105,10 @@ interface HistoryTableProps extends HistoryHandlers {
   jobCount: number
   loadingMore: boolean
   starredOnly: boolean
+  /** Runs ticked for comparison. */
+  selected: ReadonlySet<string>
+  /** Run shown in the side preview. */
+  previewId: string | null
   /** Test hook: called once per render of the table. */
   onRender?(): void
 }
@@ -122,6 +130,10 @@ const HistoryTable = memo(function HistoryTable({
   onLoadMore,
   onToggleStar,
   onEditNotes,
+  onToggleSelect,
+  onPreview,
+  selected,
+  previewId,
   onRender,
 }: HistoryTableProps) {
   onRender?.()
@@ -231,159 +243,200 @@ const HistoryTable = memo(function HistoryTable({
     </>
   )
 
+  const full = selected.size >= MAX_COMPARE
+  const selectCell = (job: JobSummary) => (
+    <TableCell className="w-8 pr-0" onClick={(e) => e.stopPropagation()}>
+      {job.status === 'completed' && (
+        <Checkbox
+          aria-label={`Select ${job.name} for comparison`}
+          checked={selected.has(job.job_id)}
+          disabled={full && !selected.has(job.job_id)}
+          onCheckedChange={() => onToggleSelect(job.job_id)}
+        />
+      )}
+    </TableCell>
+  )
+  const rowProps = (job: JobSummary) =>
+    job.status === 'completed'
+      ? {
+          className: cn(
+            'cursor-pointer',
+            previewId === job.job_id && 'bg-primary/10 hover:bg-primary/10'
+          ),
+          onClick: () => onPreview(previewId === job.job_id ? null : job.job_id),
+          title: 'Click to preview',
+        }
+      : {}
+
   return (
     <div className="space-y-3">
-      {/* Native scroll container rather than ScrollArea: Radix renders its
+      <div className={cn(previewId && 'grid gap-3 lg:grid-cols-[minmax(0,1fr)_18rem]')}>
+        {/* Native scroll container rather than ScrollArea: Radix renders its
           viewport as display:table, which shrink-wraps to content instead of
           taking the available width, so a nested overflow-x-auto never gets a
           definite width to scroll against. */}
-      <div className="max-h-[26rem] overflow-auto rounded-md border border-border">
-        <Table className="min-w-[750px]">
-          <TableHeader className="sticky top-0 z-10 bg-card">
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Symbol</TableHead>
-              <TableHead>Interval</TableHead>
-              <TableHead className="text-right">Return %</TableHead>
-              <TableHead className="text-right">Sharpe</TableHead>
-              <TableHead className="text-right">Max DD %</TableHead>
-              <TableHead className="text-right">Trades</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {groups.length === 0 && (
+        <div className="max-h-[26rem] overflow-auto rounded-md border border-border">
+          <Table className="min-w-[750px]">
+            <TableHeader className="sticky top-0 z-10 bg-card">
               <TableRow>
-                <TableCell colSpan={9} className="py-10 text-center text-muted-foreground">
-                  No backtest jobs have been submitted yet
-                </TableCell>
+                <TableHead className="w-8 pr-0">
+                  <span className="sr-only">Compare</span>
+                </TableHead>
+                <TableHead>Name</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Symbol</TableHead>
+                <TableHead>Interval</TableHead>
+                <TableHead className="text-right">Return %</TableHead>
+                <TableHead className="text-right">Sharpe</TableHead>
+                <TableHead className="text-right">Max DD %</TableHead>
+                <TableHead className="text-right">Trades</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
               </TableRow>
-            )}
-            {groups.map(({ batchId, kids }) => {
-              if (kids.length === 1) {
-                const job = kids[0]
+            </TableHeader>
+            <TableBody>
+              {groups.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={10} className="py-10 text-center text-muted-foreground">
+                    No backtest jobs have been submitted yet
+                  </TableCell>
+                </TableRow>
+              )}
+              {groups.map(({ batchId, kids }) => {
+                if (kids.length === 1) {
+                  const job = kids[0]
+                  return (
+                    <TableRow key={job.job_id} {...rowProps(job)}>
+                      {selectCell(job)}
+                      <TableCell className="font-medium">
+                        <span className="flex flex-wrap items-center gap-1.5">
+                          {job.name}
+                          <ModeBadge job={job} />
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant={statusBadgeVariant(job.status)}>{job.status}</Badge>
+                      </TableCell>
+                      <TableCell className="text-xs">{symbolsLabel(job)}</TableCell>
+                      <TableCell>{job.interval}</TableCell>
+                      {metricCells(job)}
+                      <TableCell>{rowActions(job)}</TableCell>
+                    </TableRow>
+                  )
+                }
+                const open = expanded.has(batchId)
+                const rollup = batchStatus(kids)
+                const isScan = kids[0].mode === 'scan'
+                const bestReturn = Math.max(...kids.map((k) => k.total_return_pct))
+                const worstReturn = Math.min(...kids.map((k) => k.total_return_pct))
                 return (
-                  <TableRow key={job.job_id}>
-                    <TableCell className="font-medium">
-                      <span className="flex flex-wrap items-center gap-1.5">
-                        {job.name}
-                        <ModeBadge job={job} />
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={statusBadgeVariant(job.status)}>{job.status}</Badge>
-                    </TableCell>
-                    <TableCell className="text-xs">{symbolsLabel(job)}</TableCell>
-                    <TableCell>{job.interval}</TableCell>
-                    {metricCells(job)}
-                    <TableCell>{rowActions(job)}</TableCell>
-                  </TableRow>
-                )
-              }
-              const open = expanded.has(batchId)
-              const rollup = batchStatus(kids)
-              const isScan = kids[0].mode === 'scan'
-              const bestReturn = Math.max(...kids.map((k) => k.total_return_pct))
-              const worstReturn = Math.min(...kids.map((k) => k.total_return_pct))
-              return (
-                <Fragment key={batchId}>
-                  <TableRow className="cursor-pointer bg-muted/40" onClick={() => toggle(batchId)}>
-                    <TableCell className="font-medium">
-                      <span className="flex items-center gap-1.5">
-                        {open ? (
-                          <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                        ) : (
-                          <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                        )}
-                        {kids[0].batch_name || kids[0].name}
-                        <ModeBadge job={kids[0]} />
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={statusBadgeVariant(rollup)}>{rollup}</Badge>
-                    </TableCell>
-                    <TableCell className="text-xs">
-                      {isScan ? `${kids.length} stocks` : symbolsLabel(kids[0])}
-                    </TableCell>
-                    <TableCell>{isScan ? kids[0].interval : `${kids.length} TF`}</TableCell>
-                    <TableCell className="text-right">
-                      <span className={bestReturn >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
-                        {bestReturn}%
-                      </span>
-                      <span className="ml-1 text-xs text-muted-foreground">({worstReturn}%)</span>
-                    </TableCell>
-                    <TableCell className="text-right text-muted-foreground">-</TableCell>
-                    <TableCell className="text-right text-muted-foreground">-</TableCell>
-                    <TableCell className="text-right">
-                      {kids.reduce((n, k) => n + (k.total_trades || 0), 0)}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center justify-end gap-1">
-                        {kids.some((k) => k.status === 'completed') && (
+                  <Fragment key={batchId}>
+                    <TableRow
+                      className="cursor-pointer bg-muted/40"
+                      onClick={() => toggle(batchId)}
+                    >
+                      <TableCell className="w-8 pr-0" />
+                      <TableCell className="font-medium">
+                        <span className="flex items-center gap-1.5">
+                          {open ? (
+                            <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                          ) : (
+                            <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                          )}
+                          {kids[0].batch_name || kids[0].name}
+                          <ModeBadge job={kids[0]} />
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant={statusBadgeVariant(rollup)}>{rollup}</Badge>
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        {isScan ? `${kids.length} stocks` : symbolsLabel(kids[0])}
+                      </TableCell>
+                      <TableCell>{isScan ? kids[0].interval : `${kids.length} TF`}</TableCell>
+                      <TableCell className="text-right">
+                        <span className={bestReturn >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                          {bestReturn}%
+                        </span>
+                        <span className="ml-1 text-xs text-muted-foreground">({worstReturn}%)</span>
+                      </TableCell>
+                      <TableCell className="text-right text-muted-foreground">-</TableCell>
+                      <TableCell className="text-right text-muted-foreground">-</TableCell>
+                      <TableCell className="text-right">
+                        {kids.reduce((n, k) => n + (k.total_trades || 0), 0)}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center justify-end gap-1">
+                          {kids.some((k) => k.status === 'completed') && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title="View batch results in new tab"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                openInNewTab(`batch_id=${batchId}`)
+                              }}
+                            >
+                              <LineChart className="h-4 w-4" />
+                            </Button>
+                          )}
                           <Button
                             variant="ghost"
                             size="icon"
-                            title="View batch results in new tab"
+                            title={
+                              isScan
+                                ? 'Rerun the scan with the same parameters'
+                                : 'Rerun all timeframes with the same parameters'
+                            }
                             onClick={(e) => {
                               e.stopPropagation()
-                              openInNewTab(`batch_id=${batchId}`)
+                              onBatchReRun(kids)
                             }}
                           >
-                            <LineChart className="h-4 w-4" />
+                            <RotateCcw className="h-4 w-4" />
                           </Button>
-                        )}
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          title={
-                            isScan
-                              ? 'Rerun the scan with the same parameters'
-                              : 'Rerun all timeframes with the same parameters'
-                          }
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onBatchReRun(kids)
-                          }}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Delete whole batch"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              onDeleteBatch(batchId)
+                            }}
+                          >
+                            <Trash2 className="h-4 w-4 text-rose-400" />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                    {open &&
+                      kids.map((job) => (
+                        <TableRow
+                          key={job.job_id}
+                          {...rowProps(job)}
+                          className={cn('bg-muted/20', rowProps(job).className)}
                         >
-                          <RotateCcw className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          title="Delete whole batch"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onDeleteBatch(batchId)
-                          }}
-                        >
-                          <Trash2 className="h-4 w-4 text-rose-400" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                  {open &&
-                    kids.map((job) => (
-                      <TableRow key={job.job_id} className="bg-muted/20">
-                        <TableCell className="pl-8 text-xs text-muted-foreground">
-                          {job.name}
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant={statusBadgeVariant(job.status)}>{job.status}</Badge>
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          {isScan ? symbolsLabel(job) : '-'}
-                        </TableCell>
-                        <TableCell className="pl-8">{job.interval}</TableCell>
-                        {metricCells(job)}
-                        <TableCell>{rowActions(job, kids)}</TableCell>
-                      </TableRow>
-                    ))}
-                </Fragment>
-              )
-            })}
-          </TableBody>
-        </Table>
+                          {selectCell(job)}
+                          <TableCell className="pl-8 text-xs text-muted-foreground">
+                            {job.name}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={statusBadgeVariant(job.status)}>{job.status}</Badge>
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {isScan ? symbolsLabel(job) : '-'}
+                          </TableCell>
+                          <TableCell className="pl-8">{job.interval}</TableCell>
+                          {metricCells(job)}
+                          <TableCell>{rowActions(job, kids)}</TableCell>
+                        </TableRow>
+                      ))}
+                  </Fragment>
+                )
+              })}
+            </TableBody>
+          </Table>
+        </div>
+        {previewId && <RunPreview jobId={previewId} onClose={() => onPreview(null)} />}
       </div>
 
       {jobs.length < jobCount && (
@@ -402,7 +455,8 @@ const HistoryTable = memo(function HistoryTable({
   )
 })
 
-interface BacktestJobsPanelProps extends Omit<HistoryHandlers, 'onEditNotes'> {
+interface BacktestJobsPanelProps
+  extends Omit<HistoryHandlers, 'onEditNotes' | 'onToggleSelect' | 'onPreview'> {
   jobs: JobSummary[]
   jobCount: number
   loadingMore: boolean
@@ -454,6 +508,15 @@ function BacktestJobsPanelImpl({
   const [noteText, setNoteText] = useState('')
   const [noteSaving, setNoteSaving] = useState(false)
 
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
+  const [previewId, setPreviewId] = useState<string | null>(null)
+  // Deleted or purged runs drop out of the selection and the preview.
+  const visibleSelected = useMemo(() => {
+    const ids = new Set(jobs.map((j) => j.job_id))
+    return new Set([...selected].filter((id) => ids.has(id)))
+  }, [jobs, selected])
+  const visiblePreview = previewId && jobs.some((j) => j.job_id === previewId) ? previewId : null
+
   const [purgeOpen, setPurgeOpen] = useState(false)
   const [purging, setPurging] = useState(false)
 
@@ -473,6 +536,14 @@ function BacktestJobsPanelImpl({
         setNoteJob(job)
         setNoteText(job.notes ?? '')
       },
+      onToggleSelect: (jobId) =>
+        setSelected((prev) => {
+          const next = new Set(prev)
+          if (next.has(jobId)) next.delete(jobId)
+          else if (next.size < MAX_COMPARE) next.add(jobId)
+          return next
+        }),
+      onPreview: (jobId) => setPreviewId(jobId),
     }),
     []
   )
@@ -524,6 +595,25 @@ function BacktestJobsPanelImpl({
             <Button variant="destructive" size="sm" onClick={onCancelAll}>
               <Square className="h-4 w-4" /> Cancel All Active
             </Button>
+          )}
+          {tab === 'history' && visibleSelected.size > 0 && (
+            <>
+              <Button variant="ghost" size="sm" onClick={() => setSelected(new Set())}>
+                Clear selection
+              </Button>
+              <Button
+                size="sm"
+                disabled={visibleSelected.size < 2}
+                title={
+                  visibleSelected.size < 2
+                    ? 'Tick at least two completed runs'
+                    : `Compare up to ${MAX_COMPARE} runs side by side`
+                }
+                onClick={() => openInNewTab(`compare=${[...visibleSelected].join(',')}`)}
+              >
+                Compare {visibleSelected.size} selected
+              </Button>
+            </>
           )}
           {tab === 'history' && (
             <Button
@@ -619,6 +709,8 @@ function BacktestJobsPanelImpl({
             jobCount={jobCount}
             loadingMore={loadingMore}
             starredOnly={starredOnly}
+            selected={visibleSelected}
+            previewId={visiblePreview}
             onRender={onHistoryRender}
             {...stable}
           />
