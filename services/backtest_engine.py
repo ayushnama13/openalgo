@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -135,6 +135,7 @@ class EngineConfig:
     #: "auto", a preset name from portfolio/costs.py, or None for the flat brokerage_bps
     cost_preset: str | None = None
     cost_overrides: dict = field(default_factory=dict)
+    cost_schedule_multiplier: float = 1.0
     #: default instrument kind for cost selection ("EQ", "FUT", "CE", "PE")
     instrument: str = "EQ"
     #: per-symbol contract data: {"NFO:NIFTY..FUT": {"lot_size": 75, "kind": "FUT",
@@ -459,7 +460,20 @@ class Engine:
                 name = cfg.cost_preset
                 if name == "auto":
                     name = costs.auto_preset(cfg.product_type, self.exchange[s_], self.inst[s_]["kind"])
-                self.schedules[s_] = costs.schedule_for(name, cfg.cost_overrides)
+                schedule = costs.schedule_for(name, cfg.cost_overrides)
+                multiplier = float(cfg.cost_schedule_multiplier)
+                if multiplier != 1.0:
+                    schedule = replace(
+                        schedule,
+                        charges=tuple(replace(
+                            charge,
+                            rate=charge.rate * multiplier,
+                            flat=charge.flat * multiplier,
+                            cap=charge.cap * multiplier,
+                        ) for charge in schedule.charges),
+                        slippage=schedule.slippage * multiplier,
+                    )
+                self.schedules[s_] = schedule
 
         self.frames: dict[str, pd.DataFrame] = {}
         ts_dt: dict[str, pd.DatetimeIndex] = {}

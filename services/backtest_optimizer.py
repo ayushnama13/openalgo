@@ -455,6 +455,74 @@ def run_walk_forward(
     }
 
 
+def run_stress(
+    strategy_code: str,
+    bars: dict[str, pd.DataFrame],
+    base_config: dict,
+    spec: dict,
+    capital: float,
+    interval: str,
+    cancel_event=None,
+    progress_cb=None,
+) -> dict:
+    """Run the strategy over the full period at each transaction-cost multiple."""
+    multipliers = spec.get("multipliers", [1, 1.5, 2, 3])
+    params = spec.get("params", {})
+    rows = []
+    count = len(multipliers)
+    for index, multiplier in enumerate(multipliers):
+        if cancel_event is not None and cancel_event.is_set():
+            raise BacktestCancelled()
+        config = dict(base_config)
+        for key in ("slippage_bps", "spread_bps", "impact_bps", "brokerage_bps"):
+            config[key] = float(config.get(key, 0.0)) * multiplier
+        if config.get("cost_preset"):
+            config["cost_schedule_multiplier"] = multiplier
+        task_progress = (lambda pct, i=index: progress_cb((i + pct / 100.0) * 100.0 / count)) if progress_cb else None
+        try:
+            out = run_tasks_sandboxed(
+                strategy_code, bars, config,
+                [{"id": 0, "params": params, "start": None, "end": None}],
+                cancel_event=cancel_event, progress_cb=task_progress,
+            )
+            result = out["tasks"][0]
+            if "error" in result:
+                rows.append({"multiplier": multiplier, "error": result["error"]})
+            else:
+                timeline = pd.DatetimeIndex(pd.to_datetime(out["timeline"]))
+                metrics = _metrics_for(result, timeline, capital, interval)
+                rows.append({"multiplier": multiplier, "metrics": {
+                    key: metrics.get(key) for key in (
+                        "total_return_pct", "sharpe_ratio", "max_drawdown_pct",
+                        "total_trades", "profit_factor",
+                    )
+                }})
+        except BacktestCancelled:
+            raise
+        except Exception as exc:
+            rows.append({"multiplier": multiplier, "error": str(exc)})
+        if progress_cb:
+            progress_cb((index + 1) * 100.0 / count)
+
+    breakeven = next((r["multiplier"] for r in rows
+                      if "metrics" in r and r["metrics"]["total_return_pct"] <= 0), None)
+    tested = {r["multiplier"]: r for r in rows if "metrics" in r}
+    def return_at(target):
+        candidates = [m for m in tested if m >= target]
+        if not candidates:
+            candidates = list(tested)
+        if not candidates:
+            return None
+        return tested[min(candidates, key=lambda m: abs(m - target))]["metrics"]["total_return_pct"]
+    at_15, at_2 = return_at(1.5), return_at(2.0)
+    verdict = "PASS" if at_2 is not None and at_2 > 0 else (
+        "MARGINAL" if at_15 is not None and at_15 > 0 else "FAIL"
+    )
+    warnings = [f"Cost scenario {r['multiplier']}x failed: {r['error']}" for r in rows if "error" in r]
+    return {"kind": "stress", "rows": rows, "breakeven_multiplier": breakeven,
+            "verdict": verdict, "warnings": warnings}
+
+
 # --------------------------------------------------------------------------
 # Monte Carlo on realised trades
 # --------------------------------------------------------------------------
@@ -522,8 +590,22 @@ def validate_spec(spec: dict) -> dict:
     if not isinstance(spec, dict):
         raise ValueError("optimize must be an object")
     kind = spec.get("kind", "sweep")
-    if kind not in ("sweep", "walk_forward"):
-        raise ValueError("optimize.kind must be 'sweep' or 'walk_forward'")
+    if kind not in ("sweep", "walk_forward", "stress"):
+        raise ValueError("optimize.kind must be 'sweep', 'walk_forward' or 'stress'")
+    if kind == "stress":
+        multipliers = spec.get("multipliers", [1, 1.5, 2, 3])
+        if not isinstance(multipliers, list) or not 1 <= len(multipliers) <= 8:
+            raise ValueError("optimize.multipliers must contain 1 to 8 values")
+        if any(not isinstance(v, (int, float)) or isinstance(v, bool)
+               or not math.isfinite(v) or not 0 < v <= 10 for v in multipliers):
+            raise ValueError("optimize.multipliers values must be finite and in (0, 10]")
+        multipliers = sorted(set(multipliers + ([] if 1 in multipliers else [1])))
+        if len(multipliers) > 8:
+            raise ValueError("optimize.multipliers must contain at most 8 values including 1")
+        params = spec.get("params", {})
+        if not isinstance(params, dict):
+            raise ValueError("optimize.params must be an object")
+        return {**spec, "kind": kind, "multipliers": multipliers, "params": params}
     if spec.get("objective", "sharpe_ratio") not in _OBJECTIVES:
         raise ValueError(f"optimize.objective must be one of {sorted(_OBJECTIVES)}")
     build_param_combos(  # validates the space eagerly so bad input fails at submit time
@@ -579,7 +661,7 @@ def run_optimization_job(opt_id: str, cancel_event, loader) -> None:
 
         base = {**cfg["engine_config"], "instruments": instruments}
         capital = float(base["initial_capital"])
-        runner = run_walk_forward if spec["kind"] == "walk_forward" else run_sweep
+        runner = {"walk_forward": run_walk_forward, "stress": run_stress}.get(spec["kind"], run_sweep)
         result = runner(rec.strategy_code, bars, base, spec, capital, cfg["interval"],
                         cancel_event=cancel_event, progress_cb=progress)
         result["notes"] = notes

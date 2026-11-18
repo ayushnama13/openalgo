@@ -186,6 +186,48 @@ def test_walk_forward_rejects_bad_windows():
                                1e5, "15m")
 
 
+def test_stress_costs_reduce_returns_and_calculate_verdict_and_breakeven():
+    # Repeated momentum entries generate enough round trips for costs to dominate at scale.
+    code = """
+class ManyTrades(Strategy):
+    def on_bar(self, ctx):
+        s = ctx.symbols[0]
+        i = ctx.bar_index
+        if i < 2:
+            return
+        if i % 4 == 2:
+            ctx.buy(s, pct=25)
+        elif i % 4 == 0 and ctx.position(s):
+            ctx.close(s)
+"""
+    bars = {"NSE:X": make_bars(240, seed=12)}
+    base = {**BASE, "slippage_bps": 2.0}
+    result = optim.run_stress(code, bars, base,
+                              {"multipliers": [1, 1.5, 2, 3]}, 100000, "15m")
+    returns = [row["metrics"]["total_return_pct"] for row in result["rows"]]
+    assert all(left >= right for left, right in zip(returns, returns[1:]))
+    assert result["rows"][0]["metrics"]["total_trades"] >= 10
+    assert result["breakeven_multiplier"] == next(
+        (row["multiplier"] for row in result["rows"]
+         if row["metrics"]["total_return_pct"] <= 0), None
+    )
+    returns_at = {row["multiplier"]: row["metrics"]["total_return_pct"]
+                  for row in result["rows"]}
+    expected_verdict = "PASS" if returns_at[2] > 0 else (
+        "MARGINAL" if returns_at[1.5] > 0 else "FAIL"
+    )
+    assert result["verdict"] == expected_verdict
+
+
+def test_stress_validation_without_param_space_and_bad_multipliers():
+    valid = optim.validate_spec({"kind": "stress"})
+    assert valid["multipliers"] == [1, 1.5, 2, 3]
+    assert valid["params"] == {}
+    for values in ([0], [11], [True], [], [1] * 9):
+        with pytest.raises(ValueError, match="multipliers"):
+            optim.validate_spec({"kind": "stress", "multipliers": values})
+
+
 def test_parallel_task_results_match_serial_and_progress(monkeypatch):
     bars = {"NSE:X": make_bars(180)}
     tasks = [{"id": i, "params": {"fast": fast, "slow": 20}, "start": None, "end": None}

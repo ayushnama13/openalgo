@@ -1072,11 +1072,11 @@ def delete_saved_strategy(strat_id):
 @backtest_bp.route("/optimize", methods=["POST"])
 @check_session_validity
 def submit_optimization():
-    """Queue a parameter sweep (``optimize.kind='sweep'``) or walk-forward study.
+    """Queue a sweep, walk-forward, or transaction-cost stress study.
 
     Body: the same run fields as ``/run`` (single ``interval``), plus
-    ``optimize``: ``{kind, param_space, method, max_trials, objective,
-    min_trades, oos_pct | train_pct/test_pct/n_windows, seed}``.
+    ``optimize`` supports sweep and walk-forward fields, or a stress spec
+    ``{kind: 'stress', multipliers: [1, 1.5, 2, 3], params: {}}``.
     """
     data = request.get_json() or {}
     try:
