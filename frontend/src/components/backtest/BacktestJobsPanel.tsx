@@ -5,6 +5,8 @@ import {
   Loader2,
   RotateCcw,
   Square,
+  Star,
+  StickyNote,
   Trash2,
 } from 'lucide-react'
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react'
@@ -29,8 +31,11 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Textarea } from '@/components/ui/textarea'
 import type { JobSummary } from '@/hooks/useBacktestJobs'
 import { JOBS_PAGE_SIZE } from '@/lib/backtestJobsPaging'
+import { modeLabel } from '@/lib/backtestUniverse'
+import { cn } from '@/lib/utils'
 
 export interface JobProgress {
   percent: number
@@ -62,18 +67,40 @@ function batchStatus(kids: JobSummary[]) {
 
 const openInNewTab = (query: string) => window.open(`/backtest/results?${query}`, '_blank')
 
+/** Short symbol list: a universe run can hold hundreds, so never join them all. */
+function symbolsLabel(job: JobSummary) {
+  const syms = (job.symbols || []).map((s) => s.split(':').pop() ?? s)
+  if (job.mode === 'universe' && job.universe) return `${job.universe} (${syms.length})`
+  if (syms.length <= 3) return syms.join(', ')
+  return `${syms.slice(0, 3).join(', ')} +${syms.length - 3}`
+}
+
+function ModeBadge({ job }: { job: JobSummary }) {
+  const label = modeLabel(job.mode)
+  if (!label) return null
+  return (
+    <Badge variant="outline" className="border-sky-500/40 text-[10px] text-sky-400">
+      {label}
+      {job.universe ? ` ${job.universe}` : ''}
+    </Badge>
+  )
+}
+
 interface HistoryHandlers {
   onReRun(job: JobSummary): void
   onBatchReRun(kids: JobSummary[]): void
   onDeleteJob(jobId: string): void
   onDeleteBatch(batchId: string): void
   onLoadMore(): void
+  onToggleStar(job: JobSummary): void
+  onEditNotes(job: JobSummary): void
 }
 
 interface HistoryTableProps extends HistoryHandlers {
   jobs: JobSummary[]
   jobCount: number
   loadingMore: boolean
+  starredOnly: boolean
   /** Test hook: called once per render of the table. */
   onRender?(): void
 }
@@ -87,11 +114,14 @@ const HistoryTable = memo(function HistoryTable({
   jobs,
   jobCount,
   loadingMore,
+  starredOnly,
   onReRun,
   onBatchReRun,
   onDeleteJob,
   onDeleteBatch,
   onLoadMore,
+  onToggleStar,
+  onEditNotes,
   onRender,
 }: HistoryTableProps) {
   onRender?.()
@@ -106,11 +136,12 @@ const HistoryTable = memo(function HistoryTable({
       arr.push(job)
       map.set(key, arr)
     }
-    return [...map.entries()].map(([batchId, kids]) => ({
+    const all = [...map.entries()].map(([batchId, kids]) => ({
       batchId,
       kids: [...kids].sort((a, b) => (a.batch_seq ?? 0) - (b.batch_seq ?? 0)),
     }))
-  }, [jobs])
+    return starredOnly ? all.filter((g) => g.kids.some((k) => k.starred)) : all
+  }, [jobs, starredOnly])
 
   const toggle = (batchId: string) => {
     setExpanded((prev) => {
@@ -123,6 +154,31 @@ const HistoryTable = memo(function HistoryTable({
 
   const rowActions = (job: JobSummary, kids?: JobSummary[]) => (
     <div className="flex items-center justify-end gap-1">
+      <Button
+        variant="ghost"
+        size="icon"
+        title={job.starred ? 'Unstar run' : 'Star run'}
+        aria-pressed={!!job.starred}
+        onClick={(e) => {
+          e.stopPropagation()
+          onToggleStar(job)
+        }}
+      >
+        <Star
+          className={cn('h-4 w-4', job.starred ? 'fill-amber-400 text-amber-400' : 'opacity-60')}
+        />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        title={job.notes ? `Notes: ${job.notes}` : 'Add notes'}
+        onClick={(e) => {
+          e.stopPropagation()
+          onEditNotes(job)
+        }}
+      >
+        <StickyNote className={cn('h-4 w-4', job.notes ? 'text-sky-400' : 'opacity-60')} />
+      </Button>
       {job.status === 'completed' && (
         <Button
           variant="ghost"
@@ -209,11 +265,16 @@ const HistoryTable = memo(function HistoryTable({
                 const job = kids[0]
                 return (
                   <TableRow key={job.job_id}>
-                    <TableCell className="font-medium">{job.name}</TableCell>
+                    <TableCell className="font-medium">
+                      <span className="flex flex-wrap items-center gap-1.5">
+                        {job.name}
+                        <ModeBadge job={job} />
+                      </span>
+                    </TableCell>
                     <TableCell>
                       <Badge variant={statusBadgeVariant(job.status)}>{job.status}</Badge>
                     </TableCell>
-                    <TableCell className="text-xs">{(job.symbols || []).join(', ')}</TableCell>
+                    <TableCell className="text-xs">{symbolsLabel(job)}</TableCell>
                     <TableCell>{job.interval}</TableCell>
                     {metricCells(job)}
                     <TableCell>{rowActions(job)}</TableCell>
@@ -222,6 +283,7 @@ const HistoryTable = memo(function HistoryTable({
               }
               const open = expanded.has(batchId)
               const rollup = batchStatus(kids)
+              const isScan = kids[0].mode === 'scan'
               const bestReturn = Math.max(...kids.map((k) => k.total_return_pct))
               const worstReturn = Math.min(...kids.map((k) => k.total_return_pct))
               return (
@@ -235,13 +297,16 @@ const HistoryTable = memo(function HistoryTable({
                           <ChevronRight className="h-4 w-4 text-muted-foreground" />
                         )}
                         {kids[0].batch_name || kids[0].name}
+                        <ModeBadge job={kids[0]} />
                       </span>
                     </TableCell>
                     <TableCell>
                       <Badge variant={statusBadgeVariant(rollup)}>{rollup}</Badge>
                     </TableCell>
-                    <TableCell className="text-xs">{(kids[0].symbols || []).join(', ')}</TableCell>
-                    <TableCell>{kids.length} TF</TableCell>
+                    <TableCell className="text-xs">
+                      {isScan ? `${kids.length} stocks` : symbolsLabel(kids[0])}
+                    </TableCell>
+                    <TableCell>{isScan ? kids[0].interval : `${kids.length} TF`}</TableCell>
                     <TableCell className="text-right">
                       <span className={bestReturn >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
                         {bestReturn}%
@@ -250,7 +315,9 @@ const HistoryTable = memo(function HistoryTable({
                     </TableCell>
                     <TableCell className="text-right text-muted-foreground">-</TableCell>
                     <TableCell className="text-right text-muted-foreground">-</TableCell>
-                    <TableCell className="text-right">{kids.length}</TableCell>
+                    <TableCell className="text-right">
+                      {kids.reduce((n, k) => n + (k.total_trades || 0), 0)}
+                    </TableCell>
                     <TableCell>
                       <div className="flex items-center justify-end gap-1">
                         {kids.some((k) => k.status === 'completed') && (
@@ -269,7 +336,11 @@ const HistoryTable = memo(function HistoryTable({
                         <Button
                           variant="ghost"
                           size="icon"
-                          title="Rerun all timeframes with the same parameters"
+                          title={
+                            isScan
+                              ? 'Rerun the scan with the same parameters'
+                              : 'Rerun all timeframes with the same parameters'
+                          }
                           onClick={(e) => {
                             e.stopPropagation()
                             onBatchReRun(kids)
@@ -300,7 +371,9 @@ const HistoryTable = memo(function HistoryTable({
                         <TableCell>
                           <Badge variant={statusBadgeVariant(job.status)}>{job.status}</Badge>
                         </TableCell>
-                        <TableCell className="text-xs">-</TableCell>
+                        <TableCell className="text-xs">
+                          {isScan ? symbolsLabel(job) : '-'}
+                        </TableCell>
                         <TableCell className="pl-8">{job.interval}</TableCell>
                         {metricCells(job)}
                         <TableCell>{rowActions(job, kids)}</TableCell>
@@ -329,7 +402,7 @@ const HistoryTable = memo(function HistoryTable({
   )
 })
 
-interface BacktestJobsPanelProps extends HistoryHandlers {
+interface BacktestJobsPanelProps extends Omit<HistoryHandlers, 'onEditNotes'> {
   jobs: JobSummary[]
   jobCount: number
   loadingMore: boolean
@@ -338,11 +411,15 @@ interface BacktestJobsPanelProps extends HistoryHandlers {
   onCancelAll(): void
   /** Purge runs older than 30 days; resolves once the request has finished. */
   onPurge(): Promise<void>
+  /** Save a run's note; resolves once stored, rejects (after its own toast) on failure. */
+  onSaveNotes(job: JobSummary, notes: string): Promise<void>
+  /** Switch to the History tab when this number changes (the page's "Job History" button). */
+  historyFocus?: number
   onHistoryRender?(): void
 }
 
 /** Bottom panel of the backtest page: runs in flight, and the paged job history. */
-export function BacktestJobsPanel({
+function BacktestJobsPanelImpl({
   jobs,
   jobCount,
   loadingMore,
@@ -350,6 +427,8 @@ export function BacktestJobsPanel({
   onCancelJob,
   onCancelAll,
   onPurge,
+  onSaveNotes,
+  historyFocus,
   onHistoryRender,
   ...handlers
 }: BacktestJobsPanelProps) {
@@ -366,6 +445,14 @@ export function BacktestJobsPanel({
   useEffect(() => {
     setTab(hasActive ? 'active' : 'history')
   }, [hasActive])
+  useEffect(() => {
+    if (historyFocus) setTab('history')
+  }, [historyFocus])
+
+  const [starredOnly, setStarredOnly] = useState(false)
+  const [noteJob, setNoteJob] = useState<JobSummary | null>(null)
+  const [noteText, setNoteText] = useState('')
+  const [noteSaving, setNoteSaving] = useState(false)
 
   const [purgeOpen, setPurgeOpen] = useState(false)
   const [purging, setPurging] = useState(false)
@@ -381,9 +468,27 @@ export function BacktestJobsPanel({
       onDeleteJob: (jobId) => latest.current.onDeleteJob(jobId),
       onDeleteBatch: (batchId) => latest.current.onDeleteBatch(batchId),
       onLoadMore: () => latest.current.onLoadMore(),
+      onToggleStar: (job) => latest.current.onToggleStar(job),
+      onEditNotes: (job) => {
+        setNoteJob(job)
+        setNoteText(job.notes ?? '')
+      },
     }),
     []
   )
+
+  const saveNote = async () => {
+    if (!noteJob) return
+    setNoteSaving(true)
+    try {
+      await onSaveNotes(noteJob, noteText)
+      setNoteJob(null)
+    } catch {
+      // the page already showed the error; keep the dialog open with the text
+    } finally {
+      setNoteSaving(false)
+    }
+  }
 
   const confirmPurge = async () => {
     setPurging(true)
@@ -418,6 +523,17 @@ export function BacktestJobsPanel({
           {hasActive && (
             <Button variant="destructive" size="sm" onClick={onCancelAll}>
               <Square className="h-4 w-4" /> Cancel All Active
+            </Button>
+          )}
+          {tab === 'history' && (
+            <Button
+              variant={starredOnly ? 'secondary' : 'ghost'}
+              size="sm"
+              aria-pressed={starredOnly}
+              onClick={() => setStarredOnly((v) => !v)}
+            >
+              <Star className={cn('h-4 w-4', starredOnly && 'fill-amber-400 text-amber-400')} />
+              Starred only
             </Button>
           )}
           {tab === 'history' && (
@@ -502,11 +618,39 @@ export function BacktestJobsPanel({
             jobs={jobs}
             jobCount={jobCount}
             loadingMore={loadingMore}
+            starredOnly={starredOnly}
             onRender={onHistoryRender}
             {...stable}
           />
         )}
       </div>
+
+      <Dialog
+        open={noteJob !== null}
+        onOpenChange={(open) => !open && !noteSaving && setNoteJob(null)}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Run notes</DialogTitle>
+            <DialogDescription>{noteJob?.name}</DialogDescription>
+          </DialogHeader>
+          <Textarea
+            value={noteText}
+            maxLength={4000}
+            rows={6}
+            placeholder="What did you change, what did you learn, what to try next"
+            onChange={(e) => setNoteText(e.target.value)}
+          />
+          <DialogFooter>
+            <Button variant="outline" disabled={noteSaving} onClick={() => setNoteJob(null)}>
+              Cancel
+            </Button>
+            <Button disabled={noteSaving} onClick={saveNote}>
+              {noteSaving ? 'Saving...' : 'Save'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={purgeOpen} onOpenChange={(open) => !purging && setPurgeOpen(open)}>
         <DialogContent className="sm:max-w-md">
@@ -530,3 +674,6 @@ export function BacktestJobsPanel({
     </Card>
   )
 }
+
+/** Memoized: the page re-renders on every form edit, the runs list does not need to. */
+export const BacktestJobsPanel = memo(BacktestJobsPanelImpl)

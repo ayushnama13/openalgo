@@ -29,6 +29,11 @@ export interface JobSummary {
   batch_name?: string
   batch_seq?: number
   error_message?: string
+  /** "stock" | "universe" | "scan"; older servers omit it (= stock). */
+  mode?: string
+  universe?: string | null
+  starred?: boolean
+  notes?: string | null
 }
 
 async function fetchJobsPage(offset: number, limit: number) {
@@ -43,7 +48,7 @@ async function fetchJobsPage(offset: number, limit: number) {
 
 interface UseBacktestJobsOptions {
   /** Called for each pending or running job found by a load, oldest last. */
-  onRunningJob?(jobId: string): void
+  onRunningJob?(job: JobSummary): void
 }
 
 /**
@@ -90,7 +95,7 @@ export function useBacktestJobs({ onRunningJob }: UseBacktestJobsOptions = {}) {
       for (const job of fresh) {
         if (job.status === 'pending' || job.status === 'running') {
           running.add(job.job_id)
-          onRunningRef.current?.(job.job_id)
+          onRunningRef.current?.(job)
         }
       }
       setRunningJobIds(running)
@@ -115,6 +120,11 @@ export function useBacktestJobs({ onRunningJob }: UseBacktestJobsOptions = {}) {
     }
   }, [])
 
+  /** Apply a field change to a loaded row without refetching (star, note). */
+  const patchJob = useCallback((jobId: string, fields: Partial<JobSummary>) => {
+    setJobs((prev) => prev.map((j) => (j.job_id === jobId ? { ...j, ...fields } : j)))
+  }, [])
+
   useEffect(() => {
     loadJobs()
   }, [loadJobs])
@@ -135,5 +145,6 @@ export function useBacktestJobs({ onRunningJob }: UseBacktestJobsOptions = {}) {
     loadingMore,
     loadJobs,
     loadMore,
+    patchJob,
   }
 }

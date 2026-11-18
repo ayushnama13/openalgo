@@ -101,7 +101,12 @@ export interface FullJobDetails {
       first: string
       last: string
       sha256: string
-      instrument?: { kind: string; lot_size: number; strike?: number | null; expiry?: string | null }
+      instrument?: {
+        kind: string
+        lot_size: number
+        strike?: number | null
+        expiry?: string | null
+      }
     }
   > | null
   created_at?: string
@@ -110,6 +115,11 @@ export interface FullJobDetails {
   metrics?: Metrics
   batch_id?: string
   batch_seq?: number
+  /** "stock" | "universe" | "scan"; absent on older runs (= stock). */
+  mode?: string | null
+  universe?: string | null
+  starred?: boolean
+  notes?: string | null
 }
 
 export interface BatchRunSummary {
@@ -120,11 +130,15 @@ export interface BatchRunSummary {
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
   metrics?: Metrics | null
   error_message?: string | null
+  /** The run's symbols; one per run in a scan batch. */
+  symbols?: string[]
 }
 
 export interface BatchDetails {
   batch_id: string
   name: string
+  mode?: string | null
+  universe?: string | null
   runs: BatchRunSummary[]
 }
 

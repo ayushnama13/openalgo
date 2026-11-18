@@ -8,12 +8,15 @@
  *                 curves normalized to 100, and one full single-run view per
  *                 timeframe (fetched lazily on first tab open, cached in the
  *                 store). Optional &tf=... deep-links a timeframe tab.
+ *                 A universe scan batch (mode "scan", one run per stock on one
+ *                 timeframe) gets a breadth summary and a ranking instead.
  */
 
 import { FileChartColumn, Loader2, TrendingUp } from 'lucide-react'
 import type * as PlotlyTypes from 'plotly.js'
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
+import ScanResults, { SurvivorshipBanner } from '@/components/backtest/ScanResults'
 import SingleRunResults, { PLOT_CONFIG, PLOT_LAYOUT } from '@/components/backtest/SingleRunResults'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -439,6 +442,8 @@ function SingleResultsView({
         </div>
       </div>
 
+      {(jobDetails?.mode === 'universe' || jobDetails?.mode === 'scan') && <SurvivorshipBanner />}
+
       <SingleRunResults result={result} jobDetails={jobDetails} />
     </div>
   )
@@ -459,6 +464,7 @@ function BatchResultsView({ batchId, initialTf }: { batchId: string; initialTf: 
   const [jobDetailsByJob, setJobDetailsByJob] = useState<Record<string, FullJobDetails | null>>({})
   const [loadingJob, setLoadingJob] = useState<string | null>(null)
   const [activeTf, setActiveTf] = useState<string | null>(initialTf)
+  const [scanJobId, setScanJobId] = useState<string | null>(null)
 
   useEffect(() => {
     if (batch?.batch_id === batchId) {
@@ -474,7 +480,13 @@ function BatchResultsView({ batchId, initialTf }: { batchId: string; initialTf: 
         }).then((r) => r.json())
         if (cancelled) return
         if (res.status === 'success') {
-          setBatch({ batch_id: res.batch_id, name: res.name, runs: res.runs })
+          setBatch({
+            batch_id: res.batch_id,
+            name: res.name,
+            mode: res.mode,
+            universe: res.universe,
+            runs: res.runs,
+          })
         } else {
           showToast.error(res.message || 'Failed to load batch')
         }
@@ -522,10 +534,16 @@ function BatchResultsView({ batchId, initialTf }: { batchId: string; initialTf: 
 
   // Fetch full results for a timeframe the first time its tab is opened.
   useEffect(() => {
+    if (batch?.mode === 'scan') return
     const run = batch?.runs.find((r) => r.interval === activeTf)
     if (!run) return
     ensureRunLoaded(run)
-  }, [activeTf, batch?.runs, ensureRunLoaded])
+  }, [activeTf, batch?.mode, batch?.runs, ensureRunLoaded])
+
+  const selectScanRun = (run: BatchRunSummary) => {
+    setScanJobId(run.job_id)
+    ensureRunLoaded(run)
+  }
 
   if (loading || !batch) {
     return (
@@ -539,16 +557,24 @@ function BatchResultsView({ batchId, initialTf }: { batchId: string; initialTf: 
   }
 
   const completedCount = batch.runs.filter((r) => r.status === 'completed').length
+  const isScan = batch.mode === 'scan'
+  const isUniverse = isScan || batch.mode === 'universe'
+  const heading = isScan
+    ? 'Universe Scan'
+    : batch.mode === 'universe'
+      ? 'Universe Portfolio Backtest'
+      : 'Multi-Timeframe Backtest'
+  const unit = isScan ? 'stocks' : 'timeframes'
 
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-foreground">Multi-Timeframe Backtest</h1>
+          <h1 className="text-2xl font-bold text-foreground">{heading}</h1>
           <p className="text-sm text-muted-foreground">
-            {batch.name} · {Object.values(batch.runs).length} timeframes · {completedCount}{' '}
-            completed
+            {batch.name} - {batch.runs.length} {unit}
+            {isScan ? ` on ${batch.runs[0]?.interval ?? '-'}` : ''} - {completedCount} completed
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -568,52 +594,69 @@ function BatchResultsView({ batchId, initialTf }: { batchId: string; initialTf: 
         </div>
       </div>
 
-      {/* Comparison matrix */}
-      <BatchMatrix runs={batch.runs} onSelectTf={setActiveTf} />
+      {isUniverse && <SurvivorshipBanner />}
 
-      {/* Overlaid equity curves */}
-      <BatchOverlay batchId={batch.batch_id} />
+      {isScan ? (
+        <ScanResults
+          batch={batch}
+          selectedJobId={scanJobId}
+          onSelect={selectScanRun}
+          resultsByJob={resultsByJob}
+          jobDetailsByJob={jobDetailsByJob}
+          loadingJob={loadingJob}
+        />
+      ) : (
+        <>
+          {/* Comparison matrix */}
+          <BatchMatrix runs={batch.runs} onSelectTf={setActiveTf} />
 
-      {/* Per-timeframe full views, lazy-loaded on first open */}
-      <Tabs value={activeTf ?? batch.runs[0].interval} onValueChange={setActiveTf}>
-        <TabsList className="w-full justify-start overflow-x-auto">
-          {batch.runs.map((r) => (
-            <TabsTrigger key={r.job_id} value={r.interval}>
-              {r.interval}
-            </TabsTrigger>
-          ))}
-        </TabsList>
-        {batch.runs.map((r) => (
-          <TabsContent key={r.job_id} value={r.interval} className="mt-4">
-            {activeTf === r.interval && !resultsByJob[r.job_id] && (
-              <Card>
-                <CardContent className="p-10 text-center text-sm text-muted-foreground">
-                  <Loader2 className="mx-auto h-6 w-6 animate-spin text-primary" />
-                  <p className="mt-2">
-                    {loadingJob === r.job_id ? 'Loading full results...' : 'Results not loaded yet'}
-                  </p>
-                  {loadingJob !== r.job_id && (
-                    <Button
-                      className="mt-3"
-                      size="sm"
-                      variant="outline"
-                      onClick={() => ensureRunLoaded(r)}
-                    >
-                      Load {r.interval} results
-                    </Button>
-                  )}
-                </CardContent>
-              </Card>
-            )}
-            {activeTf === r.interval && resultsByJob[r.job_id] && (
-              <SingleRunResults
-                result={resultsByJob[r.job_id]}
-                jobDetails={jobDetailsByJob[r.job_id]}
-              />
-            )}
-          </TabsContent>
-        ))}
-      </Tabs>
+          {/* Overlaid equity curves */}
+          <BatchOverlay batchId={batch.batch_id} />
+
+          {/* Per-timeframe full views, lazy-loaded on first open */}
+          <Tabs value={activeTf ?? batch.runs[0].interval} onValueChange={setActiveTf}>
+            <TabsList className="w-full justify-start overflow-x-auto">
+              {batch.runs.map((r) => (
+                <TabsTrigger key={r.job_id} value={r.interval}>
+                  {r.interval}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            {batch.runs.map((r) => (
+              <TabsContent key={r.job_id} value={r.interval} className="mt-4">
+                {activeTf === r.interval && !resultsByJob[r.job_id] && (
+                  <Card>
+                    <CardContent className="p-10 text-center text-sm text-muted-foreground">
+                      <Loader2 className="mx-auto h-6 w-6 animate-spin text-primary" />
+                      <p className="mt-2">
+                        {loadingJob === r.job_id
+                          ? 'Loading full results...'
+                          : 'Results not loaded yet'}
+                      </p>
+                      {loadingJob !== r.job_id && (
+                        <Button
+                          className="mt-3"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => ensureRunLoaded(r)}
+                        >
+                          Load {r.interval} results
+                        </Button>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
+                {activeTf === r.interval && resultsByJob[r.job_id] && (
+                  <SingleRunResults
+                    result={resultsByJob[r.job_id]}
+                    jobDetails={jobDetailsByJob[r.job_id]}
+                  />
+                )}
+              </TabsContent>
+            ))}
+          </Tabs>
+        </>
+      )}
     </div>
   )
 }
