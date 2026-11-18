@@ -100,7 +100,7 @@ export default function EngineOptionsCard({ value, onChange, hideParams }: Props
           <div className="space-y-1.5">
             <Label>Strategy parameters (JSON, optional)</Label>
             <textarea
-              className="w-full rounded-md border border-slate-800 bg-slate-950 p-2 font-mono text-xs"
+              className="w-full rounded-md border border-slate-800 bg-slate-950 p-2 font-mono text-xs text-slate-100"
               rows={3}
               placeholder='{"fast": 10, "slow": 30}'
               value={value.paramsText}

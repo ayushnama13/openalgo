@@ -20,6 +20,10 @@ import { BacktestJobsPanel, type JobProgress } from '@/components/backtest/Backt
 import EngineOptionsCard from '@/components/backtest/EngineOptionsCard'
 import ExtraSymbols from '@/components/backtest/ExtraSymbols'
 import OptimizeDialog from '@/components/backtest/OptimizeDialog'
+import StrategyTemplates, {
+  type SavedTemplate,
+  type TemplateSettings,
+} from '@/components/backtest/StrategyTemplates'
 import UniversePicker from '@/components/backtest/UniversePicker'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -41,10 +45,10 @@ import { useSocket } from '@/hooks/useSocket'
 import {
   buildEngineOptions,
   DEFAULT_ENGINE_OPTIONS,
-  engineOptionsFromSaved,
   type EngineOptionsState,
+  engineOptionsFromSaved,
 } from '@/lib/backtestEngineOptions'
-import { DEFAULT_STRATEGY_CODE, STRATEGY_TEMPLATES } from '@/lib/backtestTemplates'
+import { DEFAULT_STRATEGY_CODE } from '@/lib/backtestTemplates'
 import {
   coveredSymbols,
   fetchUniverseCoverage,
@@ -389,9 +393,49 @@ export default function Backtest() {
   // Run payload
   // -------------------------------------------------------------------------
 
-  const handleTemplateChange = (label: string) => {
-    const template = STRATEGY_TEMPLATES.find((t) => t.label === label)
-    if (template) setStrategyCode(template.code)
+  /** Run settings a saved template keeps; null (after a toast) when engine options are invalid. */
+  const templateSettings = (): TemplateSettings | null => {
+    const built = buildEngineOptions(engineOptions)
+    if (!built.ok) {
+      showToast.error(built.error)
+      return null
+    }
+    return {
+      interval: intervals[0],
+      initial_capital: initialCapital,
+      sizing_type: sizingType,
+      sizing_value: sizingValue,
+      slippage_bps: slippageBps,
+      brokerage_bps: brokerageBps,
+      product_type: productType,
+      missing_data_policy: missingDataPolicy,
+      stop_loss_pct: stopLossPct ? parseFloat(stopLossPct) : null,
+      take_profit_pct: takeProfitPct ? parseFloat(takeProfitPct) : null,
+      daily_loss_limit: dailyLossLimit ? parseFloat(dailyLossLimit) : null,
+      max_positions: maxPositions,
+      engine_options: built.value,
+    }
+  }
+
+  /** Load a saved template: its code, plus whichever settings it kept. Symbols and dates stay. */
+  const applyTemplate = (t: SavedTemplate) => {
+    setStrategyCode(t.strategy_code)
+    const s = t.settings
+    if (!s) return
+    const pct = (v: number | null | undefined) => (v == null ? '' : String(v))
+    if (s.interval) setIntervals([s.interval])
+    if (s.initial_capital != null) setInitialCapital(s.initial_capital)
+    if (s.sizing_type) setSizingType(s.sizing_type)
+    if (s.sizing_value != null) setSizingValue(s.sizing_value)
+    if (s.slippage_bps != null) setSlippageBps(s.slippage_bps)
+    if (s.brokerage_bps != null) setBrokerageBps(s.brokerage_bps)
+    if (s.product_type) setProductType(s.product_type)
+    if (s.missing_data_policy) setMissingDataPolicy(s.missing_data_policy)
+    if ('stop_loss_pct' in s) setStopLossPct(pct(s.stop_loss_pct))
+    if ('take_profit_pct' in s) setTakeProfitPct(pct(s.take_profit_pct))
+    if ('daily_loss_limit' in s) setDailyLossLimit(pct(s.daily_loss_limit))
+    if (s.max_positions != null) setMaxPositions(s.max_positions)
+    if (s.engine_options) setEngineOptions(engineOptionsFromSaved(s.engine_options))
   }
 
   /** Run fields shared by "Run" and "Optimize"; null (after a toast) when the form is invalid. */
@@ -1064,18 +1108,12 @@ export default function Backtest() {
             <CardTitle className="flex items-center gap-2 text-base">
               <FlaskConical className="h-4 w-4 text-primary" /> Strategy
             </CardTitle>
-            <Select onValueChange={handleTemplateChange}>
-              <SelectTrigger className="w-56" aria-label="Load template">
-                <SelectValue placeholder="Load template" />
-              </SelectTrigger>
-              <SelectContent>
-                {STRATEGY_TEMPLATES.map((t) => (
-                  <SelectItem key={t.label} value={t.label}>
-                    {t.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <StrategyTemplates
+              code={strategyCode}
+              getSettings={templateSettings}
+              onLoadBuiltIn={setStrategyCode}
+              onLoadSaved={applyTemplate}
+            />
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="overflow-hidden rounded-lg border">

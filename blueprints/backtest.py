@@ -2,7 +2,6 @@
 
 import json
 import math
-import uuid
 from datetime import datetime
 
 import pandas as pd
@@ -12,7 +11,6 @@ from flask import Blueprint, jsonify, render_template_string, request
 from database.backtest_db import (
     BacktestOptimization,
     BacktestRun,
-    BacktestStrategy,
     BacktestTrade,
     cleanup_old_runs,
     db_session,
@@ -42,6 +40,14 @@ from services.backtest_service import (
     load_run_bars,
     start_backtest_batch,
     start_optimization,
+)
+from services.backtest_strategy_library import (
+    TemplateExists,
+    create_template,
+    delete_template,
+    get_template,
+    list_templates,
+    update_template,
 )
 from services.backtest_universes import list_universes, universe_coverage
 from utils.logging import get_logger
@@ -1002,19 +1008,10 @@ def generate_tearsheet(batch_or_job_id):
 def list_saved_strategies():
     session = db_session()
     try:
-        strats = session.query(BacktestStrategy).order_by(BacktestStrategy.updated_at.desc()).all()
-        results = [{
-            "id": s.id,
-            "name": s.name,
-            "description": s.description,
-            "strategy_code": s.strategy_code,
-            "created_at": s.created_at.isoformat() if s.created_at else "",
-            "updated_at": s.updated_at.isoformat() if s.updated_at else "",
-        } for s in strats]
-        return jsonify({"status": "success", "strategies": results})
-    except Exception as e:
-        logger.exception(f"Error listing saved strategies: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"status": "success", "strategies": list_templates(session)})
+    except Exception:
+        logger.exception("Error listing saved strategies")
+        return jsonify({"status": "error", "message": "Internal server error"}), 500
     finally:
         db_session.remove()
 
@@ -1023,29 +1020,18 @@ def list_saved_strategies():
 @check_session_validity
 def create_saved_strategy():
     data = request.get_json() or {}
-    name = data.get("name")
-    strategy_code = data.get("strategy_code")
-    description = data.get("description", "")
-
-    if not name or not strategy_code:
-        return jsonify({"status": "error", "message": "name and strategy_code are required"}), 400
-
     session = db_session()
     try:
-        strat_id = f"strat_{uuid.uuid4().hex[:10]}"
-        strat = BacktestStrategy(
-            id=strat_id,
-            name=name,
-            description=description,
-            strategy_code=strategy_code,
-        )
-        session.add(strat)
-        session.commit()
-        return jsonify({"status": "success", "id": strat_id, "message": "Strategy saved successfully"})
-    except Exception as e:
+        strategy = create_template(session, data, overwrite=data.get("overwrite") is True)
+        return jsonify({"status": "success", "strategy": strategy})
+    except TemplateExists as e:
+        return jsonify({"status": "error", "message": str(e), "existing_id": e.existing_id}), 409
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except Exception:
         session.rollback()
-        logger.exception(f"Error creating strategy: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        logger.exception("Error creating strategy")
+        return jsonify({"status": "error", "message": "Internal server error"}), 500
     finally:
         db_session.remove()
 
@@ -1055,13 +1041,53 @@ def create_saved_strategy():
 def delete_saved_strategy(strat_id):
     session = db_session()
     try:
-        session.query(BacktestStrategy).filter_by(id=strat_id).delete()
-        session.commit()
+        if not delete_template(session, strat_id):
+            return jsonify({"status": "error", "message": "Strategy not found"}), 404
         return jsonify({"status": "success", "message": f"Strategy {strat_id} deleted successfully"})
-    except Exception as e:
+    except Exception:
         session.rollback()
-        logger.exception(f"Error deleting strategy {strat_id}: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        logger.exception("Error deleting strategy")
+        return jsonify({"status": "error", "message": "Internal server error"}), 500
+    finally:
+        db_session.remove()
+
+
+@backtest_bp.route("/strategies/<strat_id>", methods=["GET"])
+@check_session_validity
+def get_saved_strategy(strat_id):
+    session = db_session()
+    try:
+        try:
+            strategy = get_template(session, strat_id)
+        except KeyError:
+            return jsonify({"status": "error", "message": "Strategy not found"}), 404
+        return jsonify({"status": "success", "strategy": strategy})
+    except Exception:
+        logger.exception("Error getting saved strategy")
+        return jsonify({"status": "error", "message": "Internal server error"}), 500
+    finally:
+        db_session.remove()
+
+
+@backtest_bp.route("/strategies/<strat_id>", methods=["PUT"])
+@check_session_validity
+def update_saved_strategy(strat_id):
+    data = request.get_json() or {}
+    session = db_session()
+    try:
+        try:
+            strategy = update_template(session, strat_id, data)
+        except KeyError:
+            return jsonify({"status": "error", "message": "Strategy not found"}), 404
+        except TemplateExists as e:
+            return jsonify({"status": "error", "message": str(e), "existing_id": e.existing_id}), 409
+        except ValueError as e:
+            return jsonify({"status": "error", "message": str(e)}), 400
+        return jsonify({"status": "success", "strategy": strategy})
+    except Exception:
+        session.rollback()
+        logger.exception("Error updating saved strategy")
+        return jsonify({"status": "error", "message": "Internal server error"}), 500
     finally:
         db_session.remove()
 
