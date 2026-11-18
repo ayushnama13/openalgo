@@ -71,6 +71,14 @@ class BacktestRun(Base):
     engine_options = Column(Text, nullable=True)
     code_hash = Column(String(64), nullable=True)
     data_fingerprint = Column(Text, nullable=True)
+    # Run mode: "stock" (hand-picked symbols), "universe" (one portfolio over an
+    # index's constituents) or "scan" (one run per constituent, batched). NULL in
+    # rows written before the column existed means "stock".
+    mode = Column(String(16), nullable=True)
+    universe = Column(String(32), nullable=True)
+    # Research log: a star and a free-text note per run.
+    starred = Column(Integer, nullable=False, default=0)
+    notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Asia/Kolkata")))
     completed_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)

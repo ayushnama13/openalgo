@@ -34,6 +34,7 @@ from services.backtest_reports import (
     trade_breakdown,
 )
 from services.backtest_service import (
+    RUN_MODES,
     cancel_batch,
     cancel_job,
     cancel_optimization,
@@ -41,6 +42,7 @@ from services.backtest_service import (
     start_backtest_batch,
     start_optimization,
 )
+from services.backtest_universes import list_universes, universe_coverage
 from utils.logging import get_logger
 from utils.session import check_session_validity
 
@@ -94,6 +96,31 @@ def get_catalog():
         return jsonify({"status": "success", "catalog": symbols_data})
     except Exception as e:
         logger.exception(f"Error fetching backtest data catalog: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@backtest_bp.route("/universes", methods=["GET"])
+@check_session_validity
+def get_universes():
+    """Index universes available for universe-mode runs (id, name, category, count)."""
+    try:
+        return jsonify({"status": "success", **list_universes()})
+    except Exception as e:
+        logger.exception(f"Error listing backtest universes: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@backtest_bp.route("/universes/<universe_id>", methods=["GET"])
+@check_session_validity
+def get_universe_coverage(universe_id):
+    """Constituents of one universe with their Historify coverage for ``interval``."""
+    interval = request.args.get("interval", "D")
+    try:
+        return jsonify({"status": "success", "universe": universe_coverage(universe_id, interval)})
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 404
+    except Exception as e:
+        logger.exception(f"Error fetching universe {universe_id}: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -180,9 +207,13 @@ def submit_run():
         daily_loss_limit = float(data["daily_loss_limit"]) if data.get("daily_loss_limit") is not None else None
         max_positions = int(data.get("max_positions", 5))
         engine_options = data.get("engine_options")
+        mode = str(data.get("mode") or "stock").lower()
+        universe = data.get("universe")
 
         if not strategy_code:
             return jsonify({"status": "error", "message": "strategy_code is required"}), 400
+        if mode not in RUN_MODES:
+            return jsonify({"status": "error", "message": f"mode must be one of {', '.join(RUN_MODES)}"}), 400
 
         batch = start_backtest_batch(
             name=name,
@@ -204,14 +235,18 @@ def submit_run():
             daily_loss_limit=daily_loss_limit,
             max_positions=max_positions,
             engine_options=engine_options,
+            mode=mode,
+            universe=universe,
         )
         first_job = batch["jobs"][0]["job_id"]
+        unit = "symbol" if mode == "scan" else "timeframe"
         return jsonify({
             "status": "success",
             "job_id": first_job,
             "batch_id": batch["batch_id"],
             "jobs": batch["jobs"],
-            "message": f"Backtest batch of {len(batch['jobs'])} timeframe(s) submitted successfully",
+            "skipped": batch.get("skipped", []),
+            "message": f"Backtest batch of {len(batch['jobs'])} {unit}(s) submitted successfully",
         })
     except ValueError as e:
         return jsonify({"status": "error", "message": str(e)}), 400
@@ -249,7 +284,8 @@ def list_jobs():
             BacktestRun.exchange, BacktestRun.interval, BacktestRun.start_date, BacktestRun.end_date,
             BacktestRun.initial_capital, BacktestRun.created_at, BacktestRun.completed_at,
             BacktestRun.metrics_json, BacktestRun.batch_id, BacktestRun.batch_name,
-            BacktestRun.batch_seq, BacktestRun.error_message,
+            BacktestRun.batch_seq, BacktestRun.error_message, BacktestRun.mode,
+            BacktestRun.universe, BacktestRun.starred, BacktestRun.notes,
         ).order_by(BacktestRun.created_at.desc()).limit(limit).offset(offset).all()
         results = []
         for r in runs:
@@ -275,6 +311,10 @@ def list_jobs():
                 "batch_name": r.batch_name,
                 "batch_seq": r.batch_seq or 0,
                 "error_message": r.error_message,
+                "mode": r.mode or "stock",
+                "universe": r.universe,
+                "starred": bool(r.starred),
+                "notes": r.notes or "",
             })
         return jsonify({"status": "success", "jobs": results, "total": total})
     except Exception as e:
@@ -290,7 +330,14 @@ def list_batches():
     """Returns one summary row per batch (batch of one for legacy runs)."""
     session = db_session()
     try:
-        runs = session.query(BacktestRun).order_by(BacktestRun.created_at.desc()).all()
+        # Only the columns the summary needs: a universe scan writes hundreds of
+        # rows, and loading each one's strategy code just to group them is waste.
+        runs = session.query(
+            BacktestRun.job_id, BacktestRun.batch_id, BacktestRun.batch_seq, BacktestRun.batch_name,
+            BacktestRun.name, BacktestRun.status, BacktestRun.symbols, BacktestRun.exchange,
+            BacktestRun.interval, BacktestRun.metrics_json, BacktestRun.created_at,
+            BacktestRun.mode, BacktestRun.universe,
+        ).order_by(BacktestRun.created_at.desc()).all()
         groups: dict[str, list] = {}
         for r in runs:
             groups.setdefault(r.batch_id or r.job_id, []).append(r)
@@ -334,6 +381,8 @@ def list_batches():
                 "status": overall,
                 "status_counts": statuses,
                 "intervals": [m.interval for m in members],
+                "mode": first.mode or "stock",
+                "universe": first.universe,
                 "best_return_pct": round(max(returns), 2) if returns else None,
                 "worst_return_pct": round(min(returns), 2) if returns else None,
                 "created_at": latest_created.isoformat() if latest_created else "",
@@ -368,11 +417,14 @@ def get_batch_details(batch_id):
             "status": "success",
             "batch_id": batch_id,
             "name": name,
+            "mode": runs[0].mode or "stock",
+            "universe": runs[0].universe,
             "runs": [
                 {
                     "job_id": r.job_id,
                     "name": r.name,
                     "interval": r.interval,
+                    "symbols": json.loads(r.symbols) if r.symbols else [],
                     "batch_seq": r.batch_seq or 0,
                     "status": r.status,
                     "metrics": json.loads(r.metrics_json) if r.metrics_json else {},
@@ -505,10 +557,51 @@ def get_job_details(job_id):
                 "completed_at": run.completed_at.isoformat() if run.completed_at else "",
                 "metrics": metrics,
                 "error_message": run.error_message,
+                "mode": run.mode or "stock",
+                "universe": run.universe,
+                "starred": bool(run.starred),
+                "notes": run.notes or "",
             }
         })
     except Exception as e:
         logger.exception(f"Error fetching job details for {job_id}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db_session.remove()
+
+
+_MAX_NOTE_CHARS = 4000
+
+
+@backtest_bp.route("/jobs/<job_id>/meta", methods=["PATCH"])
+@check_session_validity
+def update_job_meta(job_id):
+    """Set a run's star and/or note: {"starred": bool, "notes": str}."""
+    data = request.get_json(silent=True) or {}
+    if "starred" not in data and "notes" not in data:
+        return jsonify({"status": "error", "message": "Nothing to update (starred, notes)"}), 400
+    session = db_session()
+    try:
+        run = session.query(BacktestRun).filter_by(job_id=job_id).first()
+        if not run:
+            return jsonify({"status": "error", "message": "Job not found"}), 404
+        if "starred" in data:
+            run.starred = 1 if data["starred"] else 0
+        if "notes" in data:
+            notes = data["notes"]
+            if notes is not None and not isinstance(notes, str):
+                return jsonify({"status": "error", "message": "notes must be a string"}), 400
+            run.notes = (notes or "")[:_MAX_NOTE_CHARS] or None
+        session.commit()
+        return jsonify({
+            "status": "success",
+            "job_id": job_id,
+            "starred": bool(run.starred),
+            "notes": run.notes or "",
+        })
+    except Exception as e:
+        session.rollback()
+        logger.exception(f"Error updating backtest job meta {job_id}: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         db_session.remove()
