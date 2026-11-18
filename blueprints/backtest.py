@@ -1,6 +1,7 @@
 # blueprints/backtest.py
 
 import json
+import math
 import uuid
 from datetime import datetime
 
@@ -55,6 +56,24 @@ backtest_bp = Blueprint("backtest_api", __name__, url_prefix="/backtest/api")
 MAX_CURVE_POINTS = 2000
 # /results and /compare cap; pass ?full=1 to /results for every point.
 RESULTS_CURVE_POINTS = 5000
+_SIZING_TYPES = {"fixed_qty", "pct_equity", "fixed_capital", "kelly_vol"}
+_MISSING_DATA_POLICIES = {"skip", "forward_fill", "abort"}
+
+
+def _validate_run_inputs(data):
+    try:
+        initial_capital = float(data.get("initial_capital", 100000.0))
+    except (TypeError, ValueError):
+        raise ValueError("initial_capital must be a finite number greater than 0") from None
+    if not math.isfinite(initial_capital) or initial_capital <= 0:
+        raise ValueError("initial_capital must be a finite number greater than 0")
+    sizing_type = data.get("sizing_type") or "fixed_qty"
+    if sizing_type not in _SIZING_TYPES:
+        raise ValueError(f"sizing_type must be one of {', '.join(sorted(_SIZING_TYPES))}")
+    missing_data_policy = data.get("missing_data_policy") or "skip"
+    if missing_data_policy not in _MISSING_DATA_POLICIES:
+        raise ValueError("missing_data_policy must be one of skip, forward_fill, abort")
+    return initial_capital, sizing_type, missing_data_policy
 
 
 def _downsample_curve(rows: list, limit: int = MAX_CURVE_POINTS) -> list:
@@ -195,13 +214,11 @@ def submit_run():
             intervals = [interval]
         start_date = data.get("start_date")
         end_date = data.get("end_date")
-        initial_capital = float(data.get("initial_capital", 100000.0))
-        sizing_type = data.get("sizing_type", "fixed_qty")
+        initial_capital, sizing_type, missing_data_policy = _validate_run_inputs(data)
         sizing_value = float(data.get("sizing_value", 1.0))
         slippage_bps = float(data.get("slippage_bps", 0.0))
         brokerage_bps = float(data.get("brokerage_bps", 0.0))
         product_type = data.get("product_type", "MIS")
-        missing_data_policy = data.get("missing_data_policy", "skip")
         stop_loss_pct = float(data["stop_loss_pct"]) if data.get("stop_loss_pct") is not None else None
         take_profit_pct = float(data["take_profit_pct"]) if data.get("take_profit_pct") is not None else None
         daily_loss_limit = float(data["daily_loss_limit"]) if data.get("daily_loss_limit") is not None else None
@@ -1000,6 +1017,7 @@ def submit_optimization():
     try:
         if not data.get("strategy_code"):
             return jsonify({"status": "error", "message": "strategy_code is required"}), 400
+        initial_capital, sizing_type, missing_data_policy = _validate_run_inputs(data)
         symbols = data.get("symbols", ["NSE:SBIN"])
         opt_id = start_optimization(
             name=data.get("name", "Untitled Optimization"),
@@ -1010,13 +1028,13 @@ def submit_optimization():
             interval=data.get("interval", "5m"),
             start_date=data.get("start_date"),
             end_date=data.get("end_date"),
-            initial_capital=float(data.get("initial_capital", 100000.0)),
-            sizing_type=data.get("sizing_type", "fixed_qty"),
+            initial_capital=initial_capital,
+            sizing_type=sizing_type,
             sizing_value=float(data.get("sizing_value", 1.0)),
             slippage_bps=float(data.get("slippage_bps", 0.0)),
             brokerage_bps=float(data.get("brokerage_bps", 0.0)),
             product_type=data.get("product_type", "MIS"),
-            missing_data_policy=data.get("missing_data_policy", "skip"),
+            missing_data_policy=missing_data_policy,
             stop_loss_pct=float(data["stop_loss_pct"]) if data.get("stop_loss_pct") is not None else None,
             take_profit_pct=float(data["take_profit_pct"]) if data.get("take_profit_pct") is not None else None,
             daily_loss_limit=float(data["daily_loss_limit"]) if data.get("daily_loss_limit") is not None else None,

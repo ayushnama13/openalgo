@@ -349,8 +349,27 @@ def load_run_bars(
     nothing is usable or the run exceeds the total bar budget.
     """
     limit = max_symbols or _MAX_SYMBOLS
-    start_ts = int(pd.to_datetime(start_date).timestamp()) if start_date else None
-    end_ts = int(pd.to_datetime(end_date).timestamp()) if end_date else None
+    if missing_data_policy not in {"skip", "forward_fill", "abort"}:
+        raise ValueError("missing_data_policy must be one of skip, forward_fill, abort")
+
+    ist = pytz.timezone("Asia/Kolkata")
+
+    def _bound_timestamp(value, is_end):
+        if not value:
+            return None
+        parsed = pd.Timestamp(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.tz_localize(ist)
+        else:
+            parsed = parsed.tz_convert(ist)
+        if len(str(value).strip()) == 10 and is_end:
+            parsed = parsed.replace(hour=23, minute=59, second=59)
+        elif len(str(value).strip()) == 10:
+            parsed = parsed.replace(hour=0, minute=0, second=0)
+        return int(parsed.timestamp())
+
+    start_ts = _bound_timestamp(start_date, False)
+    end_ts = _bound_timestamp(end_date, True)
 
     keys: list[str] = []
     for raw in symbols or ["SBIN"]:
@@ -404,7 +423,7 @@ def load_run_bars(
         if missing_data_policy == "skip":
             df = df.dropna(subset=["open", "high", "low", "close"])
         elif missing_data_policy == "forward_fill":
-            df = df.ffill().bfill()
+            df = df.ffill().dropna(subset=["open", "high", "low", "close"])
         elif missing_data_policy == "abort":
             if df[["open", "high", "low", "close"]].isnull().any().any():
                 raise ValueError(

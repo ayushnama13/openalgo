@@ -18,6 +18,8 @@ import pytest
 
 os.environ.setdefault("BACKTEST_DATABASE_URL", "sqlite:////tmp/opencode/backtest_tests.db")
 
+from datetime import UTC
+
 import database.backtest_db as bdb
 import services.backtest_fill_engine as fill
 import services.backtest_service as svc
@@ -695,6 +697,79 @@ def test_backtest_routes_reject_anonymous_requests():
             assert resp.status_code in (301, 302, 401), f"{method} {path} -> {resp.status_code}"
             checked += 1
     assert checked >= len(rules)
+
+
+def test_load_run_bars_forward_fill_drops_leading_nulls(monkeypatch):
+    bars = make_bars(3)
+    bars.loc[0, ["open", "high", "low", "close"]] = np.nan
+    monkeypatch.setattr(svc, "get_ohlcv", lambda *a, **kw: bars.copy())
+
+    result, _ = svc.load_run_bars(["NSE:TEST"], "NSE", "5m", None, None, "forward_fill")
+
+    assert len(result["NSE:TEST"]) == 2
+    assert result["NSE:TEST"]["close"].notna().all()
+
+
+def test_load_run_bars_date_bounds_are_india_calendar_bounds(monkeypatch):
+    epochs = pd.to_datetime(
+        ["2024-06-01 00:00:00", "2024-06-01 15:15:00"],
+    ).tz_localize("Asia/Kolkata").tz_convert("UTC").astype("int64") // 10**9
+    bars = pd.DataFrame({
+        "timestamp": epochs,
+        "open": [100.0, 101.0], "high": [101.0, 102.0],
+        "low": [99.0, 100.0], "close": [100.0, 101.0], "volume": [1, 1],
+    })
+    seen = {}
+
+    def get_bars(*args, **kwargs):
+        seen.update(kwargs)
+        selected = bars.copy()
+        if kwargs["start_timestamp"] is not None:
+            selected = selected[selected["timestamp"] >= kwargs["start_timestamp"]]
+        if kwargs["end_timestamp"] is not None:
+            selected = selected[selected["timestamp"] <= kwargs["end_timestamp"]]
+        return selected
+
+    monkeypatch.setattr(svc, "get_ohlcv", get_bars)
+    result, _ = svc.load_run_bars(
+        ["NSE:TEST"], "NSE", "D", "2024-06-01", "2024-06-01", "skip"
+    )
+
+    assert len(result["NSE:TEST"]) == 2
+    assert seen["start_timestamp"] == int(pd.Timestamp("2024-06-01 00:00:00", tz="Asia/Kolkata").timestamp())
+    assert seen["end_timestamp"] == int(pd.Timestamp("2024-06-01 23:59:59", tz="Asia/Kolkata").timestamp())
+
+
+def test_load_run_bars_rejects_unknown_missing_data_policy():
+    with pytest.raises(ValueError, match="missing_data_policy"):
+        svc.load_run_bars(["NSE:TEST"], "NSE", "5m", None, None, "bogus")
+
+
+@pytest.mark.parametrize("route", ["/backtest/api/run", "/backtest/api/optimize"])
+@pytest.mark.parametrize(
+    "field,value",
+    [("initial_capital", 0), ("initial_capital", "abc"), ("sizing_type", "bogus")],
+)
+def test_backtest_submit_routes_reject_invalid_run_inputs(monkeypatch, route, field, value):
+    from datetime import datetime, timezone
+
+    from flask import Flask
+
+    from blueprints.backtest import backtest_bp
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.config["WTF_CSRF_ENABLED"] = False
+    app.register_blueprint(backtest_bp)
+    payload = {"strategy_code": "df['signal'] = 0", field: value}
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["logged_in"] = True
+            sess["login_time"] = datetime.now(UTC).isoformat()
+        response = client.post(route, json=payload)
+
+    assert response.status_code == 400
+    assert response.get_json()["status"] == "error"
 
 
 def test_cancel_batch_marks_queued_runs_cancelled(monkeypatch):
