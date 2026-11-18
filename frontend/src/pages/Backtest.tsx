@@ -41,6 +41,7 @@ import { useSocket } from '@/hooks/useSocket'
 import {
   buildEngineOptions,
   DEFAULT_ENGINE_OPTIONS,
+  engineOptionsFromSaved,
   type EngineOptionsState,
 } from '@/lib/backtestEngineOptions'
 import { DEFAULT_STRATEGY_CODE, STRATEGY_TEMPLATES } from '@/lib/backtestTemplates'
@@ -166,6 +167,7 @@ export default function Backtest() {
   const [dailyLossLimit, setDailyLossLimit] = useState('')
   const [maxPositions, setMaxPositions] = useState(5)
   const [engineOptions, setEngineOptions] = useState<EngineOptionsState>(DEFAULT_ENGINE_OPTIONS)
+  const rangeRequestGeneration = useRef(0)
   const [optimizeOpen, setOptimizeOpen] = useState(false)
 
   // Run state
@@ -216,6 +218,7 @@ export default function Backtest() {
   }, [])
 
   const loadRanges = useCallback(async (sym: string, exch: string, ivs: string[]) => {
+    const generation = ++rangeRequestGeneration.current
     const results: Record<string, RangeInfo | null> = {}
     await Promise.all(
       ivs.map(async (iv) => {
@@ -231,7 +234,7 @@ export default function Backtest() {
         }
       })
     )
-    setRangesByInterval(results)
+    if (generation === rangeRequestGeneration.current) setRangesByInterval(results)
   }, [])
 
   useEffect(() => {
@@ -659,6 +662,7 @@ export default function Backtest() {
     setTakeProfitPct(job.take_profit_pct != null ? String(job.take_profit_pct) : '')
     setDailyLossLimit(job.daily_loss_limit != null ? String(job.daily_loss_limit) : '')
     setMaxPositions(job.max_positions)
+    setEngineOptions(engineOptionsFromSaved(job.engine_options))
     setSettingsTab('data')
   }, [])
 
@@ -756,14 +760,17 @@ export default function Backtest() {
           headers,
         })
       }
-      for (const j of jobs.filter((x) => x.status === 'running' || x.status === 'pending')) {
-        await fetch(`/backtest/api/cancel/${j.job_id}`, {
-          method: 'POST',
-          credentials: 'include',
-          headers,
-        })
+      const response = await fetch('/backtest/api/cancel-active', {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+      })
+      const data = await response.json()
+      if (!response.ok || data.status !== 'success') {
+        showToast.error(data.message || 'Failed to cancel active jobs')
+        return
       }
-      showToast.info('Cancel requests sent for queued/active jobs')
+      showToast.info(`Cancel requests sent: ${data.cancelled} of ${data.requested} active jobs`)
       loadJobs({ all: true })
     } catch {
       showToast.error('Failed to cancel active jobs')
@@ -773,12 +780,17 @@ export default function Backtest() {
   const handlePurge = async () => {
     try {
       const csrfToken = await fetchCSRFToken()
-      await fetch('/backtest/api/cleanup', {
+      const response = await fetch('/backtest/api/cleanup', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
         body: JSON.stringify({ days_to_keep: 30 }),
       })
+      const data = await response.json()
+      if (!response.ok || data.status !== 'success') {
+        showToast.error(data.message || 'Failed to purge old runs')
+        return
+      }
       showToast.success('Old runs purged (retention 30 days)')
       loadJobs({ all: true })
     } catch {

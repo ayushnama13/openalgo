@@ -102,6 +102,14 @@ let runBodies: Record<string, unknown>[] = []
 let requests: { method: string; path: string; search: string; body?: unknown }[] = []
 let runResponse: Record<string, unknown> = {}
 let batchPolls = 0
+let cancelActiveResponse: { ok: boolean; body: Record<string, unknown> } = {
+  ok: true,
+  body: { status: 'success', requested: 7, cancelled: 5, failed: ['job-6', 'job-7'] },
+}
+let cleanupResponse: { ok: boolean; body: Record<string, unknown> } = {
+  ok: true,
+  body: { status: 'success' },
+}
 
 // Generous waits: under a parallel suite the listing -> coverage chain can take seconds.
 const WAIT = { timeout: 6000 }
@@ -124,6 +132,11 @@ describe('Backtest universe mode', { timeout: 20000 }, () => {
     runBodies = []
     requests = []
     batchPolls = 0
+    cancelActiveResponse = {
+      ok: true,
+      body: { status: 'success', requested: 7, cancelled: 5, failed: ['job-6', 'job-7'] },
+    }
+    cleanupResponse = { ok: true, body: { status: 'success' } }
     runResponse = { status: 'success', job_id: 'queued-1', jobs: [{ job_id: 'queued-1' }] }
     navigate.mockReset()
     for (const fn of Object.values(toast)) fn.mockReset()
@@ -140,7 +153,11 @@ describe('Backtest universe mode', { timeout: 20000 }, () => {
         } else if (url.pathname === '/backtest/api/range') {
           body = { status: 'error' }
         } else if (url.pathname === '/backtest/api/jobs') {
-          body = { status: 'success', jobs: [STARRABLE_JOB], total: 1 }
+          body = {
+            status: 'success',
+            jobs: [STARRABLE_JOB, { ...STARRABLE_JOB, job_id: 'active-1', status: 'running' }],
+            total: 2,
+          }
         } else if (url.pathname === '/backtest/api/jobs/job-1/meta') {
           body = { status: 'success', job_id: 'job-1', starred: reqBody.starred, notes: '' }
         } else if (url.pathname === '/backtest/api/universes') {
@@ -150,6 +167,12 @@ describe('Backtest universe mode', { timeout: 20000 }, () => {
         } else if (url.pathname === '/backtest/api/run') {
           runBodies.push(reqBody)
           body = runResponse
+        } else if (url.pathname === '/backtest/api/cancel-active') {
+          body = cancelActiveResponse.body
+          return { ok: cancelActiveResponse.ok, json: async () => body } as Response
+        } else if (url.pathname === '/backtest/api/cleanup') {
+          body = cleanupResponse.body
+          return { ok: cleanupResponse.ok, json: async () => body } as Response
         } else if (url.pathname === '/backtest/api/batches/batch-1') {
           batchPolls += 1
           const done = batchPolls > 1
@@ -259,7 +282,13 @@ describe('Backtest universe mode', { timeout: 20000 }, () => {
 
   it('stars a run through the meta endpoint', async () => {
     render(<Backtest />)
-    const star = await screen.findByRole('button', { name: 'Star run' }, WAIT)
+    fireEvent.click(await screen.findByRole('button', { name: /Job History/ }, WAIT))
+    fireEvent.click(await screen.findByRole('tab', { name: /History/ }, WAIT))
+    await waitFor(
+      () => expect(screen.getAllByRole('button', { name: 'Star run' })).toHaveLength(2),
+      WAIT
+    )
+    const star = screen.getAllByRole('button', { name: 'Star run' })[0]
     fireEvent.click(star)
     await waitFor(
       () =>
@@ -273,5 +302,41 @@ describe('Backtest universe mode', { timeout: 20000 }, () => {
       WAIT
     )
     expect(await screen.findByRole('button', { name: 'Unstar run' }, WAIT)).toBeInTheDocument()
+  })
+
+  it('cancels all active jobs through the bulk endpoint and reports response counts', async () => {
+    render(<Backtest />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel All Active' }, WAIT))
+
+    await waitFor(() =>
+      expect(requests).toContainEqual(
+        expect.objectContaining({ method: 'POST', path: '/backtest/api/cancel-active' })
+      )
+    )
+    expect(toast.info).toHaveBeenCalledWith('Cancel requests sent: 5 of 7 active jobs')
+    expect(
+      requests.filter((request) => request.path.startsWith('/backtest/api/cancel/'))
+    ).toHaveLength(0)
+  })
+
+  it('reports cancel-all HTTP failures', async () => {
+    cancelActiveResponse = { ok: false, body: { status: 'error', message: 'Bulk cancel failed' } }
+    render(<Backtest />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel All Active' }, WAIT))
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Bulk cancel failed'))
+  })
+
+  it('shows the purge server error instead of reporting success', async () => {
+    cleanupResponse = { ok: false, body: { status: 'error', message: 'Cleanup unavailable' } }
+    render(<Backtest />)
+    fireEvent.click(await screen.findByRole('button', { name: /Job History/ }, WAIT))
+    fireEvent.click(await screen.findByRole('tab', { name: /History/ }, WAIT))
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Purge runs older than 30 days' }, WAIT)
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Purge' }))
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Cleanup unavailable'))
+    expect(toast.success).not.toHaveBeenCalledWith('Old runs purged (retention 30 days)')
   })
 })
