@@ -210,6 +210,7 @@ class Order:
     created_bar: int
     valid_bars: int | None = None
     reduce_only: bool = False
+    order_charge_taken: bool = False
 
 
 _CLOSE_ALL = -1.0
@@ -329,6 +330,16 @@ class Context:
         side = side.upper()
         if side not in (BUY, SELL):
             raise ValueError("side must be BUY or SELL")
+        if qty is not None and qty != _CLOSE_ALL:
+            if not math.isfinite(float(qty)) or float(qty) <= 0:
+                raise ValueError("qty must be a finite number greater than 0")
+        if pct is not None and (not math.isfinite(float(pct)) or float(pct) <= 0):
+            raise ValueError("pct must be a finite number greater than 0")
+        for name, value in (("limit_price", limit_price), ("trigger_price", trigger_price),
+                            ("sl_pct", sl_pct), ("tp_pct", tp_pct), ("sl_price", sl_price),
+                            ("tp_price", tp_price), ("trail_pct", trail_pct)):
+            if value is not None and not math.isfinite(float(value)):
+                raise ValueError(f"{name} must be finite")
         return self._e.submit(
             Order(
                 id=0, symbol=symbol, side=side, qty=qty, pct=pct,
@@ -531,7 +542,7 @@ class Engine:
     def _reject(self, reason: str) -> None:
         self.rejections[reason] = self.rejections.get(reason, 0) + 1
 
-    def _fill_price(self, s, action, price_type, limit, trigger, b: Bar, qty):
+    def _fill_price(self, s, action, price_type, limit, trigger, b: Bar, qty, order=None):
         slip = self.cfg.slippage_bps + self.cfg.spread_bps / 2.0
         if self.cfg.impact_bps and b.volume > 0:
             slip += self.cfg.impact_bps * math.sqrt(min(1.0, qty / b.volume))
@@ -544,7 +555,10 @@ class Engine:
         )
         if filled and sched:
             value = price * qty
-            cost = sched.charge(value if action == BUY else 0.0, value if action == SELL else 0.0, 1)
+            orders = 1 if order is None or not order.order_charge_taken else 0
+            cost = sched.charge(value if action == BUY else 0.0, value if action == SELL else 0.0, orders)
+        if filled and order is not None:
+            order.order_charge_taken = True
         return filled, price, cost
 
     # ---- book keeping ----
@@ -635,25 +649,27 @@ class Engine:
             budget_pct = o.pct
             if budget_pct is None and self.cfg.sizing_type == "fixed_qty":
                 # fixed_qty counts LOTS for contracts with a lot size
-                return float(self.cfg.sizing_value) * lot
-            unit = self._unit_margin(o.symbol, o.side, price) or price
-            if budget_pct is not None:
-                qty = math.floor(self.equity_now() * budget_pct / 100.0 / unit) if unit > 0 else 0.0
-            elif lot > 1 or derivative:
-                if self.cfg.sizing_type == "fixed_capital":
-                    budget = self.cfg.sizing_value
-                elif self.cfg.sizing_type == "kelly_vol":
-                    budget = self.equity_now() * min(0.25, max(0.02, self.cfg.sizing_value))
-                else:
-                    budget = self.equity_now() * self.cfg.sizing_value / 100.0
-                qty = math.floor(budget / unit) if unit > 0 else 0.0
+                qty = float(self.cfg.sizing_value) * lot
             else:
-                return calculate_position_qty(
-                    self.cfg.sizing_type, self.cfg.sizing_value, self.equity_now(), price,
-                    self.cfg.initial_capital,
-                )
-        if lot > 1:
-            qty = math.floor(qty / lot) * lot
+                unit = self._unit_margin(o.symbol, o.side, price) or price
+                if budget_pct is not None:
+                    qty = math.floor(self.equity_now() * budget_pct / 100.0 / unit) if unit > 0 else 0.0
+                elif lot > 1 or derivative:
+                    if self.cfg.sizing_type == "fixed_capital":
+                        budget = self.cfg.sizing_value
+                    elif self.cfg.sizing_type == "kelly_vol":
+                        budget = self.equity_now() * min(0.25, max(0.02, self.cfg.sizing_value))
+                    else:
+                        budget = self.equity_now() * self.cfg.sizing_value / 100.0
+                    qty = math.floor(budget / unit) if unit > 0 else 0.0
+                else:
+                    qty = calculate_position_qty(
+                        self.cfg.sizing_type, self.cfg.sizing_value, self.equity_now(), price,
+                        self.cfg.initial_capital,
+                    )
+        if not math.isfinite(qty):
+            return 0.0
+        qty = math.floor(qty / lot) * lot
         return float(qty)
 
     def _process_pending(self) -> None:
@@ -670,7 +686,7 @@ class Engine:
                 continue
             p = self.positions.get(o.symbol)
             qty = self._resolve_qty(o, b.close, p)
-            if qty <= 0:
+            if not math.isfinite(qty) or qty <= 0:
                 continue
             closing_dir = bool(p) and ((p.qty > 0) == (o.side == SELL))
             if o.reduce_only or o.qty == _CLOSE_ALL:
@@ -692,7 +708,7 @@ class Engine:
                     continue
                 qty = min(qty, float(room))
             filled, price, cost = self._fill_price(
-                o.symbol, o.side, o.price_type, o.limit_price, o.trigger_price, b, qty
+                o.symbol, o.side, o.price_type, o.limit_price, o.trigger_price, b, qty, o
             )
             if not filled:
                 keep.append(o)
