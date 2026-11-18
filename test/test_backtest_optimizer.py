@@ -120,6 +120,20 @@ def test_monte_carlo_needs_enough_trades():
         optim.monte_carlo([1, 2], 1000)
 
 
+def test_monte_carlo_respects_cell_budget_and_reports_simulations():
+    result = optim.monte_carlo([1.0] * 50000, 1000, n_sims=20000)
+    assert result["simulations"] == 20_000_000 // 50001
+
+
+def test_positive_infinity_score_ranks_first_and_serializes_safely():
+    metrics = {"total_trades": 5, "profit_factor": float("inf")}
+    assert optim._score(metrics, "profit_factor", 1) == float("inf")
+    row = optim._summary_row({}, metrics, float("inf"))
+    assert row["score"] == 999.99
+    assert "Infinity" not in json.dumps(optim._json_safe(row), allow_nan=False)
+    assert optim._score({"total_trades": 5, "profit_factor": float("nan")}, "profit_factor", 1) == float("-inf")
+
+
 # ---- sandboxed studies ----
 def test_sweep_ranks_candidates_and_reports_oos():
     spec = {"param_space": {"fast": [3, 5, 8], "slow": [15, 30]}, "objective": "total_return_pct",

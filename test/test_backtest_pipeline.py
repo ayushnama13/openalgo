@@ -252,6 +252,21 @@ def test_backtest_metrics():
     assert m["avg_holding_minutes"] == 0.0  # trades carry no timestamps
 
 
+def test_short_run_cagr_is_not_annualized_and_sortino_uses_full_series():
+    equity = pd.Series([100.0, 110.0, 105.0], index=pd.to_datetime(["2024-01-01 09:15", "2024-01-01 12:15", "2024-01-01 15:15"]))
+    metrics = svc.calculate_backtest_metrics(equity, [], 100.0)
+    assert metrics["cagr_pct"] == 5.0
+    returns = equity.pct_change().dropna().to_numpy()
+    expected = returns.mean() / np.sqrt(np.square(np.minimum(returns, 0)).mean()) * np.sqrt(252)
+    assert metrics["sortino_ratio"] == round(expected, 2)
+
+
+def test_heatmap_ytd_chains_from_previous_year_end():
+    equity = pd.Series([100.0, 120.0, 132.0], index=pd.to_datetime(["2023-12-01", "2023-12-31", "2024-01-01"]))
+    heatmap = svc.generate_monthly_returns_heatmap(equity)
+    assert heatmap["matrix"]["2024"]["YTD"] == 10.0
+
+
 def test_periods_per_year_for_interval():
     assert periods_per_year_for_interval("1m") == 252.0 * 375.0
     assert periods_per_year_for_interval("5m") == 252.0 * 75.0

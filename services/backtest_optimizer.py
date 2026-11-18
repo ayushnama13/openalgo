@@ -134,7 +134,10 @@ def _score(metrics: dict | None, objective: str, min_trades: int) -> float:
     if metrics is None or metrics["total_trades"] < min_trades:
         return float("-inf")
     value = metrics.get(objective, 0.0)
-    return float(value) if value is not None and math.isfinite(value) else float("-inf")
+    if value is None:
+        return float("-inf")
+    value = float(value)
+    return value if not math.isnan(value) else float("-inf")
 
 
 def deflated_sharpe(best_returns: np.ndarray, trial_sharpes: list[float]) -> dict:
@@ -194,10 +197,18 @@ def _ts(timeline: pd.DatetimeIndex, i: int) -> str:
     return timeline[i].strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _display_score(score: float) -> float | None:
+    """JSON-safe score: None when ineligible, 999.99 for a lossless profit factor."""
+    if score == float("inf"):
+        return 999.99
+    return round(score, 4) if math.isfinite(score) else None
+
+
 def _summary_row(params: dict, m: dict | None, score: float) -> dict:
     return {
         "params": params,
-        "score": None if not math.isfinite(score) else round(score, 4),
+        "score": _display_score(score),
+        "_positive_infinity": score == float("inf"),
         "metrics": m,
     }
 
@@ -255,10 +266,13 @@ def run_sweep(
         if oos_pct:
             m_out = _metrics_for(results[len(combos) + i], tl, capital, interval)
             row["oos_metrics"] = m_out
-            row["oos_score"] = None if m_out is None else round(_score(m_out, objective, 0), 4)
+            oos_score = float("-inf") if m_out is None else _score(m_out, objective, 0)
+            row["oos_score"] = _display_score(oos_score)
         rows.append(row)
 
-    ranked = sorted(rows, key=lambda r: (r["score"] is None, -(r["score"] or 0)))
+    ranked = sorted(rows, key=lambda r: (r["score"] is None, not r["_positive_infinity"], -(r["score"] or 0)))
+    for row in ranked:
+        row.pop("_positive_infinity", None)
     best = ranked[0] if ranked and ranked[0]["score"] is not None else None
     dsr = None
     if best is not None:
@@ -354,7 +368,7 @@ def run_walk_forward(
                 trial_sharpes.append(_period_sharpe(res["equity"]))
             if best is None or sc > best[0]:
                 best = (sc, t["params"], m)
-        chosen.append(best if best and math.isfinite(best[0]) else None)
+        chosen.append(best if best and (math.isfinite(best[0]) or best[0] == float("inf")) else None)
 
     # Round 2: each window's winner on the unseen test window that follows.
     tasks2 = []
@@ -465,6 +479,9 @@ def monte_carlo(
         raise ValueError("Need at least 5 trades for a Monte Carlo analysis")
     if len(arr) > 50000:
         raise ValueError("Too many trades for Monte Carlo (limit 50000)")
+    n_sims = min(n_sims, 20_000_000 // (len(arr) + 1))
+    if n_sims < 100:
+        raise ValueError("Monte Carlo cell budget allows fewer than 100 simulations")
     rng = np.random.default_rng(seed)
     if method == "bootstrap":
         draws = rng.choice(arr, size=(n_sims, len(arr)), replace=True)
@@ -570,7 +587,7 @@ def run_optimization_job(opt_id: str, cancel_event, loader) -> None:
         rec = session.query(BacktestOptimization).filter_by(opt_id=opt_id).first()
         rec.status = "completed"
         rec.progress = 100.0
-        rec.result_json = json.dumps(result, default=_json_default)
+        rec.result_json = json.dumps(_json_safe(result), default=_json_default, allow_nan=False)
         rec.completed_at = _now()
         session.commit()
     except BacktestCancelled:
@@ -586,10 +603,26 @@ def _json_default(o):
     if isinstance(o, (np.integer,)):
         return int(o)
     if isinstance(o, (np.floating,)):
-        return float(o)
+        value = float(o)
+        return value if math.isfinite(value) else None
     if isinstance(o, np.ndarray):
         return o.tolist()
     raise TypeError(f"not JSON serialisable: {type(o)}")
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (float, np.floating)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.ndarray):
+        return _json_safe(value.tolist())
+    return value
 
 
 def _finish(opt_id: str, status: str, error: str | None) -> None:
