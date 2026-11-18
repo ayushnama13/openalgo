@@ -44,6 +44,8 @@ export interface Metrics {
     matrix: Record<string, Record<string, number | null>>
   }
   notes?: string[]
+  /** Per-charge totals for the run (brokerage, stt, exchange_txn, sebi, stamp_duty, tax, ..., total). */
+  charges_breakdown?: Record<string, number>
 }
 
 export interface EquityPoint {

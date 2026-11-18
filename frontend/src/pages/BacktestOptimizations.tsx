@@ -4,6 +4,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { fetchCSRFToken } from '@/api/client'
 import { PLOT_CONFIG, PLOT_LAYOUT } from '@/components/backtest/plotConfig'
+import {
+  type NoiseResult,
+  NoiseView,
+  type StressResult,
+  StressView,
+  VerdictBanner,
+  type WalkForwardVerdict,
+} from '@/components/backtest/RobustnessViews'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -65,7 +73,7 @@ interface WfWindow {
 }
 
 interface Result {
-  kind: 'sweep' | 'walk_forward'
+  kind: 'sweep' | 'walk_forward' | 'stress' | 'noise'
   objective: string
   trials: number
   warnings: string[]
@@ -81,6 +89,15 @@ interface Result {
   oos_metrics?: Metrics | null
   oos_equity?: { timestamp: string; equity: number }[]
   walk_forward_efficiency?: number | null
+  window_mode?: 'rolling' | 'anchored'
+  verdict?: WalkForwardVerdict
+}
+
+const STUDY_LABEL: Record<string, string> = {
+  sweep: 'Sweep',
+  walk_forward: 'Walk-forward',
+  stress: 'Cost stress test',
+  noise: 'Noise test',
 }
 
 interface Detail extends Summary {
@@ -229,6 +246,13 @@ function WalkForwardView({ r }: { r: Result }) {
   }, [r.oos_equity])
   return (
     <div className="space-y-5">
+      {r.verdict && (
+        <VerdictBanner
+          rating={r.verdict.rating}
+          title={`Walk-forward verdict (${r.window_mode === 'anchored' ? 'anchored' : 'rolling'} windows)`}
+          reasons={r.verdict.reasons}
+        />
+      )}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <Stat label="Out-of-sample return" value={`${fmt(r.oos_metrics?.total_return_pct)}%`} />
         <Stat label="Out-of-sample Sharpe" value={fmt(r.oos_metrics?.sharpe_ratio)} />
@@ -401,7 +425,7 @@ export default function BacktestOptimizations() {
                         {o.name}
                       </Link>
                     </TableCell>
-                    <TableCell>{o.kind === 'walk_forward' ? 'Walk-forward' : 'Sweep'}</TableCell>
+                    <TableCell>{STUDY_LABEL[o.kind] ?? o.kind}</TableCell>
                     <TableCell>
                       <Badge className={STATUS_TONE[o.status]}>{o.status}</Badge>
                     </TableCell>
@@ -458,7 +482,16 @@ export default function BacktestOptimizations() {
                 {w}
               </p>
             ))}
-            {r && (r.kind === 'sweep' ? <SweepView r={r} /> : <WalkForwardView r={r} />)}
+            {r &&
+              (r.kind === 'stress' ? (
+                <StressView r={r as unknown as StressResult} />
+              ) : r.kind === 'noise' ? (
+                <NoiseView r={r as unknown as NoiseResult} />
+              ) : r.kind === 'sweep' ? (
+                <SweepView r={r} />
+              ) : (
+                <WalkForwardView r={r} />
+              ))}
             {r?.notes?.map((n) => (
               <p key={n} className="text-xs text-muted-foreground">
                 {n}
