@@ -60,6 +60,7 @@ logger = get_logger(__name__)
 # Active running job cancel flags: job_id -> threading.Event()
 _ACTIVE_JOBS: dict[str, threading.Event] = {}
 _ACTIVE_JOBS_LOCK = threading.Lock()
+_CANCEL_REQUESTS: set[str] = set()
 
 # Shared work queue for backtest runs. A module-level singleton per the
 # FD-hygiene rule (threads and executors are shared, never per-call): tasks
@@ -111,6 +112,9 @@ def _cooperative_yield():
 def register_active_job(job_id: str) -> threading.Event:
     cancel_event = threading.Event()
     with _ACTIVE_JOBS_LOCK:
+        if job_id in _CANCEL_REQUESTS:
+            _CANCEL_REQUESTS.discard(job_id)
+            cancel_event.set()
         _ACTIVE_JOBS[job_id] = cancel_event
     return cancel_event
 
@@ -118,6 +122,7 @@ def register_active_job(job_id: str) -> threading.Event:
 def unregister_active_job(job_id: str):
     with _ACTIVE_JOBS_LOCK:
         _ACTIVE_JOBS.pop(job_id, None)
+        _CANCEL_REQUESTS.discard(job_id)
         _JOB_FUTURES.pop(job_id, None)
 
 
@@ -134,6 +139,7 @@ def _track_future(job_id: str, future: Future) -> None:
         with _ACTIVE_JOBS_LOCK:
             if _JOB_FUTURES.get(job_id) is done:
                 del _JOB_FUTURES[job_id]
+                _CANCEL_REQUESTS.discard(job_id)
 
     with _ACTIVE_JOBS_LOCK:
         _JOB_FUTURES[job_id] = future
@@ -154,9 +160,18 @@ def cancel_job(job_id: str) -> bool:
             cancel_event.set()
             return True
         future = _JOB_FUTURES.get(job_id)
-
-    if not (future and future.cancel()):
-        return False
+    if future and future.cancel():
+        pass
+    else:
+        with _ACTIVE_JOBS_LOCK:
+            cancel_event = _ACTIVE_JOBS.get(job_id)
+            if cancel_event:
+                cancel_event.set()
+                return True
+            if future and future.running() and not future.done():
+                _CANCEL_REQUESTS.add(job_id)
+                return True
+            return False
 
     with _ACTIVE_JOBS_LOCK:
         _JOB_FUTURES.pop(job_id, None)
@@ -765,13 +780,20 @@ def start_backtest_batch(
             if mode == "stock":
                 symbol_clean, sym_exch = _split_symbol(run["symbols"][0], exchange)
                 base_iv = resolve_base_interval(iv)
-                if not get_data_range(symbol_clean, sym_exch, base_iv):
+                checked_symbols = [_split_symbol(symbol, exchange) for symbol in run["symbols"]]
+                if not any(
+                    get_data_range(symbol, sym_exch, base_iv)
+                    for symbol, sym_exch in checked_symbols
+                ):
+                    symbols_checked = ", ".join(
+                        f"{symbol} ({sym_exch})" for symbol, sym_exch in checked_symbols
+                    )
                     session.add(BacktestRun(
                         **row,
                         status="failed",
                         completed_at=datetime.now(pytz.timezone("Asia/Kolkata")),
                         error_message=(
-                            f"No historical data available for {symbol_clean} ({sym_exch}) "
+                            f"No historical data available for {symbols_checked} "
                             f"interval {iv} in Historify (needs {base_iv} data)."
                         ),
                     ))
@@ -884,6 +906,15 @@ def cancel_batch(batch_id: str) -> list[str]:
                     session.commit()
                 with _ACTIVE_JOBS_LOCK:
                     _JOB_FUTURES.pop(job_id, None)
+                cancelled.append(job_id)
+            elif future and future.running() and not future.done():
+                # The worker may have registered since the lookup above.
+                with _ACTIVE_JOBS_LOCK:
+                    cancel_event = _ACTIVE_JOBS.get(job_id)
+                    if cancel_event:
+                        cancel_event.set()
+                    else:
+                        _CANCEL_REQUESTS.add(job_id)
                 cancelled.append(job_id)
         return cancelled
     except Exception as e:

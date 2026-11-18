@@ -393,6 +393,59 @@ def test_cancel_job_flag():
     assert svc.cancel_job(job_id) is False
 
 
+def test_cancel_job_before_registration_is_carried_into_pipeline():
+    from concurrent.futures import Future
+
+    job_id = "test_cancel_before_registration"
+    future = Future()
+    future.set_running_or_notify_cancel()
+    with svc._ACTIVE_JOBS_LOCK:
+        svc._JOB_FUTURES[job_id] = future
+
+    assert svc.cancel_job(job_id) is True
+    ev = svc.register_active_job(job_id)
+    assert ev.is_set()
+    svc.unregister_active_job(job_id)
+    assert job_id not in svc._CANCEL_REQUESTS
+
+
+def test_stock_preflight_checks_all_symbols(monkeypatch):
+    from concurrent.futures import Future
+
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, *args, **kwargs):
+            submitted.append((args, kwargs))
+            return Future()
+
+    monkeypatch.setattr(svc, "_BACKTEST_EXECUTOR", FakeExecutor())
+    present = {"first_timestamp": 0, "last_timestamp": 0, "record_count": 1}
+    monkeypatch.setattr(
+        svc,
+        "get_data_range",
+        lambda symbol, exchange, interval: present if symbol == "PRESENT" else None,
+    )
+
+    accepted = svc.start_backtest_batch(
+        name="mixed symbols", strategy_code=SIMPLE_CODE,
+        symbols=["NSE:MISSING", "NSE:PRESENT"], intervals=["1m"],
+    )
+    assert accepted["jobs"][0]["status"] == "pending"
+    assert len(submitted) == 1
+
+    rejected = svc.start_backtest_batch(
+        name="missing symbols", strategy_code=SIMPLE_CODE,
+        symbols=["NSE:MISSING", "NSE:MISSING"], intervals=["1m"],
+    )
+    assert rejected["jobs"][0]["status"] == "failed"
+    assert len(submitted) == 1
+    session = db_session()
+    failed = session.query(BacktestRun).filter_by(batch_id=rejected["jobs"][0]["job_id"]).first()
+    assert "MISSING (NSE), MISSING (NSE)" in failed.error_message
+    db_session.remove()
+
+
 def test_cleanup_old_runs():
     from datetime import timedelta
 
