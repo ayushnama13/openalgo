@@ -262,6 +262,35 @@ def test_stress_validation_without_param_space_and_bad_multipliers():
             optim.validate_spec({"kind": "stress", "multipliers": values})
 
 
+def test_perturb_bars_consistency_copy_and_reproducibility():
+    original = {"NSE:X": make_bars(80)}
+    before = original["NSE:X"].copy(deep=True)
+    one = optim.perturb_bars(original, 0.1, np.random.default_rng(7))
+    two = optim.perturb_bars(original, 0.1, np.random.default_rng(7))
+    altered = one["NSE:X"]
+    assert altered is not original["NSE:X"]
+    assert original["NSE:X"].equals(before)
+    assert altered.equals(two["NSE:X"])
+    assert (altered["high"] >= altered[["open", "low", "close"]].max(axis=1)).all()
+    assert (altered["low"] <= altered[["open", "high", "close"]].min(axis=1)).all()
+    assert (altered[["open", "high", "low", "close"]] > 0).all().all()
+    assert altered["timestamp"].equals(before["timestamp"])
+    assert altered["volume"].equals(before["volume"])
+
+
+def test_noise_run_shape_and_validation():
+    bars = {"NSE:X": make_bars(180)}
+    spec = optim.validate_spec({"kind": "noise", "runs": 5, "seed": 4})
+    result = optim.run_noise(CODE, bars, BASE, spec, 100000.0, "15m")
+    assert result["kind"] == "noise"
+    assert len(result["results"]) == result["runs"] == 5
+    assert result["verdict"] in {"PASS", "FAIL", "MARGINAL"}
+    assert set(result["distribution"]) == {"total_return_pct", "sharpe_ratio"}
+    for bad in ({"kind": "noise", "runs": 2}, {"kind": "noise", "noise_pct": 5}):
+        with pytest.raises(ValueError):
+            optim.validate_spec(bad)
+
+
 def test_parallel_task_results_match_serial_and_progress(monkeypatch):
     bars = {"NSE:X": make_bars(180)}
     tasks = [{"id": i, "params": {"fast": fast, "slow": 20}, "start": None, "end": None}

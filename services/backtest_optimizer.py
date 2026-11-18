@@ -601,6 +601,103 @@ def run_stress(
             "verdict": verdict, "warnings": warnings}
 
 
+def perturb_bars(bars: dict[str, pd.DataFrame], noise_pct: float, rng: np.random.Generator) -> dict[str, pd.DataFrame]:
+    """Return copied bars with independently perturbed OHLC prices."""
+    perturbed = {}
+    sigma = float(noise_pct) / 100.0
+    for symbol, frame in bars.items():
+        copy = frame.copy(deep=True)
+        factors = 1.0 + np.clip(rng.normal(0.0, sigma, size=(len(copy), 4)), -3.0 * sigma, 3.0 * sigma)
+        prices = copy[["open", "high", "low", "close"]].to_numpy(dtype=float) * factors
+        prices = np.maximum(prices, np.nextafter(0.0, 1.0))
+        copy[["open", "high", "low", "close"]] = prices
+        copy["high"] = copy[["open", "high", "low", "close"]].max(axis=1)
+        copy["low"] = copy[["open", "high", "low", "close"]].min(axis=1)
+        perturbed[symbol] = copy
+    return perturbed
+
+
+def run_noise(
+    strategy_code: str,
+    bars: dict[str, pd.DataFrame],
+    base_config: dict,
+    spec: dict,
+    capital: float,
+    interval: str,
+    cancel_event=None,
+    progress_cb=None,
+) -> dict:
+    """Compare an unmodified run with seeded runs on perturbed price bars."""
+    runs = int(spec.get("runs", 20))
+    noise_pct = float(spec.get("noise_pct", 0.1))
+    params = spec.get("params", {})
+    rng = np.random.default_rng(spec.get("seed", 0))
+    keys = ("total_return_pct", "sharpe_ratio", "max_drawdown_pct", "total_trades")
+    rows = []
+    baseline = None
+    warnings = []
+    total = runs + 1
+
+    for index in range(total):
+        if cancel_event is not None and cancel_event.is_set():
+            raise BacktestCancelled()
+        run_bars = bars if index == 0 else perturb_bars(bars, noise_pct, rng)
+        task_progress = (lambda pct, i=index: progress_cb((i + pct / 100.0) * 100.0 / total)) if progress_cb else None
+        try:
+            out = run_tasks_sandboxed(
+                strategy_code, run_bars, base_config,
+                [{"id": 0, "params": params, "start": None, "end": None}],
+                cancel_event=cancel_event, progress_cb=task_progress,
+            )
+            result = out["tasks"][0]
+            if "error" in result:
+                raise ValueError(result["error"])
+            timeline = pd.DatetimeIndex(pd.to_datetime(out["timeline"]))
+            metrics = _metrics_for(result, timeline, capital, interval)
+            subset = {key: _json_safe(metrics.get(key)) for key in keys}
+            if index == 0:
+                baseline = subset
+            else:
+                rows.append(subset)
+        except BacktestCancelled:
+            raise
+        except Exception as exc:
+            message = str(exc)
+            if index == 0:
+                warnings.append(f"Baseline run failed: {message}")
+                baseline = dict.fromkeys(keys)
+            else:
+                rows.append({"error": message})
+                warnings.append(f"Noise run {index} failed: {message}")
+        if progress_cb:
+            progress_cb((index + 1) * 100.0 / total)
+
+    successful = [row for row in rows if "error" not in row and row.get("total_return_pct") is not None]
+    returns = [float(row["total_return_pct"]) for row in successful]
+    sharpes = [float(row["sharpe_ratio"]) for row in successful if row.get("sharpe_ratio") is not None]
+
+    def distribution(values):
+        if not values:
+            return {f"p{q}": None for q in (5, 25, 50, 75, 95)}
+        return {f"p{q}": float(np.percentile(values, q)) for q in (5, 25, 50, 75, 95)}
+
+    profitable_share = float(sum(value > 0 for value in returns) / len(returns)) if returns else 0.0
+    median_return = float(np.percentile(returns, 50)) if returns else None
+    baseline_return = baseline.get("total_return_pct") if baseline else None
+    if profitable_share < 0.5:
+        verdict = "FAIL"
+    elif profitable_share >= 0.8 and baseline_return is not None and baseline_return > 0 and median_return >= 0.5 * baseline_return:
+        verdict = "PASS"
+    else:
+        verdict = "MARGINAL"
+    return {
+        "kind": "noise", "runs": runs, "noise_pct": float(noise_pct),
+        "baseline": baseline, "results": rows,
+        "distribution": {"total_return_pct": distribution(returns), "sharpe_ratio": distribution(sharpes)},
+        "profitable_share": profitable_share, "verdict": verdict, "warnings": warnings,
+    }
+
+
 # --------------------------------------------------------------------------
 # Monte Carlo on realised trades
 # --------------------------------------------------------------------------
@@ -668,8 +765,8 @@ def validate_spec(spec: dict) -> dict:
     if not isinstance(spec, dict):
         raise ValueError("optimize must be an object")
     kind = spec.get("kind", "sweep")
-    if kind not in ("sweep", "walk_forward", "stress"):
-        raise ValueError("optimize.kind must be 'sweep', 'walk_forward' or 'stress'")
+    if kind not in ("sweep", "walk_forward", "stress", "noise"):
+        raise ValueError("optimize.kind must be 'sweep', 'walk_forward', 'stress' or 'noise'")
     if kind == "stress":
         multipliers = spec.get("multipliers", [1, 1.5, 2, 3])
         if not isinstance(multipliers, list) or not 1 <= len(multipliers) <= 8:
@@ -684,6 +781,20 @@ def validate_spec(spec: dict) -> dict:
         if not isinstance(params, dict):
             raise ValueError("optimize.params must be an object")
         return {**spec, "kind": kind, "multipliers": multipliers, "params": params}
+    if kind == "noise":
+        runs = spec.get("runs", 20)
+        noise_pct = spec.get("noise_pct", 0.1)
+        seed = spec.get("seed", 0)
+        params = spec.get("params", {})
+        if not isinstance(runs, int) or isinstance(runs, bool) or not 5 <= runs <= 50:
+            raise ValueError("optimize.runs must be an integer between 5 and 50")
+        if not isinstance(noise_pct, (int, float)) or isinstance(noise_pct, bool) or not math.isfinite(noise_pct) or not 0 < noise_pct <= 1:
+            raise ValueError("optimize.noise_pct must be finite and in (0, 1]")
+        if not isinstance(seed, int) or isinstance(seed, bool):
+            raise ValueError("optimize.seed must be an integer")
+        if not isinstance(params, dict):
+            raise ValueError("optimize.params must be an object")
+        return {**spec, "kind": kind, "runs": runs, "noise_pct": float(noise_pct), "seed": seed, "params": params}
     if spec.get("objective", "sharpe_ratio") not in _OBJECTIVES:
         raise ValueError(f"optimize.objective must be one of {sorted(_OBJECTIVES)}")
     if kind == "walk_forward" and spec.get("window_mode", "rolling") not in ("rolling", "anchored"):
@@ -744,7 +855,8 @@ def run_optimization_job(opt_id: str, cancel_event, loader) -> None:
 
         base = {**cfg["engine_config"], "instruments": instruments}
         capital = float(base["initial_capital"])
-        runner = {"walk_forward": run_walk_forward, "stress": run_stress}.get(spec["kind"], run_sweep)
+        runner = {"walk_forward": run_walk_forward, "stress": run_stress,
+                  "noise": run_noise}.get(spec["kind"], run_sweep)
         result = runner(rec.strategy_code, bars, base, spec, capital, cfg["interval"],
                         cancel_event=cancel_event, progress_cb=progress)
         result["notes"] = notes

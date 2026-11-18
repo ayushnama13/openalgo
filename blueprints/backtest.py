@@ -1076,7 +1076,8 @@ def submit_optimization():
 
     Body: the same run fields as ``/run`` (single ``interval``), plus
     ``optimize`` supports sweep and walk-forward fields, or a stress spec
-    ``{kind: 'stress', multipliers: [1, 1.5, 2, 3], params: {}}``.
+    ``{kind: 'stress', multipliers: [1, 1.5, 2, 3], params: {}}`` or a noise spec
+    ``{kind: 'noise', runs: 20, noise_pct: 0.1, seed: 0, params: {}}``.
     """
     data = request.get_json() or {}
     try:
