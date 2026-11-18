@@ -1,6 +1,6 @@
 import { Loader2, Square, Trash2 } from 'lucide-react'
 import type * as PlotlyTypes from 'plotly.js'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { fetchCSRFToken } from '@/api/client'
 import { PLOT_CONFIG, PLOT_LAYOUT } from '@/components/backtest/plotConfig'
@@ -292,6 +292,8 @@ export default function BacktestOptimizations() {
   const [list, setList] = useState<Summary[]>([])
   const [detail, setDetail] = useState<Detail | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const currentOptId = useRef(optId)
+  currentOptId.current = optId
 
   const loadList = useCallback(async () => {
     try {
@@ -308,12 +310,15 @@ export default function BacktestOptimizations() {
     try {
       const res = await fetch(`/backtest/api/optimizations/${optId}`, { credentials: 'include' })
       const body = await res.json()
+      if (currentOptId.current !== optId) return null
       if (body.status !== 'success') throw new Error(body.message || 'Not found')
       setDetail(body.optimization as Detail)
       setError(null)
       return body.optimization as Detail
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load')
+      if (currentOptId.current === optId) {
+        setError(e instanceof Error ? e.message : 'Failed to load')
+      }
       return null
     }
   }, [optId])

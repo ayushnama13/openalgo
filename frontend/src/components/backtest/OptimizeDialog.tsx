@@ -46,8 +46,9 @@ interface Props {
 }
 
 /** Number of combinations a space expands to, or null when the shape is wrong. */
-function countCombos(space: unknown): number | null {
+export function countCombos(space: unknown): number | null {
   if (!space || typeof space !== 'object' || Array.isArray(space)) return null
+  if (!Object.keys(space).length) return null
   let total = 1
   for (const spec of Object.values(space as Record<string, unknown>)) {
     if (Array.isArray(spec)) {

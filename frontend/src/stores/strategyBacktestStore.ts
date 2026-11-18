@@ -163,7 +163,8 @@ interface StrategyBacktestStore {
   batch: BatchDetails | null
   setBatch: (batch: BatchDetails | null) => void
   batchCurves: BatchCurve[]
-  setBatchCurves: (curves: BatchCurve[]) => void
+  batchCurvesFor: string | null
+  setBatchCurves: (batchId: string, curves: BatchCurve[]) => void
   resultsByJob: Record<string, ResultsData>
   setResultsByJob: (jobId: string, data: ResultsData) => void
   clear: () => void
@@ -176,7 +177,8 @@ export const useStrategyBacktestStore = create<StrategyBacktestStore>((set) => (
   batch: null,
   setBatch: (batch) => set({ batch }),
   batchCurves: [],
-  setBatchCurves: (batchCurves) => set({ batchCurves }),
+  batchCurvesFor: null,
+  setBatchCurves: (batchCurvesFor, batchCurves) => set({ batchCurvesFor, batchCurves }),
   resultsByJob: {},
   setResultsByJob: (jobId, data) =>
     set((state) => ({ resultsByJob: { ...state.resultsByJob, [jobId]: data } })),
@@ -186,6 +188,7 @@ export const useStrategyBacktestStore = create<StrategyBacktestStore>((set) => (
       jobDetails: null,
       batch: null,
       batchCurves: [],
+      batchCurvesFor: null,
       resultsByJob: {},
     }),
 }))

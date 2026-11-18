@@ -14,7 +14,7 @@
 
 import { FileChartColumn, Loader2, TrendingUp } from 'lucide-react'
 import type * as PlotlyTypes from 'plotly.js'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 import ScanResults, { SurvivorshipBanner } from '@/components/backtest/ScanResults'
 import SingleRunResults, { PLOT_CONFIG, PLOT_LAYOUT } from '@/components/backtest/SingleRunResults'
@@ -229,13 +229,19 @@ function BatchMatrix({
 
 const CURVE_PALETTE = ['#38bdf8', '#a78bfa', '#34d399', '#fbbf24', '#f472b6', '#fb7185', '#4ade80']
 
-function BatchOverlay({ batchId }: { batchId: string }) {
+export function BatchOverlay({ batchId }: { batchId: string }) {
   const batchCurves = useStrategyBacktestStore((s) => s.batchCurves)
-  const [loading, setLoading] = useState(!batchCurves.length)
+  const batchCurvesFor = useStrategyBacktestStore((s) => s.batchCurvesFor)
+  const [loading, setLoading] = useState(batchCurvesFor !== batchId)
+  const curves = batchCurvesFor === batchId ? batchCurves : []
 
   useEffect(() => {
-    if (batchCurves.length) return
+    if (batchCurvesFor === batchId) {
+      setLoading(false)
+      return
+    }
     let cancelled = false
+    setLoading(true)
     const fetchCurves = async () => {
       try {
         const res = await fetch(`/backtest/api/batches/${batchId}/curves`, {
@@ -243,7 +249,7 @@ function BatchOverlay({ batchId }: { batchId: string }) {
         }).then((r) => r.json())
         if (cancelled) return
         if (res.status === 'success') {
-          useStrategyBacktestStore.getState().setBatchCurves(res.curves ?? [])
+          useStrategyBacktestStore.getState().setBatchCurves(batchId, res.curves ?? [])
         }
       } catch {
         // overlay stays empty on failure
@@ -255,7 +261,7 @@ function BatchOverlay({ batchId }: { batchId: string }) {
     return () => {
       cancelled = true
     }
-  }, [batchId, batchCurves.length])
+  }, [batchId, batchCurvesFor])
 
   if (loading) {
     return (
@@ -268,7 +274,7 @@ function BatchOverlay({ batchId }: { batchId: string }) {
     )
   }
 
-  const withData = batchCurves.filter((c) => c.points.length > 1)
+  const withData = curves.filter((c) => c.points.length > 1)
   if (!withData.length) {
     return (
       <Card>
@@ -501,10 +507,12 @@ function BatchResultsView({ batchId, initialTf }: { batchId: string; initialTf: 
     }
   }, [batchId, batch?.batch_id, setBatch])
 
+  const loadingJobs = useRef(new Set<string>())
   const ensureRunLoaded = useCallback(
     async (run: BatchRunSummary) => {
       if (resultsByJob[run.job_id]) return
-      if (loadingJob) return
+      if (loadingJobs.current.has(run.job_id)) return
+      loadingJobs.current.add(run.job_id)
       setLoadingJob(run.job_id)
       try {
         const [resRes, jobRes] = await Promise.all([
@@ -526,10 +534,11 @@ function BatchResultsView({ batchId, initialTf }: { batchId: string; initialTf: 
       } catch {
         showToast.error(`Failed to load results for ${run.interval}`)
       } finally {
-        setLoadingJob(null)
+        loadingJobs.current.delete(run.job_id)
+        setLoadingJob((current) => (current === run.job_id ? null : current))
       }
     },
-    [loadingJob, resultsByJob, setResultsByJob]
+    [resultsByJob, setResultsByJob]
   )
 
   // Fetch full results for a timeframe the first time its tab is opened.
