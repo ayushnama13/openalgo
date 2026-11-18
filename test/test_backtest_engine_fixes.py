@@ -90,6 +90,9 @@ def test_partial_fills_charge_order_basis_once():
             self.orders.append(orders)
             return float(orders)
 
+        def breakdown(self, buy_value, sell_value, orders):
+            return {"brokerage": float(orders), "total": float(orders), "orders": orders}
+
     class PartialOrder(Strategy):
         def on_bar(self, ctx):
             if ctx.bar_index == 0:
@@ -102,3 +105,41 @@ def test_partial_fills_charge_order_basis_once():
     engine.run()
     assert schedule.orders[:2] == [1, 0]
     assert schedule.orders[-1] == 1
+
+
+def test_preset_charge_breakdown_includes_delivery_statutory_costs():
+    class RoundTrip(Strategy):
+        def on_bar(self, ctx):
+            if ctx.bar_index == 0:
+                ctx.buy("NSE:TEST", qty=100)
+            elif ctx.bar_index == 1:
+                ctx.close("NSE:TEST")
+
+    result = Engine(
+        {"NSE:TEST": _bars((100, 100, 100))},
+        EngineConfig(product_type="CNC", cost_preset="india_delivery_nse"),
+        RoundTrip(),
+    ).run()
+
+    breakdown = result.charges_breakdown
+    assert breakdown["stt"] > 0
+    assert breakdown["stamp_duty"] > 0
+    assert breakdown["total"] == pytest.approx(sum(t["costs"] for t in result.trades), abs=0.01)
+
+
+def test_flat_brokerage_charge_breakdown_has_only_brokerage():
+    class RoundTrip(Strategy):
+        def on_bar(self, ctx):
+            if ctx.bar_index == 0:
+                ctx.buy("NSE:TEST", qty=10)
+            elif ctx.bar_index == 1:
+                ctx.close("NSE:TEST")
+
+    result = Engine(
+        {"NSE:TEST": _bars((100, 100, 100))},
+        EngineConfig(product_type="CNC", brokerage_bps=10),
+        RoundTrip(),
+    ).run()
+
+    assert set(result.charges_breakdown) == {"brokerage", "total"}
+    assert result.charges_breakdown["brokerage"] == result.charges_breakdown["total"]

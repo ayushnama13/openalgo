@@ -235,6 +235,7 @@ class EngineResult:
     notes: list[str]
     logs: list[str]
     rejections: dict
+    charges_breakdown: dict
     cancelled: bool = False
 
 
@@ -499,6 +500,8 @@ class Engine:
         self.notes: list[str] = []
         self.logs: list[str] = []
         self.rejections: dict[str, int] = {}
+        self.charge_totals: dict[str, float] = {}
+        self.total_charges = 0.0
         self.k = 0
         self._oid = 0
 
@@ -557,6 +560,17 @@ class Engine:
             value = price * qty
             orders = 1 if order is None or not order.order_charge_taken else 0
             cost = sched.charge(value if action == BUY else 0.0, value if action == SELL else 0.0, orders)
+            for key, amount in sched.breakdown(
+                value if action == BUY else 0.0,
+                value if action == SELL else 0.0,
+                orders,
+            ).items():
+                if key not in ("total", "orders"):
+                    self.charge_totals[key] = self.charge_totals.get(key, 0.0) + float(amount)
+            self.total_charges += float(cost)
+        elif filled:
+            self.charge_totals["brokerage"] = self.charge_totals.get("brokerage", 0.0) + float(cost)
+            self.total_charges += float(cost)
         if filled and order is not None:
             order.order_charge_taken = True
         return filled, price, cost
@@ -907,8 +921,10 @@ class Engine:
             }
             for key, n in self.rejections.items():
                 self.notes.append(f"{n} {labels.get(key, key)}")
+        charges_breakdown = {key: round(amount, 2) for key, amount in self.charge_totals.items()}
+        charges_breakdown["total"] = round(self.total_charges, 2)
         return EngineResult(self.trades, self.equity_rows, self.notes, self.logs,
-                            self.rejections, cancelled)
+                            self.rejections, charges_breakdown, cancelled)
 
 
 # --------------------------------------------------------------------------

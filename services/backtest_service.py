@@ -572,6 +572,8 @@ def run_backtest_pipeline(
         metrics = calculate_backtest_metrics(equity_series, trades_list, initial_capital, interval=interval)
         heatmap = generate_monthly_returns_heatmap(equity_series)
         metrics["monthly_heatmap"] = heatmap
+        if out.get("charges_breakdown") is not None:
+            metrics["charges_breakdown"] = out["charges_breakdown"]
         if run_notes:
             metrics["notes"] = run_notes
 

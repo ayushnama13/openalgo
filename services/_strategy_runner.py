@@ -198,7 +198,8 @@ def mode_engine(job, workdir, code, pd, np, ta):
     _write(pd.DataFrame(result.equity), os.path.join(workdir, "equity." + job["fmt"]), job["fmt"])
     with open(os.path.join(workdir, "meta.json"), "w") as fh:
         json.dump({"notes": result.notes, "logs": result.logs,
-                   "rejections": result.rejections, "cancelled": result.cancelled}, fh)
+                   "rejections": result.rejections, "charges_breakdown": result.charges_breakdown,
+                   "cancelled": result.cancelled}, fh)
 
 
 def mode_tasks(job, workdir, code, pd, np, ta):
