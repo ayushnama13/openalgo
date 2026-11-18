@@ -17,13 +17,14 @@ import pandas as pd
 import pytz
 
 from database.backtest_db import (
-    BacktestEquityCurve,
     BacktestRun,
     BacktestStrategy,
     BacktestTrade,
     db_session,
+    save_equity_curve,
 )
 from database.historify_db import (
+    get_catalog_ranges,
     get_data_range,
     get_ohlcv,
     get_symbol_metadata,
@@ -35,6 +36,7 @@ from services.backtest_analytics import (
     get_benchmark_comparison,
 )
 from services.backtest_engine import calculate_position_qty  # noqa: F401 (re-exported)
+from services.backtest_universes import universe_symbols
 from services.strategy_sandbox import (
     BacktestCancelled,
     run_backtest_sandboxed,
@@ -58,6 +60,7 @@ logger = get_logger(__name__)
 # Active running job cancel flags: job_id -> threading.Event()
 _ACTIVE_JOBS: dict[str, threading.Event] = {}
 _ACTIVE_JOBS_LOCK = threading.Lock()
+_CANCEL_REQUESTS: set[str] = set()
 
 # Shared work queue for backtest runs. A module-level singleton per the
 # FD-hygiene rule (threads and executors are shared, never per-call): tasks
@@ -74,8 +77,18 @@ _JOB_FUTURES: dict[str, Future] = {}
 # production.
 _YIELD_EVERY_BARS = 2000
 
-# Hard cap on symbols per run (memory: all frames live in the sandbox child)
+# Hard cap on symbols per run (memory: all frames live in the sandbox child).
+# A hand-picked stock list stays small; a universe portfolio (NIFTY 500) needs
+# more, and is bounded instead by the total bar budget below.
 _MAX_SYMBOLS = int(os.getenv("BACKTEST_MAX_SYMBOLS", "50"))
+_MAX_UNIVERSE_SYMBOLS = int(os.getenv("BACKTEST_MAX_UNIVERSE_SYMBOLS", "600"))
+# Total bars across every symbol of one run. 500 symbols x 10 years of daily
+# bars is ~1.25M; 500 symbols of 1m bars would be hundreds of millions and
+# exhaust the sandbox child's memory, so a run over budget fails up front
+# with a message instead of being killed mid-way.
+_MAX_TOTAL_BARS = int(os.getenv("BACKTEST_MAX_TOTAL_BARS", "4000000"))
+
+RUN_MODES = ("stock", "universe", "scan")
 
 _TRADE_COLUMNS = {
     "job_id", "symbol", "exchange", "action", "entry_time", "entry_price", "exit_time",
@@ -99,6 +112,9 @@ def _cooperative_yield():
 def register_active_job(job_id: str) -> threading.Event:
     cancel_event = threading.Event()
     with _ACTIVE_JOBS_LOCK:
+        if job_id in _CANCEL_REQUESTS:
+            _CANCEL_REQUESTS.discard(job_id)
+            cancel_event.set()
         _ACTIVE_JOBS[job_id] = cancel_event
     return cancel_event
 
@@ -106,7 +122,28 @@ def register_active_job(job_id: str) -> threading.Event:
 def unregister_active_job(job_id: str):
     with _ACTIVE_JOBS_LOCK:
         _ACTIVE_JOBS.pop(job_id, None)
+        _CANCEL_REQUESTS.discard(job_id)
         _JOB_FUTURES.pop(job_id, None)
+
+
+def _track_future(job_id: str, future: Future) -> None:
+    """Remember a queued run's future until it finishes.
+
+    The worker can finish (and unregister) before the submitter gets here, so
+    removal is a done-callback, not only unregister_active_job: the callback
+    fires at once on an already-finished future, and so no stale entry is left.
+    It only removes the entry if it still holds this same future.
+    """
+
+    def _forget(done: Future) -> None:
+        with _ACTIVE_JOBS_LOCK:
+            if _JOB_FUTURES.get(job_id) is done:
+                del _JOB_FUTURES[job_id]
+                _CANCEL_REQUESTS.discard(job_id)
+
+    with _ACTIVE_JOBS_LOCK:
+        _JOB_FUTURES[job_id] = future
+    future.add_done_callback(_forget)
 
 
 def cancel_job(job_id: str) -> bool:
@@ -123,9 +160,18 @@ def cancel_job(job_id: str) -> bool:
             cancel_event.set()
             return True
         future = _JOB_FUTURES.get(job_id)
-
-    if not (future and future.cancel()):
-        return False
+    if future and future.cancel():
+        pass
+    else:
+        with _ACTIVE_JOBS_LOCK:
+            cancel_event = _ACTIVE_JOBS.get(job_id)
+            if cancel_event:
+                cancel_event.set()
+                return True
+            if future and future.running() and not future.done():
+                _CANCEL_REQUESTS.add(job_id)
+                return True
+            return False
 
     with _ACTIVE_JOBS_LOCK:
         _JOB_FUTURES.pop(job_id, None)
@@ -309,13 +355,36 @@ def load_run_bars(
     start_date: str | None,
     end_date: str | None,
     missing_data_policy: str,
+    max_symbols: int | None = None,
 ) -> tuple[dict[str, pd.DataFrame], list[str]]:
     """Load, normalise and clean the OHLCV frames for every requested symbol.
 
-    Returns ({"NSE:SBIN": frame}, notes). Raises ValueError when nothing is usable.
+    ``max_symbols`` overrides the stock-list cap (universe runs pass the larger
+    universe cap). Returns ({"NSE:SBIN": frame}, notes). Raises ValueError when
+    nothing is usable or the run exceeds the total bar budget.
     """
-    start_ts = int(pd.to_datetime(start_date).timestamp()) if start_date else None
-    end_ts = int(pd.to_datetime(end_date).timestamp()) if end_date else None
+    limit = max_symbols or _MAX_SYMBOLS
+    if missing_data_policy not in {"skip", "forward_fill", "abort"}:
+        raise ValueError("missing_data_policy must be one of skip, forward_fill, abort")
+
+    ist = pytz.timezone("Asia/Kolkata")
+
+    def _bound_timestamp(value, is_end):
+        if not value:
+            return None
+        parsed = pd.Timestamp(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.tz_localize(ist)
+        else:
+            parsed = parsed.tz_convert(ist)
+        if len(str(value).strip()) == 10 and is_end:
+            parsed = parsed.replace(hour=23, minute=59, second=59)
+        elif len(str(value).strip()) == 10:
+            parsed = parsed.replace(hour=0, minute=0, second=0)
+        return int(parsed.timestamp())
+
+    start_ts = _bound_timestamp(start_date, False)
+    end_ts = _bound_timestamp(end_date, True)
 
     keys: list[str] = []
     for raw in symbols or ["SBIN"]:
@@ -323,11 +392,12 @@ def load_run_bars(
         key = f"{exch}:{sym_clean}"
         if key not in keys:
             keys.append(key)
-    if len(keys) > _MAX_SYMBOLS:
-        raise ValueError(f"Too many symbols ({len(keys)}); the limit is {_MAX_SYMBOLS}.")
+    if len(keys) > limit:
+        raise ValueError(f"Too many symbols ({len(keys)}); the limit is {limit}.")
 
     run_notes: list[str] = []
     bars_by_symbol: dict[str, pd.DataFrame] = {}
+    total_bars = 0
     for key in keys:
         exch, sym_clean = key.split(":", 1)
         df = get_ohlcv(
@@ -344,6 +414,12 @@ def load_run_bars(
                 )
             run_notes.append(f"{key} skipped: no historical data in the selected range.")
             continue
+        total_bars += len(df)
+        if total_bars > _MAX_TOTAL_BARS:
+            raise ValueError(
+                f"Run is too large: more than {_MAX_TOTAL_BARS:,} bars across {len(keys)} symbols "
+                f"at {interval}. Use a higher timeframe, a shorter date range or a smaller universe."
+            )
 
         # get_ohlcv() returns raw epoch seconds (UTC) in the timestamp column on
         # every code path (raw, intraday-aggregated, daily-aggregated) - convert
@@ -362,7 +438,7 @@ def load_run_bars(
         if missing_data_policy == "skip":
             df = df.dropna(subset=["open", "high", "low", "close"])
         elif missing_data_policy == "forward_fill":
-            df = df.ffill().bfill()
+            df = df.ffill().dropna(subset=["open", "high", "low", "close"])
         elif missing_data_policy == "abort":
             if df[["open", "high", "low", "close"]].isnull().any().any():
                 raise ValueError(
@@ -401,9 +477,14 @@ def run_backtest_pipeline(
     daily_loss_limit: float | None,
     max_positions: int,
     engine_options: dict | None = None,
+    mode: str = "stock",
 ):
     """
     Main background execution function for running a backtest job.
+
+    ``mode`` only changes the symbol cap: a "universe" portfolio may hold up to
+    the universe cap; "stock" and "scan" (one constituent per run) keep the
+    stock-list cap.
     """
     cancel_event = register_active_job(job_id)
     session = db_session()
@@ -427,7 +508,8 @@ def run_backtest_pipeline(
         emit_kwargs.update({"batch_id": batch_id, "batch_seq": batch_seq})
 
         bars_by_symbol, run_notes = load_run_bars(
-            symbols, exchange, interval, start_date, end_date, missing_data_policy
+            symbols, exchange, interval, start_date, end_date, missing_data_policy,
+            max_symbols=_MAX_UNIVERSE_SYMBOLS if mode == "universe" else None,
         )
 
         instruments, inst_notes = resolve_instruments(list(bars_by_symbol))
@@ -466,6 +548,7 @@ def run_backtest_pipeline(
                 engine_cfg,
                 cancel_event=cancel_event,
                 progress_cb=_on_progress,
+                equity_as="frame",
             )
         except BacktestCancelled:
             run_record.status = "cancelled"
@@ -476,19 +559,21 @@ def run_backtest_pipeline(
 
         run_notes.extend(out["notes"])
         trades_list: list[dict[str, Any]] = [{"job_id": job_id, **t} for t in out["trades"]]
-        equity_records: list[dict[str, Any]] = [{"job_id": job_id, **e} for e in out["equity"]]
-        current_equity = equity_records[-1]["equity"]
+        equity_frame = out["equity"]
+        current_equity = float(equity_frame["equity"].iloc[-1])
 
         # Save Trade and Equity Records to DB
         equity_series = pd.Series(
-            data=[e["equity"] for e in equity_records],
-            index=pd.to_datetime([e["timestamp"] for e in equity_records]),
+            data=equity_frame["equity"].to_numpy(dtype="float64"),
+            index=pd.to_datetime(equity_frame["timestamp"]),
         )
 
         # Calculate metrics
         metrics = calculate_backtest_metrics(equity_series, trades_list, initial_capital, interval=interval)
         heatmap = generate_monthly_returns_heatmap(equity_series)
         metrics["monthly_heatmap"] = heatmap
+        if out.get("charges_breakdown") is not None:
+            metrics["charges_breakdown"] = out["charges_breakdown"]
         if run_notes:
             metrics["notes"] = run_notes
 
@@ -496,23 +581,14 @@ def run_backtest_pipeline(
         cummax = equity_series.cummax()
         drawdowns = ((equity_series - cummax) / cummax) * 100.0
 
-        equity_objs = []
-        for eq_rec, dd in zip(equity_records, drawdowns, strict=True):
-            equity_objs.append(BacktestEquityCurve(
-                job_id=job_id,
-                timestamp=eq_rec["timestamp"],
-                equity=eq_rec["equity"],
-                drawdown_pct=round(float(dd), 2),
-                cash=eq_rec["cash"],
-                positions_value=eq_rec["positions_value"],
-            ))
-
-        trade_objs = [
-            BacktestTrade(**{k: v for k, v in t.items() if k in _TRADE_COLUMNS}) for t in trades_list
-        ]
-
-        session.bulk_save_objects(equity_objs)
-        session.bulk_save_objects(trade_objs)
+        save_equity_curve(
+            session, job_id, equity_frame["timestamp"].tolist(),
+            equity_frame["equity"].to_numpy(), np.round(drawdowns.to_numpy(), 2),
+            equity_frame["cash"].to_numpy(), equity_frame["positions_value"].to_numpy(),
+        )
+        session.bulk_insert_mappings(
+            BacktestTrade, [{k: v for k, v in t.items() if k in _TRADE_COLUMNS} for t in trades_list]
+        )
 
         run_record.status = "completed"
         run_record.completed_at = datetime.now(pytz.timezone("Asia/Kolkata"))
@@ -544,6 +620,70 @@ def _split_symbol(symbol: str, exchange: str) -> tuple[str, str]:
     return symbol, exchange
 
 
+def _plan_runs(
+    mode: str,
+    name: str,
+    symbols: list[str],
+    exchange: str,
+    intervals: list[str],
+    universe: str | None,
+) -> tuple[list[dict[str, Any]], list[str], str]:
+    """Expand one run request into the list of runs to create.
+
+    Returns (runs, skipped, exchange) where each run is {"interval", "symbols",
+    "name"} and ``skipped`` lists universe constituents left out for want of data.
+
+    stock     one run per interval over the hand-picked symbols
+    universe  one portfolio run per interval over every constituent with data
+    scan      one run per constituent with data, single interval
+    """
+    if mode not in RUN_MODES:
+        raise ValueError(f"mode must be one of {', '.join(RUN_MODES)}")
+    is_multi_iv = len(intervals) > 1
+
+    if mode == "stock":
+        if not symbols:
+            raise ValueError("At least one symbol is required")
+        _, exch = _split_symbol(symbols[0], exchange)
+        runs = [
+            {"interval": iv, "symbols": symbols, "name": f"{name} ({iv})" if is_multi_iv else name}
+            for iv in intervals
+        ]
+        return runs, [], exch
+
+    if not universe:
+        raise ValueError("universe is required for universe and scan modes")
+    meta, members = universe_symbols(universe)
+    exch = meta.get("exchange", "NSE")
+    if mode == "scan" and is_multi_iv:
+        raise ValueError("A universe scan runs on a single timeframe; pick one interval")
+
+    runs: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    for iv in intervals:
+        ranges = get_catalog_ranges(exch, resolve_base_interval(iv))
+        covered = [m for m in members if m.split(":", 1)[1] in ranges]
+        skipped = [m.split(":", 1)[1] for m in members if m.split(":", 1)[1] not in ranges]
+        if not covered:
+            raise ValueError(
+                f"No {meta['name']} constituent has {resolve_base_interval(iv)} data in Historify. "
+                "Download the universe's history first."
+            )
+        if mode == "universe":
+            if len(covered) > _MAX_UNIVERSE_SYMBOLS:
+                raise ValueError(
+                    f"Universe has {len(covered)} symbols with data; the limit is {_MAX_UNIVERSE_SYMBOLS}."
+                )
+            label = f"{name} ({iv})" if is_multi_iv else name
+            runs.append({"interval": iv, "symbols": covered, "name": label})
+        else:
+            runs.extend(
+                {"interval": iv, "symbols": [m], "name": f"{name} ({m.split(':', 1)[1]})"}
+                for m in covered
+            )
+    return runs, skipped, exch
+
+
 def start_backtest_batch(
     name: str,
     strategy_code: str,
@@ -565,12 +705,14 @@ def start_backtest_batch(
     daily_loss_limit: float | None = None,
     max_positions: int = 5,
     engine_options: dict | None = None,
+    mode: str = "stock",
+    universe: str | None = None,
 ) -> dict:
-    """Fans one run request out across N timeframes.
+    """Fan one run request out into a batch of runs (see ``_plan_runs`` for the modes).
 
-    One BacktestRun row per interval, all tied by a shared batch_id. A single
-    interval is a batch of one (batch_id = job_id), so the results UI and the
-    job history need no special casing for legacy runs.
+    Every run gets its own BacktestRun row tied by a shared batch_id. A single
+    run is a batch of one (batch_id = job_id), so the results UI and the job
+    history need no special casing for legacy runs.
     """
     engine_options = sanitize_engine_options(engine_options)
     if not intervals:
@@ -586,123 +728,102 @@ def start_backtest_batch(
     if not clean_intervals:
         raise ValueError("At least one interval is required")
 
-    is_sweep = len(clean_intervals) > 1
-    batch_id = f"batch_{uuid.uuid4().hex[:12]}" if is_sweep else None
+    runs, skipped, exch = _plan_runs(
+        mode, name, symbols or ["SBIN"], exchange, clean_intervals, universe
+    )
+    batch_id = f"batch_{uuid.uuid4().hex[:12]}" if len(runs) > 1 else None
+    universe_id = ((universe or "").strip().upper() or None) if mode != "stock" else None
+    common = {
+        "strategy_code": strategy_code,
+        "exchange": exch,
+        "start_date": start_date,
+        "end_date": end_date,
+        "initial_capital": initial_capital,
+        "sizing_type": sizing_type,
+        "sizing_value": sizing_value,
+        "slippage_bps": slippage_bps,
+        "brokerage_bps": brokerage_bps,
+        "product_type": product_type,
+        "missing_data_policy": missing_data_policy,
+        "stop_loss_pct": stop_loss_pct,
+        "take_profit_pct": take_profit_pct,
+        "daily_loss_limit": daily_loss_limit,
+        "max_positions": max_positions,
+    }
     session = db_session()
 
     try:
-        symbol_clean, exch = _split_symbol(symbols[0] if symbols else "SBIN", exchange)
         jobs: list[dict[str, Any]] = []
-
-        for batch_seq, iv in enumerate(clean_intervals):
+        for batch_seq, run in enumerate(runs):
+            iv = run["interval"]
             job_id = f"bt_{uuid.uuid4().hex[:12]}"
-            run_batch_id = batch_id or job_id
-            # Sibling runs keep the batch label; per-run name disambiguates
-            # the timeframe while the single-run path stays byte-identical to
-            # what callers passed in.
-            run_name = name if not is_sweep else f"{name} ({iv})"
+            row = {
+                **common,
+                "job_id": job_id,
+                "name": run["name"],
+                "symbols": json.dumps(run["symbols"]),
+                "interval": iv,
+                "batch_id": batch_id or job_id,
+                "batch_name": name,
+                "batch_seq": batch_seq,
+                "mode": mode,
+                "universe": universe_id,
+            }
+            job_info = {"job_id": job_id, "interval": iv}
+            if mode == "scan":
+                job_info["symbol"] = run["symbols"][0].split(":", 1)[1]
 
-            # Pre-flight: fail fast per timeframe instead of letting one dead
-            # interval kill the whole sweep mid-flight. Historify only stores
-            # 1m and D — 5m/15m/1h are aggregated from 1m and W/M/Q/Y from D,
-            # so the catalog must be checked against the BASE interval. Asking
-            # for '5m' directly always misses and would fail every aggregated
-            # timeframe in the sweep.
-            base_iv = resolve_base_interval(iv)
-            range_data = get_data_range(symbol_clean, exch, base_iv)
-            if not range_data:
-                run_record = BacktestRun(
-                    job_id=job_id,
-                    name=run_name,
-                    status="failed",
-                    strategy_code=strategy_code,
-                    symbols=json.dumps(symbols),
-                    exchange=exch,
-                    interval=iv,
-                    start_date=start_date,
-                    end_date=end_date,
-                    initial_capital=initial_capital,
-                    sizing_type=sizing_type,
-                    sizing_value=sizing_value,
-                    slippage_bps=slippage_bps,
-                    brokerage_bps=brokerage_bps,
-                    product_type=product_type,
-                    missing_data_policy=missing_data_policy,
-                    stop_loss_pct=stop_loss_pct,
-                    take_profit_pct=take_profit_pct,
-                    daily_loss_limit=daily_loss_limit,
-                    max_positions=max_positions,
-                    batch_id=run_batch_id,
-                    batch_name=name,
-                    batch_seq=batch_seq,
-                    completed_at=datetime.now(pytz.timezone("Asia/Kolkata")),
-                    error_message=(
-                        f"No historical data available for {symbol_clean} ({exch}) "
-                        f"interval {iv} in Historify (needs {base_iv} data)."
-                    ),
-                )
-                session.add(run_record)
-                session.commit()
-                jobs.append({"job_id": job_id, "interval": iv, "status": "failed"})
-                continue
+            # Pre-flight for a stock run: fail fast per timeframe instead of
+            # letting one dead interval kill the whole sweep mid-flight.
+            # Historify only stores 1m and D — 5m/15m/1h are aggregated from 1m
+            # and W/M/Q/Y from D, so the catalog is checked against the BASE
+            # interval. Universe and scan runs were already filtered to the
+            # constituents with data by _plan_runs.
+            if mode == "stock":
+                symbol_clean, sym_exch = _split_symbol(run["symbols"][0], exchange)
+                base_iv = resolve_base_interval(iv)
+                checked_symbols = [_split_symbol(symbol, exchange) for symbol in run["symbols"]]
+                if not any(
+                    get_data_range(symbol, sym_exch, base_iv)
+                    for symbol, sym_exch in checked_symbols
+                ):
+                    symbols_checked = ", ".join(
+                        f"{symbol} ({sym_exch})" for symbol, sym_exch in checked_symbols
+                    )
+                    session.add(BacktestRun(
+                        **row,
+                        status="failed",
+                        completed_at=datetime.now(pytz.timezone("Asia/Kolkata")),
+                        error_message=(
+                            f"No historical data available for {symbols_checked} "
+                            f"interval {iv} in Historify (needs {base_iv} data)."
+                        ),
+                    ))
+                    session.commit()
+                    jobs.append({**job_info, "status": "failed"})
+                    continue
 
-            run_record = BacktestRun(
-                job_id=job_id,
-                name=run_name,
+            session.add(BacktestRun(
+                **row,
                 status="pending",
-                strategy_code=strategy_code,
-                symbols=json.dumps(symbols),
-                exchange=exch,
-                interval=iv,
-                start_date=start_date,
-                end_date=end_date,
-                initial_capital=initial_capital,
-                sizing_type=sizing_type,
-                sizing_value=sizing_value,
-                slippage_bps=slippage_bps,
-                brokerage_bps=brokerage_bps,
-                product_type=product_type,
-                missing_data_policy=missing_data_policy,
-                stop_loss_pct=stop_loss_pct,
-                take_profit_pct=take_profit_pct,
-                daily_loss_limit=daily_loss_limit,
-                max_positions=max_positions,
                 engine_options=json.dumps(engine_options) if engine_options else None,
-                batch_id=run_batch_id,
-                batch_name=name,
-                batch_seq=batch_seq,
-            )
-            session.add(run_record)
+            ))
             session.commit()
 
             future = _BACKTEST_EXECUTOR.submit(
                 run_backtest_pipeline,
                 job_id=job_id,
-                name=run_name,
-                strategy_code=strategy_code,
-                symbols=symbols,
-                exchange=exch,
+                name=run["name"],
+                symbols=run["symbols"],
                 interval=iv,
-                start_date=start_date,
-                end_date=end_date,
-                initial_capital=initial_capital,
-                sizing_type=sizing_type,
-                sizing_value=sizing_value,
-                slippage_bps=slippage_bps,
-                brokerage_bps=brokerage_bps,
-                product_type=product_type,
-                missing_data_policy=missing_data_policy,
-                stop_loss_pct=stop_loss_pct,
-                take_profit_pct=take_profit_pct,
-                daily_loss_limit=daily_loss_limit,
-                max_positions=max_positions,
                 engine_options=engine_options,
+                mode=mode,
+                **common,
             )
-            with _ACTIVE_JOBS_LOCK:
-                _JOB_FUTURES[job_id] = future
-            jobs.append({"job_id": job_id, "interval": iv, "status": "pending"})
+            _track_future(job_id, future)
+            jobs.append({**job_info, "status": "pending"})
 
-        return {"batch_id": batch_id or jobs[0]["job_id"], "jobs": jobs}
+        return {"batch_id": batch_id or jobs[0]["job_id"], "jobs": jobs, "skipped": skipped}
 
     except Exception as e:
         session.rollback()
@@ -788,6 +909,15 @@ def cancel_batch(batch_id: str) -> list[str]:
                 with _ACTIVE_JOBS_LOCK:
                     _JOB_FUTURES.pop(job_id, None)
                 cancelled.append(job_id)
+            elif future and future.running() and not future.done():
+                # The worker may have registered since the lookup above.
+                with _ACTIVE_JOBS_LOCK:
+                    cancel_event = _ACTIVE_JOBS.get(job_id)
+                    if cancel_event:
+                        cancel_event.set()
+                    else:
+                        _CANCEL_REQUESTS.add(job_id)
+                cancelled.append(job_id)
         return cancelled
     except Exception as e:
         session.rollback()
@@ -854,7 +984,7 @@ def start_optimization(
     def loader(cfg: dict):
         bars, notes = load_run_bars(
             cfg["symbols"], cfg["exchange"], cfg["interval"], cfg["start_date"],
-            cfg["end_date"], cfg["missing_data_policy"],
+            cfg["end_date"], cfg["missing_data_policy"], max_symbols=_MAX_UNIVERSE_SYMBOLS,
         )
         instruments, inst_notes = resolve_instruments(list(bars))
         return bars, notes + inst_notes, instruments
@@ -867,8 +997,7 @@ def start_optimization(
             unregister_active_job(opt_id)
 
     future = _BACKTEST_EXECUTOR.submit(work)
-    with _ACTIVE_JOBS_LOCK:
-        _JOB_FUTURES[opt_id] = future
+    _track_future(opt_id, future)
     return opt_id
 
 

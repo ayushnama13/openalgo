@@ -200,6 +200,14 @@ export async function setDepthLevel(
   return r.data
 }
 
+/** Delete recorded ticks older than `days` days. `days` must be an integer >= 1. */
+export async function pruneOldTicks(
+  days: number
+): Promise<{ status: string; deleted?: number; message?: string }> {
+  const r = await webClient.post('/api/depth-recorder/prune', { days })
+  return r.data
+}
+
 export async function fetchRecorderStatus(): Promise<RecorderStatus[]> {
   const r = await webClient.get('/api/depth-recorder/status')
   return r.data ?? []

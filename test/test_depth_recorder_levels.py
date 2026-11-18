@@ -231,7 +231,9 @@ def mock_proxy_server():
     yield port
 
 
-def test_integration_recorder_depth_levels(mock_proxy_server):
+def test_integration_recorder_depth_levels(mock_proxy_server, monkeypatch):
+    # The 1 s sleeps below assume a sub-second flush; the production default is 1.0 s.
+    monkeypatch.setattr(drs, "FLUSH_INTERVAL_SECONDS", 0.25)
     # 1. Start at depth 5
     res = drs.start_recorder("RELIANCE", "NSE", "dummy_key", depth_level=5)
     assert res["status"] == "started"

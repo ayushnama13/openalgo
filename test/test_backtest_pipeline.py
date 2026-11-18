@@ -18,15 +18,19 @@ import pytest
 
 os.environ.setdefault("BACKTEST_DATABASE_URL", "sqlite:////tmp/opencode/backtest_tests.db")
 
+from datetime import UTC
+
 import database.backtest_db as bdb
 import services.backtest_fill_engine as fill
 import services.backtest_service as svc
 from database.backtest_db import (
+    BacktestEquityBlob,
     BacktestEquityCurve,
     BacktestRun,
     BacktestTrade,
     cleanup_old_runs,
     db_session,
+    load_equity_curve,
 )
 from services.backtest_analytics import periods_per_year_for_interval
 
@@ -36,6 +40,7 @@ def _isolated_backtest_db():
     bdb.init_backtest_db()
     session = db_session()
     session.query(BacktestEquityCurve).delete()
+    session.query(BacktestEquityBlob).delete()
     session.query(BacktestTrade).delete()
     session.query(BacktestRun).delete()
     session.commit()
@@ -43,6 +48,7 @@ def _isolated_backtest_db():
     yield
     session = db_session()
     session.query(BacktestEquityCurve).delete()
+    session.query(BacktestEquityBlob).delete()
     session.query(BacktestTrade).delete()
     session.query(BacktestRun).delete()
     session.commit()
@@ -246,6 +252,21 @@ def test_backtest_metrics():
     assert m["avg_holding_minutes"] == 0.0  # trades carry no timestamps
 
 
+def test_short_run_cagr_is_not_annualized_and_sortino_uses_full_series():
+    equity = pd.Series([100.0, 110.0, 105.0], index=pd.to_datetime(["2024-01-01 09:15", "2024-01-01 12:15", "2024-01-01 15:15"]))
+    metrics = svc.calculate_backtest_metrics(equity, [], 100.0)
+    assert metrics["cagr_pct"] == 5.0
+    returns = equity.pct_change().dropna().to_numpy()
+    expected = returns.mean() / np.sqrt(np.square(np.minimum(returns, 0)).mean()) * np.sqrt(252)
+    assert metrics["sortino_ratio"] == round(expected, 2)
+
+
+def test_heatmap_ytd_chains_from_previous_year_end():
+    equity = pd.Series([100.0, 120.0, 132.0], index=pd.to_datetime(["2023-12-01", "2023-12-31", "2024-01-01"]))
+    heatmap = svc.generate_monthly_returns_heatmap(equity)
+    assert heatmap["matrix"]["2024"]["YTD"] == 10.0
+
+
 def test_periods_per_year_for_interval():
     assert periods_per_year_for_interval("1m") == 252.0 * 375.0
     assert periods_per_year_for_interval("5m") == 252.0 * 75.0
@@ -366,14 +387,14 @@ def strategy(df):
 
     assert status == "completed", f"status={status}"
     trades = db_session().query(BacktestTrade).filter_by(job_id=job_id).count()
-    curve = db_session().query(BacktestEquityCurve).filter_by(job_id=job_id).count()
+    curve = load_equity_curve(db_session(), job_id)
     metrics = json.loads(
         db_session().query(BacktestRun).filter_by(job_id=job_id).first().metrics_json or "{}"
     )
     db_session.remove()
 
     assert trades > 0
-    assert curve == 200
+    assert len(curve["timestamp"]) == 200
     assert metrics["total_trades"] == trades
     assert "monthly_heatmap" in metrics
 
@@ -385,6 +406,59 @@ def test_cancel_job_flag():
     assert ev.is_set()
     svc.unregister_active_job(job_id)
     assert svc.cancel_job(job_id) is False
+
+
+def test_cancel_job_before_registration_is_carried_into_pipeline():
+    from concurrent.futures import Future
+
+    job_id = "test_cancel_before_registration"
+    future = Future()
+    future.set_running_or_notify_cancel()
+    with svc._ACTIVE_JOBS_LOCK:
+        svc._JOB_FUTURES[job_id] = future
+
+    assert svc.cancel_job(job_id) is True
+    ev = svc.register_active_job(job_id)
+    assert ev.is_set()
+    svc.unregister_active_job(job_id)
+    assert job_id not in svc._CANCEL_REQUESTS
+
+
+def test_stock_preflight_checks_all_symbols(monkeypatch):
+    from concurrent.futures import Future
+
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, *args, **kwargs):
+            submitted.append((args, kwargs))
+            return Future()
+
+    monkeypatch.setattr(svc, "_BACKTEST_EXECUTOR", FakeExecutor())
+    present = {"first_timestamp": 0, "last_timestamp": 0, "record_count": 1}
+    monkeypatch.setattr(
+        svc,
+        "get_data_range",
+        lambda symbol, exchange, interval: present if symbol == "PRESENT" else None,
+    )
+
+    accepted = svc.start_backtest_batch(
+        name="mixed symbols", strategy_code=SIMPLE_CODE,
+        symbols=["NSE:MISSING", "NSE:PRESENT"], intervals=["1m"],
+    )
+    assert accepted["jobs"][0]["status"] == "pending"
+    assert len(submitted) == 1
+
+    rejected = svc.start_backtest_batch(
+        name="missing symbols", strategy_code=SIMPLE_CODE,
+        symbols=["NSE:MISSING", "NSE:MISSING"], intervals=["1m"],
+    )
+    assert rejected["jobs"][0]["status"] == "failed"
+    assert len(submitted) == 1
+    session = db_session()
+    failed = session.query(BacktestRun).filter_by(batch_id=rejected["jobs"][0]["job_id"]).first()
+    assert "MISSING (NSE), MISSING (NSE)" in failed.error_message
+    db_session.remove()
 
 
 def test_cleanup_old_runs():
@@ -488,10 +562,7 @@ def test_start_backtest_batch_fan_out(monkeypatch):
     # sibling names disambiguate the timeframe
     assert [r.name for r in runs] == ["mtf sweep (1m)", "mtf sweep (5m)", "mtf sweep (1h)"]
     assert all(r.metrics_json and "avg_holding_minutes" in r.metrics_json for r in runs)
-    session.query(BacktestEquityCurve).filter(
-        BacktestEquityCurve.job_id.in_([r.job_id for r in runs])
-    ).count()
-    assert session.query(BacktestEquityCurve).count() == 150 * 3
+    assert sum(len(load_equity_curve(session, r.job_id)["timestamp"]) for r in runs) == 150 * 3
     db_session.remove()
 
 
@@ -696,6 +767,162 @@ def test_backtest_routes_reject_anonymous_requests():
     assert checked >= len(rules)
 
 
+def _authenticated_backtest_client():
+    from datetime import datetime
+
+    from flask import Flask
+
+    from blueprints.backtest import backtest_bp
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.config["WTF_CSRF_ENABLED"] = False
+    app.register_blueprint(backtest_bp)
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["logged_in"] = True
+        sess["login_time"] = datetime.now(UTC).isoformat()
+    return client
+
+
+def test_tearsheet_returns_latest_100_trades_in_ascending_order():
+    session = db_session()
+    session.add(BacktestRun(
+        job_id="bt_tearsheet_latest", strategy_code="", symbols="[]",
+        name="Tearsheet", metrics_json="{}",
+    ))
+    session.add_all([
+        BacktestTrade(
+            job_id="bt_tearsheet_latest", symbol="TEST", action="BUY",
+            entry_time=f"trade-{i:03d}", entry_price=1, exit_time="exit",
+            exit_price=1, quantity=1, pnl=0, pnl_pct=0,
+        )
+        for i in range(150)
+    ])
+    session.commit()
+    db_session.remove()
+
+    response = _authenticated_backtest_client().get("/backtest/api/tearsheet/bt_tearsheet_latest")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "trade-000" not in html
+    assert "trade-050" in html
+    assert "trade-149" in html
+    assert html.index("trade-050") < html.index("trade-149")
+
+
+@pytest.mark.parametrize("days_to_keep", ["many", 0])
+def test_cleanup_route_rejects_invalid_days_to_keep(days_to_keep):
+    response = _authenticated_backtest_client().post(
+        "/backtest/api/cleanup", json={"days_to_keep": days_to_keep}
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["status"] == "error"
+
+
+def test_cancel_active_route_cancels_all_active_jobs(monkeypatch):
+    session = db_session()
+    session.add_all([
+        BacktestRun(
+            job_id=f"bt_old_pending_{i}", strategy_code="", symbols="[]",
+            status="pending",
+        )
+        for i in range(2)
+    ])
+    session.commit()
+    db_session.remove()
+    cancelled = []
+    import blueprints.backtest as backtest_routes
+
+    monkeypatch.setattr(backtest_routes, "cancel_job", lambda job_id: cancelled.append(job_id) or True)
+
+    response = _authenticated_backtest_client().post("/backtest/api/cancel-active", json={})
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "status": "success",
+        "requested": 2,
+        "cancelled": 2,
+        "failed": [],
+    }
+    assert set(cancelled) == {"bt_old_pending_0", "bt_old_pending_1"}
+
+
+def test_load_run_bars_forward_fill_drops_leading_nulls(monkeypatch):
+    bars = make_bars(3)
+    bars.loc[0, ["open", "high", "low", "close"]] = np.nan
+    monkeypatch.setattr(svc, "get_ohlcv", lambda *a, **kw: bars.copy())
+
+    result, _ = svc.load_run_bars(["NSE:TEST"], "NSE", "5m", None, None, "forward_fill")
+
+    assert len(result["NSE:TEST"]) == 2
+    assert result["NSE:TEST"]["close"].notna().all()
+
+
+def test_load_run_bars_date_bounds_are_india_calendar_bounds(monkeypatch):
+    epochs = pd.to_datetime(
+        ["2024-06-01 00:00:00", "2024-06-01 15:15:00"],
+    ).tz_localize("Asia/Kolkata").tz_convert("UTC").astype("int64") // 10**9
+    bars = pd.DataFrame({
+        "timestamp": epochs,
+        "open": [100.0, 101.0], "high": [101.0, 102.0],
+        "low": [99.0, 100.0], "close": [100.0, 101.0], "volume": [1, 1],
+    })
+    seen = {}
+
+    def get_bars(*args, **kwargs):
+        seen.update(kwargs)
+        selected = bars.copy()
+        if kwargs["start_timestamp"] is not None:
+            selected = selected[selected["timestamp"] >= kwargs["start_timestamp"]]
+        if kwargs["end_timestamp"] is not None:
+            selected = selected[selected["timestamp"] <= kwargs["end_timestamp"]]
+        return selected
+
+    monkeypatch.setattr(svc, "get_ohlcv", get_bars)
+    result, _ = svc.load_run_bars(
+        ["NSE:TEST"], "NSE", "D", "2024-06-01", "2024-06-01", "skip"
+    )
+
+    assert len(result["NSE:TEST"]) == 2
+    assert seen["start_timestamp"] == int(pd.Timestamp("2024-06-01 00:00:00", tz="Asia/Kolkata").timestamp())
+    assert seen["end_timestamp"] == int(pd.Timestamp("2024-06-01 23:59:59", tz="Asia/Kolkata").timestamp())
+
+
+def test_load_run_bars_rejects_unknown_missing_data_policy():
+    with pytest.raises(ValueError, match="missing_data_policy"):
+        svc.load_run_bars(["NSE:TEST"], "NSE", "5m", None, None, "bogus")
+
+
+@pytest.mark.parametrize("route", ["/backtest/api/run", "/backtest/api/optimize"])
+@pytest.mark.parametrize(
+    "field,value",
+    [("initial_capital", 0), ("initial_capital", "abc"), ("sizing_type", "bogus")],
+)
+def test_backtest_submit_routes_reject_invalid_run_inputs(monkeypatch, route, field, value):
+    from datetime import datetime, timezone
+
+    from flask import Flask
+
+    from blueprints.backtest import backtest_bp
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.config["WTF_CSRF_ENABLED"] = False
+    app.register_blueprint(backtest_bp)
+    payload = {"strategy_code": "df['signal'] = 0", field: value}
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["logged_in"] = True
+            sess["login_time"] = datetime.now(UTC).isoformat()
+        response = client.post(route, json=payload)
+
+    assert response.status_code == 400
+    assert response.get_json()["status"] == "error"
+
+
 def test_cancel_batch_marks_queued_runs_cancelled(monkeypatch):
     """With 2 workers and 4 tasks, two runs must sit queued; cancel_batch
     must pull them out of the queue and mark them cancelled."""
@@ -825,3 +1052,31 @@ def test_end_of_backtest_auto_closes_open_position(monkeypatch):
     assert len(trades) == 1
     assert trades[0].exit_reason == "End of Backtest"
     db_session.remove()
+
+
+def test_track_future_forgets_a_run_that_finished_before_registration():
+    """A worker can finish before the submitter records its future; no stale entry may remain."""
+    from concurrent.futures import Future
+
+    done = Future()
+    done.set_result(None)
+    svc._track_future("race-done", done)
+    assert "race-done" not in svc._JOB_FUTURES
+
+    pending = Future()
+    svc._track_future("race-pending", pending)
+    assert svc._JOB_FUTURES["race-pending"] is pending
+    pending.set_result(None)
+    assert "race-pending" not in svc._JOB_FUTURES
+
+
+def test_track_future_keeps_a_newer_future_for_the_same_id():
+    from concurrent.futures import Future
+
+    old, new = Future(), Future()
+    svc._track_future("race-reuse", old)
+    svc._track_future("race-reuse", new)
+    old.set_result(None)
+    assert svc._JOB_FUTURES["race-reuse"] is new
+    new.cancel()
+    assert "race-reuse" not in svc._JOB_FUTURES

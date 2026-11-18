@@ -170,7 +170,8 @@ def _build_strategy(code, bars, cfg, symbols, pd, np, ta, be):
 
 def _load_bars(job, workdir, pd):
     fmt = job["fmt"]
-    return {sym: _read(os.path.join(workdir, f"bars_{i}.{fmt}"), fmt, pd)
+    bars_dir = job.get("bars_dir", workdir)
+    return {sym: _read(os.path.join(bars_dir, f"bars_{i}.{fmt}"), fmt, pd)
             for i, sym in enumerate(job["symbols"])}
 
 
@@ -194,10 +195,11 @@ def mode_engine(job, workdir, code, pd, np, ta):
 
     pd.DataFrame(result.trades, columns=_TRADE_COLS).to_json(
         os.path.join(workdir, "trades.json"), orient="records")
-    pd.DataFrame(result.equity).to_json(os.path.join(workdir, "equity.json"), orient="records")
+    _write(pd.DataFrame(result.equity), os.path.join(workdir, "equity." + job["fmt"]), job["fmt"])
     with open(os.path.join(workdir, "meta.json"), "w") as fh:
         json.dump({"notes": result.notes, "logs": result.logs,
-                   "rejections": result.rejections, "cancelled": result.cancelled}, fh)
+                   "rejections": result.rejections, "charges_breakdown": result.charges_breakdown,
+                   "cancelled": result.cancelled}, fh)
 
 
 def mode_tasks(job, workdir, code, pd, np, ta):

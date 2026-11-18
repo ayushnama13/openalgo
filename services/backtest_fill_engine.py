@@ -136,6 +136,12 @@ def simulate_order_fill(
     else:  # SELL
         effective_price = max(0.0, raw_fill_price - slippage_adj)
 
+    if price_type in ("LIMIT", "SL"):
+        if action == "BUY":
+            effective_price = min(effective_price, limit_price)
+        else:
+            effective_price = max(effective_price, limit_price)
+
     # Brokerage / tax cost amount: bps fraction of traded value
     brokerage_cost = effective_price * quantity * (brokerage_bps / 10_000.0)
 

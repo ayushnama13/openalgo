@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import pytz
 
-from replay.storage import load_day_df
+from replay.storage import list_day_files, load_day_df_from_paths
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -26,55 +26,124 @@ IST = pytz.timezone("Asia/Kolkata")
 # restarts, so this cache is deliberately small — the previous lru_cache(128)
 # had an ~8 GB ceiling. Override with REPLAY_DAY_CACHE_SIZE if you have the RAM.
 _DAY_CACHE_MAX = max(1, int(os.getenv("REPLAY_DAY_CACHE_SIZE", "6")))
+# Slim (timestamp/ltp/volume/oi) frames for the batched watchlist lookup. A busy
+# symbol-day is ~100k rows x 4 columns, about 3 MB, so 64 entries tops out near
+# 200 MB while still covering a full NIFTY chain watchlist (43 symbols).
+_SLIM_CACHE_MAX = max(1, int(os.getenv("REPLAY_SLIM_CACHE_SIZE", "64")))
 
 # Today's file is still being appended to, so its cache entry must expire quickly.
 # Past days are immutable once the session ends and are cached until evicted.
 _LIVE_DAY_TTL_SECONDS = 2.0
 
-_day_cache: OrderedDict[tuple[str, str], tuple[float, pd.DataFrame]] = OrderedDict()
+_day_cache: OrderedDict[tuple[str, str], tuple[float, pd.DataFrame, tuple[str, ...]]] = OrderedDict()
+_slim_cache: OrderedDict[tuple[str, str], tuple[float, pd.DataFrame, tuple[str, ...]]] = OrderedDict()
 _day_cache_lock = threading.Lock()
+_expiry_cache: OrderedDict[str, tuple[float, str | None]] = OrderedDict()
+_expiry_cache_lock = threading.Lock()
+_EXPIRY_CACHE_MAX = 256
+_EXPIRY_CACHE_TTL_SECONDS = 600.0
 
 
 def _today_str() -> str:
     return datetime.now(IST).strftime("%Y-%m-%d")
 
 
-def _cached_load_day_df(symbol: str, date_str: str) -> pd.DataFrame:
+def _is_final(loaded_at: float, date_str: str) -> bool:
+    """True when the entry was loaded after ``date_str`` ended (IST).
+
+    "Is the date in the past right now" is not enough: an entry loaded at 14:00
+    on its own day is a partial tape, and the recorder (another process) cannot
+    tell this process to drop it when the date rolls over.
+    """
+    return datetime.fromtimestamp(loaded_at, IST).strftime("%Y-%m-%d") > date_str
+
+
+def _cached_load(
+    cache: OrderedDict, max_size: int, symbol: str, date_str: str,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
+    """Bounded day cache shared by the full-frame and slim caches.
+
+    An entry loaded after its day ended is final and served until evicted.
+    Anything loaded while the day could still be written to expires after the
+    live TTL and is then refreshed incrementally: only part files that
+    appeared since the last load are read.
+    """
     key = (symbol.upper(), date_str)
     now = time.time()
 
     with _day_cache_lock:
-        entry = _day_cache.get(key)
+        entry = cache.get(key)
         if entry is not None:
-            loaded_at, df = entry
-            fresh = date_str != _today_str() or (now - loaded_at) < _LIVE_DAY_TTL_SECONDS
-            if fresh:
-                _day_cache.move_to_end(key)
+            cache.move_to_end(key)
+            loaded_at, df, paths = entry
+            if _is_final(loaded_at, date_str) or (now - loaded_at) < _LIVE_DAY_TTL_SECONDS:
                 return df
 
     # Loaded outside the lock: reading a day can take seconds and must not block
     # every other reader. A concurrent duplicate load is wasteful but harmless.
-    df = load_day_df(symbol.upper(), date_str)
+    current_paths = tuple(list_day_files(*key))
+    if entry is not None and set(entry[2]).issubset(current_paths):
+        _, df, paths = entry
+        seen = set(paths)
+        new_paths = [path for path in current_paths if path not in seen]
+        if new_paths:
+            added = load_day_df_from_paths(key[0], date_str, new_paths, columns)
+            df = _normalize_cached_frame(pd.concat([df, added], ignore_index=True))
+    else:
+        # First load, or a previously seen part vanished (compaction): full reload.
+        df = load_day_df_from_paths(key[0], date_str, list(current_paths), columns)
 
     with _day_cache_lock:
-        _day_cache[key] = (now, df)
-        _day_cache.move_to_end(key)
-        while len(_day_cache) > _DAY_CACHE_MAX:
-            _day_cache.popitem(last=False)
+        cache[key] = (now, df, current_paths)
+        cache.move_to_end(key)
+        while len(cache) > max_size:
+            cache.popitem(last=False)
 
     return df
 
 
+def _normalize_cached_frame(df: pd.DataFrame) -> pd.DataFrame:
+    if "timestamp" not in df.columns:
+        return df
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+    df = df.dropna(subset=["timestamp"])
+    subset = [c for c in ("timestamp", "ltp", "volume") if c in df.columns]
+    return df.drop_duplicates(subset=subset, keep="last").sort_values(
+        "timestamp", kind="stable"
+    ).reset_index(drop=True)
+
+
+def _cached_load_day_df(symbol: str, date_str: str) -> pd.DataFrame:
+    return _cached_load(_day_cache, _DAY_CACHE_MAX, symbol, date_str)
+
+
 def invalidate_day(symbol: str, date_str: str) -> None:
-    """Drop one symbol-day from the cache (called after every write)."""
+    """Drop one symbol-day from the cache (compaction or deletion rewrote its files)."""
     with _day_cache_lock:
         _day_cache.pop((symbol.upper(), date_str), None)
+        _slim_cache.pop((symbol.upper(), date_str), None)
+
+
+def mark_day_stale(symbol: str, date_str: str) -> None:
+    """Note that a part file was appended to a symbol-day (called after every flush).
+
+    The entry is kept and only flagged (load time reset), so the next read
+    loads just the new part instead of the whole day again.
+    """
+    key = (symbol.upper(), date_str)
+    with _day_cache_lock:
+        for cache in (_day_cache, _slim_cache):
+            entry = cache.get(key)
+            if entry is not None:
+                cache[key] = (0.0, entry[1], entry[2])
 
 
 def clear_dal_cache() -> None:
     """Clear the in-memory cache for daily symbol dataframes."""
     with _day_cache_lock:
         _day_cache.clear()
+        _slim_cache.clear()
 
 
 def _align_tz(ts_col: pd.Series, ts: pd.Timestamp) -> pd.Timestamp:
@@ -113,6 +182,36 @@ def get_state(symbol: str, timestamp: datetime) -> dict | None:
     return record
 
 
+def get_ltp_states(symbols: list[str], timestamp: datetime) -> dict[str, dict | None]:
+    """Return slim point-in-time quote state for each symbol."""
+    if timestamp.tzinfo is None:
+        timestamp = IST.localize(timestamp)
+    date_str = timestamp.astimezone(IST).strftime("%Y-%m-%d")
+    result = {}
+    columns = ["timestamp", "ltp", "volume", "oi"]
+    for item in symbols:
+        symbol = item.upper()
+        df = _cached_load(_slim_cache, _SLIM_CACHE_MAX, symbol, date_str, columns)
+        if df.empty or "timestamp" not in df.columns:
+            result[symbol] = None
+            continue
+        ts_col = df["timestamp"]
+        query_ts = _align_tz(ts_col, pd.to_datetime(timestamp))
+        idx = int(ts_col.searchsorted(query_ts, side="right")) - 1
+        if idx < 0:
+            result[symbol] = None
+            continue
+        row = df.iloc[idx]
+        state = {}
+        for name in ("ltp", "volume", "oi"):
+            value = row.get(name)
+            # numpy scalars (int64 in particular) are not JSON serialisable
+            state[name] = None if pd.isna(value) else float(value)
+        state["timestamp"] = _to_ist_iso(row.get("timestamp"))
+        result[symbol] = state
+    return result
+
+
 def _to_ist_iso(value) -> str | None:
     """
     Serialize a stored timestamp as IST. Timestamps are normalized to UTC on
@@ -139,6 +238,7 @@ def get_range(
     t_start: datetime,
     t_end: datetime,
     limit: int | None = DEFAULT_RANGE_LIMIT,
+    columns: list[str] | None = None,
 ) -> list[dict]:
     """
     Get a time range of tick/depth events for chart rendering or analysis.
@@ -164,7 +264,12 @@ def get_range(
     # a full boolean mask over the day.
     lo = int(ts_col.searchsorted(ts_start, side="left"))
     hi = int(ts_col.searchsorted(ts_end, side="right"))
+    selected = None
+    if columns is not None:
+        selected = ["timestamp"] + [name for name in columns if name in df.columns and name != "timestamp"]
     sub_df = df.iloc[lo:hi]
+    if selected is not None:
+        sub_df = sub_df[selected]
 
     if limit is not None and len(sub_df) > limit:
         step = len(sub_df) / float(limit)
@@ -172,7 +277,8 @@ def get_range(
         sub_df = sub_df.iloc[positions]
 
     sub_df = sub_df.copy()
-    sub_df["timestamp"] = sub_df["timestamp"].map(_to_ist_iso)
+    ts_values = pd.to_datetime(sub_df["timestamp"], errors="coerce", utc=True).dt.tz_convert(IST)
+    sub_df["timestamp"] = [value.isoformat() if pd.notna(value) else None for value in ts_values]
     # to_dict("records") is an order of magnitude faster than iterrows(), which
     # builds a Series object per row.
     return sub_df.to_dict("records")
@@ -199,6 +305,14 @@ def find_nearest_nifty_expiry(target_dt: datetime) -> str | None:
     the date comparison happens in Python — previously this pulled every NIFTY CE
     row in the master and regexed the lot.
     """
+    cache_key = target_dt.strftime("%Y-%m-%d")
+    now = time.time()
+    with _expiry_cache_lock:
+        cached = _expiry_cache.get(cache_key)
+        if cached and now - cached[0] < _EXPIRY_CACHE_TTL_SECONDS:
+            _expiry_cache.move_to_end(cache_key)
+            return cached[1]
+
     from database.symbol import SymToken
 
     best_dt: datetime | None = None
@@ -232,6 +346,13 @@ def find_nearest_nifty_expiry(target_dt: datetime) -> str | None:
             best_dt = exp_dt
             best_str = expiry.upper().replace("-", "")
 
+    # A miss usually means the symbol master is not loaded yet: do not pin it.
+    if best_str is not None:
+        with _expiry_cache_lock:
+            _expiry_cache[cache_key] = (now, best_str)
+            _expiry_cache.move_to_end(cache_key)
+            while len(_expiry_cache) > _EXPIRY_CACHE_MAX:
+                _expiry_cache.popitem(last=False)
     return best_str
 
 

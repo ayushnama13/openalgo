@@ -25,8 +25,10 @@ from database.depth_recorder_db import (
     get_recent_ticks,
     get_stats,
     get_tick_count,
+    prune_old_ticks,
 )
 from services.depth_analysis import (
+    clear_session_cache,
     leadlag_report,
     list_sessions,
     metrics_series,
@@ -47,6 +49,19 @@ from utils.session import check_session_validity
 logger = get_logger(__name__)
 
 depth_recorder_bp = Blueprint("depth_recorder_bp", __name__, url_prefix="/")
+
+
+@depth_recorder_bp.route("/api/depth-recorder/prune", methods=["POST"])
+@check_session_validity
+def api_prune():
+    """Delete depth history older than the requested retention window."""
+    data = request.get_json(silent=True) or {}
+    days = data.get("days")
+    if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+        return jsonify({"status": "error", "message": "days must be an integer >= 1"}), 400
+    deleted = prune_old_ticks(days)
+    clear_session_cache()
+    return jsonify({"status": "success", "deleted": deleted}), 200
 
 
 def _api_key() -> str | None:

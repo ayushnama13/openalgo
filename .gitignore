@@ -139,3 +139,6 @@ MODIFICATIONS.txt
 /.opencode/
 /opencode.json
 /MEMORY.md
+
+# Replay recordings (tick/depth Parquet parts written at runtime)
+data/replay/

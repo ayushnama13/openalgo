@@ -14,6 +14,7 @@ import database.backtest_db as bdb
 import services.backtest_optimizer as optim
 import services.backtest_service as svc
 from database.backtest_db import BacktestOptimization, db_session
+from services.strategy_sandbox import BacktestCancelled, run_tasks_sandboxed
 
 CODE = """
 class Cross(Strategy):
@@ -119,6 +120,20 @@ def test_monte_carlo_needs_enough_trades():
         optim.monte_carlo([1, 2], 1000)
 
 
+def test_monte_carlo_respects_cell_budget_and_reports_simulations():
+    result = optim.monte_carlo([1.0] * 50000, 1000, n_sims=20000)
+    assert result["simulations"] == 20_000_000 // 50001
+
+
+def test_positive_infinity_score_ranks_first_and_serializes_safely():
+    metrics = {"total_trades": 5, "profit_factor": float("inf")}
+    assert optim._score(metrics, "profit_factor", 1) == float("inf")
+    row = optim._summary_row({}, metrics, float("inf"))
+    assert row["score"] == 999.99
+    assert "Infinity" not in json.dumps(optim._json_safe(row), allow_nan=False)
+    assert optim._score({"total_trades": 5, "profit_factor": float("nan")}, "profit_factor", 1) == float("-inf")
+
+
 # ---- sandboxed studies ----
 def test_sweep_ranks_candidates_and_reports_oos():
     spec = {"param_space": {"fast": [3, 5, 8], "slow": [15, 30]}, "objective": "total_return_pct",
@@ -162,6 +177,40 @@ def test_walk_forward_stitches_out_of_sample():
     assert res["oos_metrics"] is not None
     assert res["oos_equity"][0]["equity"] > 0
     assert res["walk_forward_efficiency"] is None or isinstance(res["walk_forward_efficiency"], float)
+    assert res["window_mode"] == "rolling"
+
+
+def test_walk_forward_anchored_windows_grow_from_first_timestamp():
+    bars = {"NSE:X": make_bars(900)}
+    spec = {"param_space": {"fast": [3], "slow": [15]}, "train_pct": 50,
+            "test_pct": 10, "n_windows": 3, "min_trades": 1, "window_mode": "anchored"}
+    result = optim.run_walk_forward(CODE, bars, BASE, spec, 100000.0, "15m")
+    first = make_bars(900)["timestamp"].iloc[0]
+    assert result["window_mode"] == "anchored"
+    assert all(window["train"][0] == first for window in result["windows"])
+    assert [window["train"][1] for window in result["windows"]] == sorted(
+        window["train"][1] for window in result["windows"]
+    )
+    assert result["windows"][1]["train"][1] > result["windows"][0]["train"][1]
+    assert result["windows"][2]["train"][1] > result["windows"][1]["train"][1]
+
+
+def test_walk_forward_window_mode_validation():
+    with pytest.raises(ValueError, match="window_mode"):
+        optim.validate_spec({"kind": "walk_forward", "param_space": {"x": [1]}, "window_mode": "bad"})
+    with pytest.raises(ValueError, match="window_mode"):
+        optim.run_walk_forward(CODE, {"NSE:X": make_bars()}, BASE,
+                               {"param_space": {"fast": [3]}, "window_mode": "bad"}, 1e5, "15m")
+
+
+@pytest.mark.parametrize("args, expected", [
+    ((0.7, 4, 5, 0.4, 3.0), "PASS"),
+    ((0.4, 3, 5, 0.1, 2.0), "MARGINAL"),
+    ((0.2, 1, 5, -0.1, -2.0), "FAIL"),
+    ((None, 4, 5, 0.4, 3.0), "MARGINAL"),
+])
+def test_walk_forward_verdict_helper(args, expected):
+    assert optim.rate_walk_forward(*args)["rating"] == expected
 
 
 def test_walk_forward_rejects_bad_windows():
@@ -169,6 +218,165 @@ def test_walk_forward_rejects_bad_windows():
         optim.run_walk_forward(CODE, {"NSE:X": make_bars()}, BASE,
                                {"param_space": {"fast": [3]}, "train_pct": 90, "test_pct": 50},
                                1e5, "15m")
+
+
+def test_stress_costs_reduce_returns_and_calculate_verdict_and_breakeven():
+    # Repeated momentum entries generate enough round trips for costs to dominate at scale.
+    code = """
+class ManyTrades(Strategy):
+    def on_bar(self, ctx):
+        s = ctx.symbols[0]
+        i = ctx.bar_index
+        if i < 2:
+            return
+        if i % 4 == 2:
+            ctx.buy(s, pct=25)
+        elif i % 4 == 0 and ctx.position(s):
+            ctx.close(s)
+"""
+    bars = {"NSE:X": make_bars(240, seed=12)}
+    base = {**BASE, "slippage_bps": 2.0}
+    result = optim.run_stress(code, bars, base,
+                              {"multipliers": [1, 1.5, 2, 3]}, 100000, "15m")
+    returns = [row["metrics"]["total_return_pct"] for row in result["rows"]]
+    assert all(left >= right for left, right in zip(returns, returns[1:]))
+    assert result["rows"][0]["metrics"]["total_trades"] >= 10
+    assert result["breakeven_multiplier"] == next(
+        (row["multiplier"] for row in result["rows"]
+         if row["metrics"]["total_return_pct"] <= 0), None
+    )
+    returns_at = {row["multiplier"]: row["metrics"]["total_return_pct"]
+                  for row in result["rows"]}
+    expected_verdict = "PASS" if returns_at[2] > 0 else (
+        "MARGINAL" if returns_at[1.5] > 0 else "FAIL"
+    )
+    assert result["verdict"] == expected_verdict
+
+
+def test_stress_validation_without_param_space_and_bad_multipliers():
+    valid = optim.validate_spec({"kind": "stress"})
+    assert valid["multipliers"] == [1, 1.5, 2, 3]
+    assert valid["params"] == {}
+    for values in ([0], [11], [True], [], [1] * 9):
+        with pytest.raises(ValueError, match="multipliers"):
+            optim.validate_spec({"kind": "stress", "multipliers": values})
+
+
+def test_perturb_bars_consistency_copy_and_reproducibility():
+    original = {"NSE:X": make_bars(80)}
+    before = original["NSE:X"].copy(deep=True)
+    one = optim.perturb_bars(original, 0.1, np.random.default_rng(7))
+    two = optim.perturb_bars(original, 0.1, np.random.default_rng(7))
+    altered = one["NSE:X"]
+    assert altered is not original["NSE:X"]
+    assert original["NSE:X"].equals(before)
+    assert altered.equals(two["NSE:X"])
+    assert (altered["high"] >= altered[["open", "low", "close"]].max(axis=1)).all()
+    assert (altered["low"] <= altered[["open", "high", "close"]].min(axis=1)).all()
+    assert (altered[["open", "high", "low", "close"]] > 0).all().all()
+    assert altered["timestamp"].equals(before["timestamp"])
+    assert altered["volume"].equals(before["volume"])
+
+
+def test_noise_run_shape_and_validation():
+    bars = {"NSE:X": make_bars(180)}
+    spec = optim.validate_spec({"kind": "noise", "runs": 5, "seed": 4})
+    result = optim.run_noise(CODE, bars, BASE, spec, 100000.0, "15m")
+    assert result["kind"] == "noise"
+    assert len(result["results"]) == result["runs"] == 5
+    assert result["verdict"] in {"PASS", "FAIL", "MARGINAL"}
+    assert set(result["distribution"]) == {"total_return_pct", "sharpe_ratio"}
+    for bad in ({"kind": "noise", "runs": 2}, {"kind": "noise", "noise_pct": 5}):
+        with pytest.raises(ValueError):
+            optim.validate_spec(bad)
+
+
+def test_parallel_task_results_match_serial_and_progress(monkeypatch):
+    bars = {"NSE:X": make_bars(180)}
+    tasks = [{"id": i, "params": {"fast": fast, "slow": 20}, "start": None, "end": None}
+             for i, fast in enumerate((3, 5, 8, 10, 12))]
+    progress = []
+    one = run_tasks_sandboxed(CODE, bars, BASE, tasks, workers=1)
+    three = run_tasks_sandboxed(CODE, bars, BASE, tasks, workers=3, progress_cb=progress.append)
+    assert one["timeline"] == three["timeline"]
+    assert list(one["tasks"]) == list(three["tasks"]) == list(range(5))
+    for task_id in one["tasks"]:
+        left, right = one["tasks"][task_id], three["tasks"][task_id]
+        assert left["trades"] == right["trades"]
+        assert np.array_equal(left["equity"], right["equity"])
+    assert progress == sorted(progress)
+    assert progress[-1] == 100.0
+
+
+def test_parallel_task_failure_is_per_task():
+    tasks = [{"id": 1, "params": {}, "start": None, "end": None},
+             {"id": 2, "params": {}, "start": None, "end": None}]
+    code = "if PARAMS.get('fail'): raise RuntimeError('task boom')\n" + CODE
+    tasks[0]["params"] = {"fail": True}
+    tasks[1]["params"] = {"fast": 5, "slow": 20}
+    result = run_tasks_sandboxed(code, {"NSE:X": make_bars(100)}, BASE, tasks, workers=2)
+    assert "task boom" in result["tasks"][1]["error"]
+    assert "equity" in result["tasks"][2]
+
+
+def test_parallel_child_crash_reaps_all_processes(monkeypatch):
+    from services import strategy_sandbox as sandbox
+
+    started = []
+    real_popen = sandbox.subprocess.Popen
+
+    def tracking_popen(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        started.append(proc)
+        return proc
+
+    monkeypatch.setattr(sandbox.subprocess, "Popen", tracking_popen)
+    tasks = [{"id": i, "params": {}, "start": None, "end": None} for i in range(3)]
+    with pytest.raises(ValueError, match="Strategy failed"):
+        run_tasks_sandboxed("raise SystemExit(3)", {"NSE:X": make_bars(80)}, BASE, tasks, workers=3)
+    assert len(started) == 3
+    assert all(proc.poll() is not None for proc in started)
+
+
+def test_parallel_cancel_reaps_all_processes(monkeypatch):
+    from services import strategy_sandbox as sandbox
+
+    started = []
+    real_popen = sandbox.subprocess.Popen
+
+    def tracking_popen(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        started.append(proc)
+        return proc
+
+    class CancelAfterStart:
+        def is_set(self):
+            return len(started) == 3
+
+    monkeypatch.setattr(sandbox.subprocess, "Popen", tracking_popen)
+    tasks = [{"id": i, "params": {}, "start": None, "end": None} for i in range(3)]
+    with pytest.raises(BacktestCancelled):
+        run_tasks_sandboxed("while True: pass", {"NSE:X": make_bars(80)}, BASE, tasks,
+                            workers=3, cancel_event=CancelAfterStart())
+    assert len(started) == 3
+    assert all(proc.poll() is not None for proc in started)
+
+
+def test_backtest_optimizer_worker_environment(monkeypatch):
+    from services import strategy_sandbox as sandbox
+
+    monkeypatch.setenv("BACKTEST_OPT_WORKERS", "2")
+    tasks = [{"id": i, "params": {}, "start": None, "end": None} for i in range(2)]
+    children = []
+    original = sandbox._supervise_children
+
+    def track(specs, *args, **kwargs):
+        children.extend(specs)
+        return original(specs, *args, **kwargs)
+
+    monkeypatch.setattr(sandbox, "_supervise_children", track)
+    run_tasks_sandboxed("pass", {"NSE:X": make_bars(60)}, BASE, tasks)
+    assert len(children) == 2
 
 
 # ---- background job through the service ----

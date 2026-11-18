@@ -34,8 +34,9 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
+import pytz
 
-from database.depth_recorder_db import get_session_ticks_flat
+from database.depth_recorder_db import get_session_rows_flat
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -73,11 +74,22 @@ def _cache_get(symbol: str, exchange: str, day: str) -> dict | None:
         if hit is None:
             return None
         age = (datetime.now() - hit["built_at"]).total_seconds()
-        if age > CACHE_TTL_SECONDS:
+        # An entry is final only if it was BUILT after its day ended (IST). One
+        # built while the day was still being recorded holds a partial session
+        # and must expire like a live entry, even once the date has rolled over.
+        built_day = hit["built_at"].astimezone(pytz.timezone("Asia/Kolkata")).date().isoformat()
+        final = built_day > day[:10]
+        if not final and age > CACHE_TTL_SECONDS:
             _session_cache.pop(k, None)
             return None
         _session_cache.move_to_end(k)
         return hit
+
+
+def clear_session_cache() -> None:
+    """Clear cached analytical sessions after their source rows are pruned."""
+    with _cache_lock:
+        _session_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -85,50 +97,27 @@ def _cache_get(symbol: str, exchange: str, day: str) -> dict | None:
 # ---------------------------------------------------------------------------
 def list_sessions(exchange: str = "", symbol: str = "") -> list[dict]:
     """One entry per distinct (symbol, exchange, day). Newest first."""
-    from database.depth_recorder_db import DepthTick
+    from database.depth_recorder_db import DepthSession
     from database.depth_recorder_db import db_session as dr_session
 
     try:
-        rows = dr_session.query(DepthTick.symbol, DepthTick.exchange, DepthTick.tick_time).all()
+        rows = dr_session.query(DepthSession).all()
     except Exception:
         logger.exception("depth_analysis: list_sessions query failed")
+        dr_session.rollback()
         return []
 
-    groups: dict[tuple, dict] = {}
-    for symbol_row, exchange_row, ts in rows:
-        if exchange and exchange_row.upper() != exchange.upper():
-            continue
-        if symbol and symbol_row.upper() != symbol.upper():
-            continue
-        day = ts.date().isoformat()
-        k = (symbol_row, exchange_row, day)
-        g = groups.setdefault(
-            k,
-            {
-                "symbol": symbol_row,
-                "exchange": exchange_row,
-                "day": day,
-                "first": ts,
-                "last": ts,
-                "n_ticks": 0,
-            },
-        )
-        g["n_ticks"] += 1
-        if ts < g["first"]:
-            g["first"] = ts
-        if ts > g["last"]:
-            g["last"] = ts
-
     out = []
-    for g in groups.values():
+    for row in rows:
+        if exchange and row.exchange.upper() != exchange.upper():
+            continue
+        if symbol and row.symbol.upper() != symbol.upper():
+            continue
         out.append(
             {
-                "symbol": g["symbol"],
-                "exchange": g["exchange"],
-                "day": g["day"],
-                "n_ticks": g["n_ticks"],
-                "first": g["first"].isoformat(),
-                "last": g["last"].isoformat(),
+                "symbol": row.symbol, "exchange": row.exchange, "day": row.day,
+                "n_ticks": row.n_ticks, "first": row.first_tick.isoformat(),
+                "last": row.last_tick.isoformat(),
             }
         )
     out.sort(key=lambda s: (s["day"], s["symbol"]), reverse=True)
@@ -148,11 +137,11 @@ def _load_session(symbol: str, exchange: str, day: str) -> pd.DataFrame:
     start = datetime.fromisoformat(f"{day}T00:00:00")
     end = start + timedelta(days=1)
 
-    ticks = get_session_ticks_flat(symbol, exchange, start, end)
-    if not ticks:
+    cols, rows = get_session_rows_flat(symbol, exchange, start, end)
+    if not rows:
         return pd.DataFrame()
 
-    df = pd.DataFrame(ticks)
+    df = pd.DataFrame.from_records(rows, columns=cols)
     df.sort_values("tick_time", inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df

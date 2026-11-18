@@ -22,7 +22,16 @@ from replay.dal import (
     nearest_thursday_expiry,
     nifty_option_symbols,
 )
-from replay.storage import MAX_DEPTH_LEVELS, save_events
+from replay.storage import (
+    MAX_DEPTH_LEVELS,
+    bump_index_many,
+    compact_day,
+    get_day_dir,
+    get_parquet_path,
+    list_available,
+    list_day_files,
+    save_events,
+)
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -42,6 +51,8 @@ _TARGETS_CACHE_TTL_SECONDS = 2.0
 # storage is append-only now, but a larger window still means fewer, fatter
 # part files, which read back faster.
 FLUSH_INTERVAL_SECONDS = float(os.getenv("REPLAY_FLUSH_INTERVAL", "3.0"))
+REPLAY_FLUSH_MIN_ROWS = max(1, int(os.getenv("REPLAY_FLUSH_MIN_ROWS", "200")))
+REPLAY_FLUSH_MAX_AGE = max(0.0, float(os.getenv("REPLAY_FLUSH_MAX_AGE", "10")))
 
 # Recording is gated to the trading session so an idle overnight feed cannot
 # pad the tape with stale repeats. Widened slightly on both sides to catch
@@ -73,6 +84,7 @@ class ReplayRecorder:
         self.buffer: list[dict] = []
         self.running = False
         self._buf_lock = threading.Lock()
+        self._oldest_buffered_at: float | None = None
 
     def start(self):
         with self._buf_lock:
@@ -88,17 +100,24 @@ class ReplayRecorder:
         """Push a normalized tick/depth event into the buffer."""
         with self._buf_lock:
             self.buffer.append(event_dict)
+            if self._oldest_buffered_at is None:
+                self._oldest_buffered_at = time.monotonic()
 
-    def flush(self):
+    def flush(self, force: bool = True, bump_index: bool = True) -> int:
         with self._buf_lock:
             if not self.buffer:
-                return
+                return 0
+            waited = time.monotonic() - (self._oldest_buffered_at or time.monotonic())
+            if not force and len(self.buffer) < REPLAY_FLUSH_MIN_ROWS and waited < REPLAY_FLUSH_MAX_AGE:
+                return 0
             events_to_save = self.buffer
             self.buffer = []
+            self._oldest_buffered_at = None
         try:
-            save_events(self.symbol, self.date_str, events_to_save)
+            return save_events(self.symbol, self.date_str, events_to_save, bump_index=bump_index)
         except Exception:
             logger.exception(f"[ReplayRecorder] Error flushing events for {self.symbol}")
+            return 0
 
     def stop(self):
         with self._buf_lock:
@@ -114,6 +133,23 @@ class ReplayRecorder:
 _flusher_thread: threading.Thread | None = None
 _flusher_lock = threading.Lock()
 _flusher_stop = threading.Event()
+_compaction_date: str | None = None
+_compaction_queue: list[tuple[str, str]] = []
+
+
+def _refresh_compaction_queue(today: str) -> None:
+    global _compaction_date, _compaction_queue
+    if _compaction_date == today:
+        return
+    _compaction_date = today
+    _compaction_queue = []
+    for entry in list_available():
+        if entry["date"] < today:
+            symbol, date_str = entry["symbol"], entry["date"]
+            files = list_day_files(symbol, date_str)
+            has_legacy = os.path.exists(get_parquet_path(symbol, date_str))
+            if len(files) > 1 or has_legacy:
+                _compaction_queue.append((symbol, date_str))
 
 
 def _flusher_loop():
@@ -124,11 +160,23 @@ def _flusher_loop():
         try:
             with _lock:
                 recorders = [info["recorder"] for info in _active_recorders.values()]
+            index_updates = []
             for rec in recorders:
                 try:
-                    rec.flush()
+                    rows = rec.flush(force=False, bump_index=False)
+                    if rows:
+                        index_updates.append((rec.symbol, rec.date_str, get_day_dir(rec.symbol, rec.date_str), rows))
                 except Exception:
                     logger.exception(f"[ReplayRecorder] Flush failed for {rec.symbol}")
+            bump_index_many(index_updates)
+            today = datetime.now(IST).strftime("%Y-%m-%d")
+            _refresh_compaction_queue(today)
+            if _compaction_queue:
+                symbol, date_str = _compaction_queue.pop(0)
+                try:
+                    compact_day(symbol, date_str)
+                except Exception:
+                    logger.exception(f"[ReplayRecorder] Automatic compaction failed for {symbol} {date_str}")
         except Exception:
             logger.exception("[ReplayRecorder] Flusher loop error")
 

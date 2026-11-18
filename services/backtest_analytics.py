@@ -1,6 +1,9 @@
 # services/backtest_analytics.py
 
 import math
+import threading
+import time
+from collections import OrderedDict
 from typing import Any, Optional
 
 import numpy as np
@@ -18,6 +21,12 @@ logger = get_logger(__name__)
 # which makes cross-timeframe comparison meaningless.
 _TRADING_MINUTES_PER_DAY = 375.0
 _TRADING_DAYS_PER_YEAR = 252.0
+_BENCHMARK_CACHE = OrderedDict()
+_BENCHMARK_CACHE_LOCK = threading.Lock()
+_BENCHMARK_CACHE_TTL = 600
+# Entries are stored column-wise (timestamp list + float array): a 1m benchmark
+# over a year is ~95k points, about 8 MB that way against ~25 MB as row dicts.
+_BENCHMARK_CACHE_MAX = 8
 
 
 def periods_per_year_for_interval(interval: str | None) -> float:
@@ -88,11 +97,16 @@ def calculate_backtest_metrics(
     pct_changes = equity_series.pct_change().dropna()
 
     # CAGR calculation
-    total_days = max(1, (equity_series.index[-1] - equity_series.index[0]).days if isinstance(equity_series.index, pd.DatetimeIndex) else len(equity_series))
-    years = total_days / 365.25 if isinstance(equity_series.index, pd.DatetimeIndex) else len(equity_series) / trading_days_per_year
+    if isinstance(equity_series.index, pd.DatetimeIndex):
+        elapsed_seconds = (equity_series.index[-1] - equity_series.index[0]).total_seconds()
+        years = elapsed_seconds / (365.25 * 86400)
+    else:
+        years = len(equity_series) / trading_days_per_year
     years = max(years, 0.001)
 
-    if ending_equity > 0:
+    if isinstance(equity_series.index, pd.DatetimeIndex) and (equity_series.index[-1] - equity_series.index[0]).total_seconds() < 30 * 86400:
+        cagr_pct = total_return_pct
+    elif ending_equity > 0:
         cagr_pct = ((ending_equity / initial_capital) ** (1.0 / years) - 1.0) * 100.0
     else:
         cagr_pct = -100.0
@@ -112,8 +126,7 @@ def calculate_backtest_metrics(
         sharpe_ratio = 0.0
 
     # Sortino Ratio (downside risk)
-    downside_returns = pct_changes[pct_changes < 0]
-    downside_std = downside_returns.std()
+    downside_std = float(np.sqrt(np.square(np.minimum(pct_changes.to_numpy(), 0.0)).mean()))
     if downside_std > 0:
         sortino_ratio = (mean_return / downside_std) * math.sqrt(periods_per_year)
     else:
@@ -248,7 +261,11 @@ def generate_monthly_returns_heatmap(equity_series: pd.Series) -> dict[str, Any]
             # YTD calculation for the year
             yr_equity = equity_series[equity_series.index.year == yr]
             if not yr_equity.empty:
-                start_val = yr_equity.iloc[0]
+                if yr != years[0]:
+                    prior_equity = equity_series[equity_series.index.year < yr]
+                    start_val = prior_equity.iloc[-1] if not prior_equity.empty else yr_equity.iloc[0]
+                else:
+                    start_val = yr_equity.iloc[0]
                 end_val = yr_equity.iloc[-1]
                 ytd = ((end_val - start_val) / start_val) * 100.0 if start_val > 0 else 0.0
                 matrix[yr_str]["YTD"] = round(float(ytd), 2)
@@ -273,6 +290,18 @@ def get_benchmark_comparison(
     """
     Retrieves benchmark OHLCV and returns benchmark equity curve aligned with initial capital.
     """
+    key = (start_time_epoch, end_time_epoch, interval, float(initial_capital), benchmark_symbol, benchmark_exchange)
+    now = time.monotonic()
+    with _BENCHMARK_CACHE_LOCK:
+        cached = _BENCHMARK_CACHE.get(key)
+        if cached and now - cached[0] < _BENCHMARK_CACHE_TTL:
+            _BENCHMARK_CACHE.move_to_end(key)
+            return [
+                {"timestamp": ts, "benchmark_equity": eq}
+                for ts, eq in zip(cached[1], cached[2].tolist(), strict=True)
+            ]
+        if cached:
+            _BENCHMARK_CACHE.pop(key, None)
     try:
         bench_df = get_ohlcv(
             symbol=benchmark_symbol,
@@ -307,6 +336,15 @@ def get_benchmark_comparison(
                 "timestamp": ts,
                 "benchmark_equity": round(float(eq), 2),
             })
+        with _BENCHMARK_CACHE_LOCK:
+            _BENCHMARK_CACHE[key] = (
+                now,
+                [row["timestamp"] for row in results],
+                np.asarray([row["benchmark_equity"] for row in results], dtype="float64"),
+            )
+            _BENCHMARK_CACHE.move_to_end(key)
+            while len(_BENCHMARK_CACHE) > _BENCHMARK_CACHE_MAX:
+                _BENCHMARK_CACHE.popitem(last=False)
         return results
     except Exception as e:
         logger.exception(f"Error fetching benchmark comparison: {e}")

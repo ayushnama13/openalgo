@@ -42,6 +42,7 @@ from database.depth_recorder_db import (
     batch_save_ticks,
     get_active_configs,
     get_tick_count,
+    prune_old_ticks,
     upsert_config,
 )
 from utils.logging import get_logger
@@ -56,7 +57,8 @@ IST = pytz.timezone("Asia/Kolkata")
 MARKET_OPEN = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 31)  # 15:30 + 1 min grace
 
-FLUSH_INTERVAL_SECONDS = float(os.getenv("DEPTH_RECORDER_FLUSH_INTERVAL", "0.25"))
+FLUSH_INTERVAL_SECONDS = float(os.getenv("DEPTH_RECORDER_FLUSH_INTERVAL", "1.0"))
+RETENTION_DAYS = int(os.getenv("DEPTH_RECORDER_RETENTION_DAYS", "0"))
 RECONNECT_DELAY_BASE = 2  # seconds
 RECONNECT_DELAY_MAX = 60  # seconds
 
@@ -71,6 +73,7 @@ _lock = _original_threading.Lock()
 
 # symbol_key -> { thread, stop_event, ticks_buffered, ticks_written, status, ... }
 _recorders: dict[str, dict] = {}
+_last_retention_day: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +276,26 @@ def _is_market_hours() -> bool:
     return MARKET_OPEN <= t <= MARKET_CLOSE
 
 
+def _maybe_prune_old_ticks() -> None:
+    """Apply DEPTH_RECORDER_RETENTION_DAYS at most once per calendar day per process.
+
+    Called from a recorder OS thread between connections (never from a Flask
+    request and never while a socket is being read), so a long delete cannot
+    stall the web worker or back up a live feed.
+    """
+    global _last_retention_day
+    if RETENTION_DAYS <= 0:
+        return
+    today = datetime.now(IST).date().isoformat()
+    with _lock:
+        if _last_retention_day == today:
+            return
+        _last_retention_day = today
+    deleted = prune_old_ticks(RETENTION_DAYS)
+    if deleted:
+        logger.info(f"[DepthRecorder] Retention removed {deleted} ticks older than {RETENTION_DAYS} days")
+
+
 def _get_ws_url() -> str:
     return os.getenv("WEBSOCKET_URL", "ws://127.0.0.1:8765")
 
@@ -396,8 +419,18 @@ def _normalise_depth_payload(data: dict, symbol: str, exchange: str) -> dict | N
     depth_level = actual_levels if actual_levels > 0 else 5
     levels_json = None
     if actual_levels > 5:
-        b_list = [[_lv([b], 0, "price"), _lv([b], 0, "quantity"), _lo([b], 0)] for b in bids]
-        s_list = [[_lv([a], 0, "price"), _lv([a], 0, "quantity"), _lo([a], 0)] for a in asks]
+        def _serialise_level(level):
+            if not isinstance(level, dict):
+                return [None, None, None]
+            orders = level.get("orders", level.get("order_count"))
+            try:
+                orders = None if orders in (None, "") else int(orders)
+            except (TypeError, ValueError):
+                orders = None
+            return [_safe_float(level.get("price")), _safe_float(level.get("quantity")), orders]
+
+        b_list = [_serialise_level(b) for b in bids]
+        s_list = [_serialise_level(a) for a in asks]
         levels_json = json.dumps({"b": b_list, "s": s_list}, separators=(',', ':'))
 
     now = _now_ist()
@@ -615,6 +648,7 @@ def _recorder_loop(
                 s["ticks_written"] = s.get("ticks_written", 0) + n
 
     while not stop_event.is_set():
+        _maybe_prune_old_ticks()
         if not _is_market_hours():
             with _lock:
                 s = _recorders.get(key, {})

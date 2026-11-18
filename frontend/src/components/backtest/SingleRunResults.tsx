@@ -11,6 +11,7 @@ import type * as PlotlyTypes from 'plotly.js'
 import { useMemo } from 'react'
 import { PLOT_CONFIG, PLOT_LAYOUT } from '@/components/backtest/plotConfig'
 import RunInsights from '@/components/backtest/RunInsights'
+import { ChargesCard, RobustnessCard } from '@/components/backtest/RunRobustness'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -539,6 +540,8 @@ export default function SingleRunResults({
         </CardContent>
       </Card>
 
+      <ChargesCard metrics={metrics} />
+
       {result.job_id && (
         <RunInsights
           jobId={result.job_id}
@@ -546,6 +549,8 @@ export default function SingleRunResults({
           tradeCount={result.trades?.length ?? 0}
         />
       )}
+
+      {showParams && jobDetails && <RobustnessCard job={jobDetails} />}
     </div>
   )
 }

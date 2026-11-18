@@ -34,6 +34,8 @@ export interface Depth20PanelProps {
    */
   replayData?: Record<string, any> | null
   onClose?: () => void
+  /** Hide the "20-Level Depth" heading when the host already labels the panel (e.g. a tab). */
+  hideTitle?: boolean
   className?: string
 }
 
@@ -49,6 +51,7 @@ export function Depth20Panel({
   wsUrl = 'ws://127.0.0.1:8765',
   replayData,
   onClose,
+  hideTitle = false,
   className,
 }: Depth20PanelProps) {
   const [levelCount, setLevelCount] = useState<5 | 10 | 20>(20)
@@ -304,8 +307,12 @@ export function Depth20Panel({
       {/* Header bar */}
       <div className="flex items-center justify-between border-b px-3 py-2">
         <div className="flex items-center gap-2">
-          <Layers className="h-4 w-4 text-primary" />
-          <span className="font-semibold text-sm">20-Level Depth</span>
+          {!hideTitle && (
+            <>
+              <Layers className="h-4 w-4 text-primary" />
+              <span className="font-semibold text-sm">20-Level Depth</span>
+            </>
+          )}
           <Badge variant="outline" className="text-[10px] font-mono uppercase">
             {symbol} · {exchange}
           </Badge>
@@ -421,15 +428,17 @@ export function Depth20Panel({
 
       {/* Order Book Table Header */}
       <div className="grid grid-cols-2 divide-x border-b bg-muted/40 text-[10px] font-medium text-muted-foreground">
-        <div className="grid grid-cols-3 px-2 py-1 text-emerald-500">
-          <span>Orders</span>
+        <div className="grid grid-cols-[1.5rem_1fr_4rem] gap-x-1.5 px-2 py-1 text-emerald-500">
+          <span title="Orders">Ord</span>
           <span className="text-right">Qty</span>
           <span className="text-right">Bid Price</span>
         </div>
-        <div className="grid grid-cols-3 px-2 py-1 text-rose-500">
+        <div className="grid grid-cols-[4rem_1fr_1.5rem] gap-x-1.5 px-2 py-1 text-rose-500">
           <span>Ask Price</span>
           <span className="text-right">Qty</span>
-          <span className="text-right">Orders</span>
+          <span className="text-right" title="Orders">
+            Ord
+          </span>
         </div>
       </div>
 
@@ -445,7 +454,7 @@ export function Depth20Panel({
           return (
             <div key={idx} className="grid grid-cols-2 divide-x hover:bg-muted/30 transition-colors">
               {/* Bid Column */}
-              <div className="relative grid grid-cols-3 px-2 py-1 items-center">
+              <div className="relative grid grid-cols-[1.5rem_1fr_4rem] gap-x-1.5 px-2 py-1 items-center">
                 <div className="absolute inset-0 overflow-hidden pointer-events-none">
                   <div
                     className="absolute top-0 bottom-0 right-0 bg-emerald-500/15 transition-all duration-300"
@@ -464,7 +473,7 @@ export function Depth20Panel({
               </div>
 
               {/* Ask Column */}
-              <div className="relative grid grid-cols-3 px-2 py-1 items-center">
+              <div className="relative grid grid-cols-[4rem_1fr_1.5rem] gap-x-1.5 px-2 py-1 items-center">
                 <div className="absolute inset-0 overflow-hidden pointer-events-none">
                   <div
                     className="absolute top-0 bottom-0 left-0 bg-rose-500/15 transition-all duration-300"

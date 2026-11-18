@@ -1250,6 +1250,32 @@ def get_data_range(symbol: str, exchange: str, interval: str) -> dict[str, Any] 
         return None
 
 
+def get_catalog_ranges(exchange: str, interval: str) -> dict[str, dict[str, Any]]:
+    """Data ranges for every symbol of one exchange and interval, in one query.
+
+    Returns {SYMBOL: {first_timestamp, last_timestamp, record_count}}; a symbol
+    with no data is simply absent. Used to check coverage for a whole index
+    universe without one catalog lookup per constituent.
+    """
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT symbol, first_timestamp, last_timestamp, record_count
+                FROM data_catalog
+                WHERE exchange = ? AND interval = ?
+            """,
+                [exchange.upper(), interval],
+            ).fetchall()
+        return {
+            str(r[0]).upper(): {"first_timestamp": r[1], "last_timestamp": r[2], "record_count": r[3]}
+            for r in rows
+        }
+    except Exception as e:
+        logger.exception(f"Error fetching catalog ranges: {e}")
+        return {}
+
+
 def delete_market_data(symbol: str, exchange: str, interval: str | None = None) -> tuple[bool, str]:
     """
     Delete market data for a symbol.

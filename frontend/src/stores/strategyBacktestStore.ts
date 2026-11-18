@@ -44,6 +44,8 @@ export interface Metrics {
     matrix: Record<string, Record<string, number | null>>
   }
   notes?: string[]
+  /** Per-charge totals for the run (brokerage, stt, exchange_txn, sebi, stamp_duty, tax, ..., total). */
+  charges_breakdown?: Record<string, number>
 }
 
 export interface EquityPoint {
@@ -66,6 +68,9 @@ export interface ResultsData {
   equity_curve: EquityPoint[]
   trades: BacktestTrade[]
   benchmark_curve: BenchmarkPoint[]
+  /** Bars in the full run; equity_curve is downsampled for charting past 5000 points. */
+  equity_points_total?: number
+  equity_downsampled?: boolean
 }
 
 export interface FullJobDetails {
@@ -98,7 +103,12 @@ export interface FullJobDetails {
       first: string
       last: string
       sha256: string
-      instrument?: { kind: string; lot_size: number; strike?: number | null; expiry?: string | null }
+      instrument?: {
+        kind: string
+        lot_size: number
+        strike?: number | null
+        expiry?: string | null
+      }
     }
   > | null
   created_at?: string
@@ -107,6 +117,11 @@ export interface FullJobDetails {
   metrics?: Metrics
   batch_id?: string
   batch_seq?: number
+  /** "stock" | "universe" | "scan"; absent on older runs (= stock). */
+  mode?: string | null
+  universe?: string | null
+  starred?: boolean
+  notes?: string | null
 }
 
 export interface BatchRunSummary {
@@ -117,11 +132,15 @@ export interface BatchRunSummary {
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
   metrics?: Metrics | null
   error_message?: string | null
+  /** The run's symbols; one per run in a scan batch. */
+  symbols?: string[]
 }
 
 export interface BatchDetails {
   batch_id: string
   name: string
+  mode?: string | null
+  universe?: string | null
   runs: BatchRunSummary[]
 }
 
@@ -146,7 +165,8 @@ interface StrategyBacktestStore {
   batch: BatchDetails | null
   setBatch: (batch: BatchDetails | null) => void
   batchCurves: BatchCurve[]
-  setBatchCurves: (curves: BatchCurve[]) => void
+  batchCurvesFor: string | null
+  setBatchCurves: (batchId: string, curves: BatchCurve[]) => void
   resultsByJob: Record<string, ResultsData>
   setResultsByJob: (jobId: string, data: ResultsData) => void
   clear: () => void
@@ -159,7 +179,8 @@ export const useStrategyBacktestStore = create<StrategyBacktestStore>((set) => (
   batch: null,
   setBatch: (batch) => set({ batch }),
   batchCurves: [],
-  setBatchCurves: (batchCurves) => set({ batchCurves }),
+  batchCurvesFor: null,
+  setBatchCurves: (batchCurvesFor, batchCurves) => set({ batchCurvesFor, batchCurves }),
   resultsByJob: {},
   setResultsByJob: (jobId, data) =>
     set((state) => ({ resultsByJob: { ...state.resultsByJob, [jobId]: data } })),
@@ -169,6 +190,7 @@ export const useStrategyBacktestStore = create<StrategyBacktestStore>((set) => (
       jobDetails: null,
       batch: null,
       batchCurves: [],
+      batchCurvesFor: null,
       resultsByJob: {},
     }),
 }))

@@ -83,3 +83,41 @@ export function buildEngineOptions(
   if (params.value) out.params = params.value
   return { ok: true, value: out }
 }
+
+export function engineOptionsFromSaved(
+  saved: Record<string, unknown> | null | undefined
+): EngineOptionsState {
+  const state = { ...DEFAULT_ENGINE_OPTIONS }
+  if (!saved) return state
+  if (typeof saved.cost_preset === 'string') state.costModel = saved.cost_preset
+  const pairs: [
+    string,
+    keyof Pick<
+      EngineOptionsState,
+      | 'spreadBps'
+      | 'impactBps'
+      | 'maxVolumePct'
+      | 'intradayLeverage'
+      | 'marginPctFut'
+      | 'marginPctShortOpt'
+      | 'trailPct'
+    >,
+  ][] = [
+    ['spread_bps', 'spreadBps'],
+    ['impact_bps', 'impactBps'],
+    ['max_volume_pct', 'maxVolumePct'],
+    ['intraday_leverage', 'intradayLeverage'],
+    ['margin_pct_fut', 'marginPctFut'],
+    ['margin_pct_short_opt', 'marginPctShortOpt'],
+    ['trail_pct', 'trailPct'],
+  ]
+  for (const [key, field] of pairs) {
+    const value = saved[key]
+    if (typeof value === 'number' && Number.isFinite(value)) state[field] = String(value)
+  }
+  if (saved.allow_short === false) state.allowShort = false
+  if (saved.params !== null && typeof saved.params === 'object' && !Array.isArray(saved.params)) {
+    state.paramsText = JSON.stringify(saved.params, null, 2)
+  }
+  return state
+}

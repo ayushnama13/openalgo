@@ -4,12 +4,19 @@ blueprints/replay.py
 Flask blueprint for OpenAlgo Replay Mode.
 """
 
+import threading
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request
 
 from replay.clock import clock_instance
-from replay.dal import DEFAULT_RANGE_LIMIT, expand_nifty_options, get_range, get_state
+from replay.dal import (
+    DEFAULT_RANGE_LIMIT,
+    expand_nifty_options,
+    get_ltp_states,
+    get_range,
+    get_state,
+)
 from replay.fill_simulator import simulate_order_fill
 from replay.patterns import detect_patterns
 from replay.recorder import (
@@ -28,6 +35,14 @@ replay_bp = Blueprint("replay_bp", __name__, url_prefix="/")
 
 # Hard ceiling on /api/replay/range regardless of what the caller asks for.
 MAX_RANGE_LIMIT = 100000
+_prune_lock = threading.Lock()
+_last_prune_date: str | None = None
+
+
+def _today_ist() -> str:
+    from replay.dal import IST
+
+    return datetime.now(IST).strftime("%Y-%m-%d")
 
 
 @replay_bp.route("/api/replay/status", methods=["GET"])
@@ -59,10 +74,15 @@ def api_replay_session():
         return jsonify({"status": "error", "message": str(exc)}), 400
 
     # Automatically prune replay data older than 7 days (weekly retention) to prevent storage overload
-    try:
-        prune_old_replay_data(7)
-    except Exception as exc:
-        logger.error(f"[api_replay_session] Automatic pruning error: {exc}")
+    global _last_prune_date
+    today = _today_ist()
+    with _prune_lock:
+        if _last_prune_date != today:
+            try:
+                prune_old_replay_data(7)
+                _last_prune_date = today
+            except Exception:
+                logger.exception("[api_replay_session] Automatic pruning error")
 
     return jsonify({"status": "configured", **clock_instance.get_state()}), 200
 
@@ -119,6 +139,23 @@ def api_replay_state():
     return jsonify({"symbol": symbol.upper(), "timestamp": dt.isoformat(), "state": state}), 200
 
 
+@replay_bp.route("/api/replay/states", methods=["GET"])
+@check_session_validity
+def api_replay_states():
+    symbols = [item.strip() for item in request.args.get("symbols", "").split(",") if item.strip()]
+    if not symbols or len(symbols) > 200:
+        return jsonify({"status": "error", "message": "symbols must contain 1 to 200 entries"}), 400
+    ts_str = request.args.get("timestamp")
+    if ts_str:
+        try:
+            dt = datetime.fromisoformat(ts_str)
+        except ValueError:
+            return jsonify({"status": "error", "message": f"invalid timestamp: {ts_str}"}), 400
+    else:
+        dt = clock_instance.current_time
+    return jsonify({"timestamp": dt.isoformat(), "states": get_ltp_states(symbols, dt)}), 200
+
+
 @replay_bp.route("/api/replay/range", methods=["GET"])
 @check_session_validity
 def api_replay_range():
@@ -144,7 +181,9 @@ def api_replay_range():
         return jsonify({"status": "error", "message": "limit must be an integer"}), 400
     limit = None if limit <= 0 else min(limit, MAX_RANGE_LIMIT)
 
-    range_data = get_range(symbol, t_start, t_end, limit=limit)
+    selected_columns = request.args.get("columns")
+    columns = [column.strip() for column in selected_columns.split(",") if column.strip()] if selected_columns else None
+    range_data = get_range(symbol, t_start, t_end, limit=limit, columns=columns)
     return jsonify({
         "symbol": symbol.upper(),
         "count": len(range_data),

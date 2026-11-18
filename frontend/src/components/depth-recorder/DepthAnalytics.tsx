@@ -768,12 +768,23 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]['id']
 
-export default function DepthAnalytics() {
+interface DepthAnalyticsProps {
+  /** Session to open with; the picker below can still change it. */
+  initialSymbol?: string
+  initialExchange?: string
+  initialDay?: string
+}
+
+export default function DepthAnalytics({
+  initialSymbol = '',
+  initialExchange = 'NSE',
+  initialDay = '',
+}: DepthAnalyticsProps = {}) {
   const [sessions, setSessions] = useState<SessionEntry[]>([])
   const [sessionsError, setSessionsError] = useState<string | null>(null)
-  const [symbol, setSymbol] = useState('')
-  const [exchange, setExchange] = useState('NSE')
-  const [day, setDay] = useState('')
+  const [symbol, setSymbol] = useState(initialSymbol)
+  const [exchange, setExchange] = useState(initialExchange)
+  const [day, setDay] = useState(initialDay)
   const [activeTab, setActiveTab] = useState<TabId>('health')
   const [metrics, setMetrics] = useState<MetricsPayload | null>(null)
   const [loading, setLoading] = useState(false)

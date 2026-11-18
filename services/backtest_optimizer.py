@@ -134,7 +134,10 @@ def _score(metrics: dict | None, objective: str, min_trades: int) -> float:
     if metrics is None or metrics["total_trades"] < min_trades:
         return float("-inf")
     value = metrics.get(objective, 0.0)
-    return float(value) if value is not None and math.isfinite(value) else float("-inf")
+    if value is None:
+        return float("-inf")
+    value = float(value)
+    return value if not math.isnan(value) else float("-inf")
 
 
 def deflated_sharpe(best_returns: np.ndarray, trial_sharpes: list[float]) -> dict:
@@ -179,6 +182,63 @@ def _period_sharpe(eq: np.ndarray) -> float:
     return float(r.mean() / sd) if sd > 0 else 0.0
 
 
+def rate_walk_forward(efficiency: float | None, profitable_windows: int | None,
+                      total_windows: int | None, oos_sharpe: float | None,
+                      oos_total_return_pct: float | None) -> dict:
+    """Rate a walk-forward result from already-computed aggregate metrics."""
+    reasons = []
+    checks = {
+        "efficiency": efficiency,
+        "profitable_windows": profitable_windows,
+        "total_windows": total_windows,
+        "oos_sharpe": oos_sharpe,
+    }
+    pass_checks = []
+    fail_reasons = []
+
+    if efficiency is None:
+        reasons.append("Efficiency could not be assessed because it is unavailable.")
+    elif efficiency >= 0.5:
+        reasons.append(f"Walk-forward efficiency was {efficiency:.2f} (at least 0.50).")
+        pass_checks.append(True)
+    else:
+        reasons.append(f"Walk-forward efficiency was {efficiency:.2f} (below 0.50).")
+        fail_reasons.append(efficiency < 0.3)
+        pass_checks.append(False)
+
+    if profitable_windows is None or total_windows is None or total_windows <= 0:
+        reasons.append("Profitable test windows could not be assessed because window results are unavailable.")
+        profitable_ratio = None
+    else:
+        profitable_ratio = profitable_windows / total_windows
+        reasons.append(f"{profitable_windows} of {total_windows} test windows were profitable.")
+        pass_checks.append(profitable_ratio >= 0.6)
+        fail_reasons.append(profitable_ratio < 0.4)
+
+    if oos_sharpe is None:
+        reasons.append("Out-of-sample Sharpe could not be assessed because it is unavailable.")
+    elif oos_sharpe > 0:
+        reasons.append(f"Out-of-sample Sharpe was positive ({oos_sharpe:.2f}).")
+        pass_checks.append(True)
+    else:
+        if oos_total_return_pct is None:
+            reasons.append("Out-of-sample total return could not be assessed because it is unavailable.")
+        if oos_sharpe <= 0 and oos_total_return_pct is not None and oos_total_return_pct < 0:
+            fail_reasons.append(True)
+            reasons.append("Out-of-sample Sharpe and total return were both non-positive.")
+        else:
+            reasons.append("Out-of-sample Sharpe was not positive.")
+        pass_checks.append(False)
+
+    if any(fail_reasons):
+        rating = "FAIL"
+    elif len(pass_checks) == 3 and all(pass_checks):
+        rating = "PASS"
+    else:
+        rating = "MARGINAL"
+    return {"rating": rating, "reasons": reasons, "checks": checks}
+
+
 # --------------------------------------------------------------------------
 # studies
 # --------------------------------------------------------------------------
@@ -194,10 +254,18 @@ def _ts(timeline: pd.DatetimeIndex, i: int) -> str:
     return timeline[i].strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _display_score(score: float) -> float | None:
+    """JSON-safe score: None when ineligible, 999.99 for a lossless profit factor."""
+    if score == float("inf"):
+        return 999.99
+    return round(score, 4) if math.isfinite(score) else None
+
+
 def _summary_row(params: dict, m: dict | None, score: float) -> dict:
     return {
         "params": params,
-        "score": None if not math.isfinite(score) else round(score, 4),
+        "score": _display_score(score),
+        "_positive_infinity": score == float("inf"),
         "metrics": m,
     }
 
@@ -255,10 +323,13 @@ def run_sweep(
         if oos_pct:
             m_out = _metrics_for(results[len(combos) + i], tl, capital, interval)
             row["oos_metrics"] = m_out
-            row["oos_score"] = None if m_out is None else round(_score(m_out, objective, 0), 4)
+            oos_score = float("-inf") if m_out is None else _score(m_out, objective, 0)
+            row["oos_score"] = _display_score(oos_score)
         rows.append(row)
 
-    ranked = sorted(rows, key=lambda r: (r["score"] is None, -(r["score"] or 0)))
+    ranked = sorted(rows, key=lambda r: (r["score"] is None, not r["_positive_infinity"], -(r["score"] or 0)))
+    for row in ranked:
+        row.pop("_positive_infinity", None)
     best = ranked[0] if ranked and ranked[0]["score"] is not None else None
     dsr = None
     if best is not None:
@@ -309,6 +380,9 @@ def run_walk_forward(
     train_pct = float(spec.get("train_pct", 60))
     test_pct = float(spec.get("test_pct", 20))
     max_windows = int(spec.get("n_windows", 5))
+    window_mode = spec.get("window_mode", "rolling")
+    if window_mode not in ("rolling", "anchored"):
+        raise ValueError("window_mode must be 'rolling' or 'anchored'")
     if not (10 <= train_pct <= 90 and 5 <= test_pct <= 50 and train_pct + test_pct <= 100):
         raise ValueError("need 10<=train_pct<=90, 5<=test_pct<=50 and train_pct+test_pct<=100")
     if not 1 <= max_windows <= 20:
@@ -322,9 +396,15 @@ def run_walk_forward(
         raise ValueError("Not enough bars for the requested windows")
     windows = []
     start = 0
-    while start + train_len + test_len <= n and len(windows) < max_windows:
-        windows.append((start, start + train_len - 1, start + train_len, start + train_len + test_len - 1))
-        start += test_len
+    while len(windows) < max_windows:
+        current_train_len = train_len if not windows else (
+            train_len + len(windows) * test_len if window_mode == "anchored" else train_len
+        )
+        if start + current_train_len + test_len > n:
+            break
+        windows.append((start, start + current_train_len - 1,
+                        start + current_train_len, start + current_train_len + test_len - 1))
+        start = 0 if window_mode == "anchored" else start + test_len
     if not windows:
         raise ValueError("The window settings leave no complete train+test window")
 
@@ -354,7 +434,7 @@ def run_walk_forward(
                 trial_sharpes.append(_period_sharpe(res["equity"]))
             if best is None or sc > best[0]:
                 best = (sc, t["params"], m)
-        chosen.append(best if best and math.isfinite(best[0]) else None)
+        chosen.append(best if best and (math.isfinite(best[0]) or best[0] == float("inf")) else None)
 
     # Round 2: each window's winner on the unseen test window that follows.
     tasks2 = []
@@ -424,9 +504,20 @@ def run_walk_forward(
     if rows and losing > len(rows) / 2:
         warnings.append(f"{losing} of {len(rows)} test windows lost money.")
 
+    evaluated = [r for r in rows if r.get("test_metrics") is not None]
+    assessed = [r for r in evaluated if r["test_metrics"].get("total_return_pct") is not None]
+    verdict = rate_walk_forward(
+        efficiency,
+        sum(1 for r in assessed if r["test_metrics"]["total_return_pct"] > 0) if assessed else None,
+        len(assessed) if assessed else None,
+        oos_metrics.get("sharpe_ratio") if oos_metrics else None,
+        oos_metrics.get("total_return_pct") if oos_metrics else None,
+    )
+
     return {
         "kind": "walk_forward",
         "objective": objective,
+        "window_mode": window_mode,
         "trials": len(combos),
         "windows": rows,
         "oos_metrics": oos_metrics,
@@ -438,6 +529,172 @@ def run_walk_forward(
         "deflated_sharpe": dsr,
         "param_names": list(spec["param_space"]),
         "warnings": warnings,
+        "verdict": verdict,
+    }
+
+
+def run_stress(
+    strategy_code: str,
+    bars: dict[str, pd.DataFrame],
+    base_config: dict,
+    spec: dict,
+    capital: float,
+    interval: str,
+    cancel_event=None,
+    progress_cb=None,
+) -> dict:
+    """Run the strategy over the full period at each transaction-cost multiple."""
+    multipliers = spec.get("multipliers", [1, 1.5, 2, 3])
+    params = spec.get("params", {})
+    rows = []
+    count = len(multipliers)
+    for index, multiplier in enumerate(multipliers):
+        if cancel_event is not None and cancel_event.is_set():
+            raise BacktestCancelled()
+        config = dict(base_config)
+        for key in ("slippage_bps", "spread_bps", "impact_bps", "brokerage_bps"):
+            config[key] = float(config.get(key, 0.0)) * multiplier
+        if config.get("cost_preset"):
+            config["cost_schedule_multiplier"] = multiplier
+        task_progress = (lambda pct, i=index: progress_cb((i + pct / 100.0) * 100.0 / count)) if progress_cb else None
+        try:
+            out = run_tasks_sandboxed(
+                strategy_code, bars, config,
+                [{"id": 0, "params": params, "start": None, "end": None}],
+                cancel_event=cancel_event, progress_cb=task_progress,
+            )
+            result = out["tasks"][0]
+            if "error" in result:
+                rows.append({"multiplier": multiplier, "error": result["error"]})
+            else:
+                timeline = pd.DatetimeIndex(pd.to_datetime(out["timeline"]))
+                metrics = _metrics_for(result, timeline, capital, interval)
+                rows.append({"multiplier": multiplier, "metrics": {
+                    key: metrics.get(key) for key in (
+                        "total_return_pct", "sharpe_ratio", "max_drawdown_pct",
+                        "total_trades", "profit_factor",
+                    )
+                }})
+        except BacktestCancelled:
+            raise
+        except Exception as exc:
+            rows.append({"multiplier": multiplier, "error": str(exc)})
+        if progress_cb:
+            progress_cb((index + 1) * 100.0 / count)
+
+    breakeven = next((r["multiplier"] for r in rows
+                      if "metrics" in r and r["metrics"]["total_return_pct"] <= 0), None)
+    tested = {r["multiplier"]: r for r in rows if "metrics" in r}
+    def return_at(target):
+        candidates = [m for m in tested if m >= target]
+        if not candidates:
+            candidates = list(tested)
+        if not candidates:
+            return None
+        return tested[min(candidates, key=lambda m: abs(m - target))]["metrics"]["total_return_pct"]
+    at_15, at_2 = return_at(1.5), return_at(2.0)
+    verdict = "PASS" if at_2 is not None and at_2 > 0 else (
+        "MARGINAL" if at_15 is not None and at_15 > 0 else "FAIL"
+    )
+    warnings = [f"Cost scenario {r['multiplier']}x failed: {r['error']}" for r in rows if "error" in r]
+    return {"kind": "stress", "rows": rows, "breakeven_multiplier": breakeven,
+            "verdict": verdict, "warnings": warnings}
+
+
+def perturb_bars(bars: dict[str, pd.DataFrame], noise_pct: float, rng: np.random.Generator) -> dict[str, pd.DataFrame]:
+    """Return copied bars with independently perturbed OHLC prices."""
+    perturbed = {}
+    sigma = float(noise_pct) / 100.0
+    for symbol, frame in bars.items():
+        copy = frame.copy(deep=True)
+        factors = 1.0 + np.clip(rng.normal(0.0, sigma, size=(len(copy), 4)), -3.0 * sigma, 3.0 * sigma)
+        prices = copy[["open", "high", "low", "close"]].to_numpy(dtype=float) * factors
+        prices = np.maximum(prices, np.nextafter(0.0, 1.0))
+        copy[["open", "high", "low", "close"]] = prices
+        copy["high"] = copy[["open", "high", "low", "close"]].max(axis=1)
+        copy["low"] = copy[["open", "high", "low", "close"]].min(axis=1)
+        perturbed[symbol] = copy
+    return perturbed
+
+
+def run_noise(
+    strategy_code: str,
+    bars: dict[str, pd.DataFrame],
+    base_config: dict,
+    spec: dict,
+    capital: float,
+    interval: str,
+    cancel_event=None,
+    progress_cb=None,
+) -> dict:
+    """Compare an unmodified run with seeded runs on perturbed price bars."""
+    runs = int(spec.get("runs", 20))
+    noise_pct = float(spec.get("noise_pct", 0.1))
+    params = spec.get("params", {})
+    rng = np.random.default_rng(spec.get("seed", 0))
+    keys = ("total_return_pct", "sharpe_ratio", "max_drawdown_pct", "total_trades")
+    rows = []
+    baseline = None
+    warnings = []
+    total = runs + 1
+
+    for index in range(total):
+        if cancel_event is not None and cancel_event.is_set():
+            raise BacktestCancelled()
+        run_bars = bars if index == 0 else perturb_bars(bars, noise_pct, rng)
+        task_progress = (lambda pct, i=index: progress_cb((i + pct / 100.0) * 100.0 / total)) if progress_cb else None
+        try:
+            out = run_tasks_sandboxed(
+                strategy_code, run_bars, base_config,
+                [{"id": 0, "params": params, "start": None, "end": None}],
+                cancel_event=cancel_event, progress_cb=task_progress,
+            )
+            result = out["tasks"][0]
+            if "error" in result:
+                raise ValueError(result["error"])
+            timeline = pd.DatetimeIndex(pd.to_datetime(out["timeline"]))
+            metrics = _metrics_for(result, timeline, capital, interval)
+            subset = {key: _json_safe(metrics.get(key)) for key in keys}
+            if index == 0:
+                baseline = subset
+            else:
+                rows.append(subset)
+        except BacktestCancelled:
+            raise
+        except Exception as exc:
+            message = str(exc)
+            if index == 0:
+                warnings.append(f"Baseline run failed: {message}")
+                baseline = dict.fromkeys(keys)
+            else:
+                rows.append({"error": message})
+                warnings.append(f"Noise run {index} failed: {message}")
+        if progress_cb:
+            progress_cb((index + 1) * 100.0 / total)
+
+    successful = [row for row in rows if "error" not in row and row.get("total_return_pct") is not None]
+    returns = [float(row["total_return_pct"]) for row in successful]
+    sharpes = [float(row["sharpe_ratio"]) for row in successful if row.get("sharpe_ratio") is not None]
+
+    def distribution(values):
+        if not values:
+            return {f"p{q}": None for q in (5, 25, 50, 75, 95)}
+        return {f"p{q}": float(np.percentile(values, q)) for q in (5, 25, 50, 75, 95)}
+
+    profitable_share = float(sum(value > 0 for value in returns) / len(returns)) if returns else 0.0
+    median_return = float(np.percentile(returns, 50)) if returns else None
+    baseline_return = baseline.get("total_return_pct") if baseline else None
+    if profitable_share < 0.5:
+        verdict = "FAIL"
+    elif profitable_share >= 0.8 and baseline_return is not None and baseline_return > 0 and median_return >= 0.5 * baseline_return:
+        verdict = "PASS"
+    else:
+        verdict = "MARGINAL"
+    return {
+        "kind": "noise", "runs": runs, "noise_pct": float(noise_pct),
+        "baseline": baseline, "results": rows,
+        "distribution": {"total_return_pct": distribution(returns), "sharpe_ratio": distribution(sharpes)},
+        "profitable_share": profitable_share, "verdict": verdict, "warnings": warnings,
     }
 
 
@@ -465,6 +722,9 @@ def monte_carlo(
         raise ValueError("Need at least 5 trades for a Monte Carlo analysis")
     if len(arr) > 50000:
         raise ValueError("Too many trades for Monte Carlo (limit 50000)")
+    n_sims = min(n_sims, 20_000_000 // (len(arr) + 1))
+    if n_sims < 100:
+        raise ValueError("Monte Carlo cell budget allows fewer than 100 simulations")
     rng = np.random.default_rng(seed)
     if method == "bootstrap":
         draws = rng.choice(arr, size=(n_sims, len(arr)), replace=True)
@@ -505,10 +765,40 @@ def validate_spec(spec: dict) -> dict:
     if not isinstance(spec, dict):
         raise ValueError("optimize must be an object")
     kind = spec.get("kind", "sweep")
-    if kind not in ("sweep", "walk_forward"):
-        raise ValueError("optimize.kind must be 'sweep' or 'walk_forward'")
+    if kind not in ("sweep", "walk_forward", "stress", "noise"):
+        raise ValueError("optimize.kind must be 'sweep', 'walk_forward', 'stress' or 'noise'")
+    if kind == "stress":
+        multipliers = spec.get("multipliers", [1, 1.5, 2, 3])
+        if not isinstance(multipliers, list) or not 1 <= len(multipliers) <= 8:
+            raise ValueError("optimize.multipliers must contain 1 to 8 values")
+        if any(not isinstance(v, (int, float)) or isinstance(v, bool)
+               or not math.isfinite(v) or not 0 < v <= 10 for v in multipliers):
+            raise ValueError("optimize.multipliers values must be finite and in (0, 10]")
+        multipliers = sorted(set(multipliers + ([] if 1 in multipliers else [1])))
+        if len(multipliers) > 8:
+            raise ValueError("optimize.multipliers must contain at most 8 values including 1")
+        params = spec.get("params", {})
+        if not isinstance(params, dict):
+            raise ValueError("optimize.params must be an object")
+        return {**spec, "kind": kind, "multipliers": multipliers, "params": params}
+    if kind == "noise":
+        runs = spec.get("runs", 20)
+        noise_pct = spec.get("noise_pct", 0.1)
+        seed = spec.get("seed", 0)
+        params = spec.get("params", {})
+        if not isinstance(runs, int) or isinstance(runs, bool) or not 5 <= runs <= 50:
+            raise ValueError("optimize.runs must be an integer between 5 and 50")
+        if not isinstance(noise_pct, (int, float)) or isinstance(noise_pct, bool) or not math.isfinite(noise_pct) or not 0 < noise_pct <= 1:
+            raise ValueError("optimize.noise_pct must be finite and in (0, 1]")
+        if not isinstance(seed, int) or isinstance(seed, bool):
+            raise ValueError("optimize.seed must be an integer")
+        if not isinstance(params, dict):
+            raise ValueError("optimize.params must be an object")
+        return {**spec, "kind": kind, "runs": runs, "noise_pct": float(noise_pct), "seed": seed, "params": params}
     if spec.get("objective", "sharpe_ratio") not in _OBJECTIVES:
         raise ValueError(f"optimize.objective must be one of {sorted(_OBJECTIVES)}")
+    if kind == "walk_forward" and spec.get("window_mode", "rolling") not in ("rolling", "anchored"):
+        raise ValueError("optimize.window_mode must be 'rolling' or 'anchored'")
     build_param_combos(  # validates the space eagerly so bad input fails at submit time
         spec.get("param_space"), spec.get("method", "grid"),
         spec.get("max_trials", 100 if kind == "sweep" else 50), spec.get("seed", 0),
@@ -516,7 +806,10 @@ def validate_spec(spec: dict) -> dict:
     oos = spec.get("oos_pct")
     if oos is not None and not (isinstance(oos, (int, float)) and 5 <= oos <= 50):
         raise ValueError("optimize.oos_pct must be between 5 and 50")
-    return {**spec, "kind": kind}
+    normalized = {**spec, "kind": kind}
+    if kind == "walk_forward":
+        normalized["window_mode"] = spec.get("window_mode", "rolling")
+    return normalized
 
 
 def _now():
@@ -562,7 +855,8 @@ def run_optimization_job(opt_id: str, cancel_event, loader) -> None:
 
         base = {**cfg["engine_config"], "instruments": instruments}
         capital = float(base["initial_capital"])
-        runner = run_walk_forward if spec["kind"] == "walk_forward" else run_sweep
+        runner = {"walk_forward": run_walk_forward, "stress": run_stress,
+                  "noise": run_noise}.get(spec["kind"], run_sweep)
         result = runner(rec.strategy_code, bars, base, spec, capital, cfg["interval"],
                         cancel_event=cancel_event, progress_cb=progress)
         result["notes"] = notes
@@ -570,7 +864,7 @@ def run_optimization_job(opt_id: str, cancel_event, loader) -> None:
         rec = session.query(BacktestOptimization).filter_by(opt_id=opt_id).first()
         rec.status = "completed"
         rec.progress = 100.0
-        rec.result_json = json.dumps(result, default=_json_default)
+        rec.result_json = json.dumps(_json_safe(result), default=_json_default, allow_nan=False)
         rec.completed_at = _now()
         session.commit()
     except BacktestCancelled:
@@ -586,10 +880,26 @@ def _json_default(o):
     if isinstance(o, (np.integer,)):
         return int(o)
     if isinstance(o, (np.floating,)):
-        return float(o)
+        value = float(o)
+        return value if math.isfinite(value) else None
     if isinstance(o, np.ndarray):
         return o.tolist()
     raise TypeError(f"not JSON serialisable: {type(o)}")
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (float, np.floating)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.ndarray):
+        return _json_safe(value.tolist())
+    return value
 
 
 def _finish(opt_id: str, status: str, error: str | None) -> None:

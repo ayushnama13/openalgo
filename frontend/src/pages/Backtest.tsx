@@ -1,35 +1,28 @@
-import {
-  Activity,
-  ChevronDown,
-  ChevronRight,
-  FlaskConical,
-  History,
-  LineChart,
-  Loader2,
-  Play,
-  RotateCcw,
-  SlidersHorizontal,
-  Square,
-  Target,
-  Trash2,
-} from 'lucide-react'
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+/**
+ * Strategy backtesting workbench.
+ *
+ * Two modes share one strategy editor, one set of execution/risk settings and
+ * one runs panel:
+ * - Stock:    hand-picked symbol(s), one run per selected timeframe.
+ * - Universe: an index universe (NIFTY 50, NIFTY 100, sector indices, ...),
+ *             either one Portfolio run over every covered constituent or a
+ *             Scan of one run per constituent, ranked on the results page.
+ *
+ * The stock-mode /run body is pinned by Backtest.run.test.tsx; universe-only
+ * fields (mode, universe) are sent only in universe mode.
+ */
+
+import { FlaskConical, History, Loader2, Play, SlidersHorizontal, Square } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { fetchCSRFToken } from '@/api/client'
+import { BacktestJobsPanel, type JobProgress } from '@/components/backtest/BacktestJobsPanel'
 import EngineOptionsCard from '@/components/backtest/EngineOptionsCard'
 import ExtraSymbols from '@/components/backtest/ExtraSymbols'
 import OptimizeDialog from '@/components/backtest/OptimizeDialog'
-import { Badge } from '@/components/ui/badge'
+import UniversePicker from '@/components/backtest/UniversePicker'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Progress } from '@/components/ui/progress'
@@ -42,21 +35,28 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { type JobSummary, useBacktestJobs } from '@/hooks/useBacktestJobs'
 import { useSocket } from '@/hooks/useSocket'
 import {
   buildEngineOptions,
   DEFAULT_ENGINE_OPTIONS,
+  engineOptionsFromSaved,
   type EngineOptionsState,
 } from '@/lib/backtestEngineOptions'
+import { DEFAULT_STRATEGY_CODE, STRATEGY_TEMPLATES } from '@/lib/backtestTemplates'
 import {
+  coveredSymbols,
+  fetchUniverseCoverage,
+  fetchUniverses,
+  patchJobMeta,
+  type UniverseCoverage,
+  type UniverseListing,
+  type UniverseRunType,
+} from '@/lib/backtestUniverse'
+import { cn } from '@/lib/utils'
+import {
+  type BatchRunSummary,
   type FullJobDetails,
   type ResultsData,
   useStrategyBacktestStore,
@@ -64,8 +64,11 @@ import {
 import { showToast } from '@/utils/toast'
 
 // ---------------------------------------------------------------------------
-// Types
+// Types and constants
 // ---------------------------------------------------------------------------
+
+type PageMode = 'stock' | 'universe'
+type SettingsTab = 'data' | 'execution' | 'risk' | 'engine'
 
 interface CatalogItem {
   symbol: string
@@ -80,209 +83,18 @@ interface RangeInfo {
   record_count: number | null
 }
 
-interface JobSummary {
-  job_id: string
-  name: string
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
-  symbols: string[]
-  exchange: string
-  interval: string
-  start_date?: string
-  end_date?: string
-  initial_capital: number
-  created_at?: string
-  completed_at?: string
-  total_return_pct: number
-  sharpe_ratio: number
-  max_drawdown_pct: number
-  win_rate_pct: number
-  total_trades: number
-  batch_id?: string
-  batch_name?: string
-  batch_seq?: number
-  error_message?: string
-}
-
-interface BatchJobInfo {
-  job_id: string
-  interval: string
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
-}
-
+/** A multi-run batch being watched until every run is terminal. */
 interface ActiveBatch {
   batch_id: string
-  jobs: BatchJobInfo[]
+  name: string
+  mode: string
+  total: number
+  done: number
+  completed: number
+  failed: number
 }
 
-// ---------------------------------------------------------------------------
-// Helper functions
-// ---------------------------------------------------------------------------
-
-function statusBadgeVariant(status: string) {
-  if (status === 'completed') return 'default'
-  if (status === 'failed') return 'destructive'
-  if (status === 'cancelled') return 'secondary'
-  return 'outline'
-}
-
-// ---------------------------------------------------------------------------
-// Strategy templates
-// ---------------------------------------------------------------------------
-
-const STRATEGY_TEMPLATES: { label: string; code: string }[] = [
-  {
-    label: 'SMA Cross',
-    code: `# SMA Crossover strategy
-# Computes signals on the bars DataFrame and returns it.
-# df has columns: timestamp, open, high, low, close, volume, oi
-def strategy(df):
-    df["sma_fast"] = ta.sma(df["close"], period=9)
-    df["sma_slow"] = ta.sma(df["close"], period=21)
-
-    df["signal"] = 0
-    df.loc[(df["sma_fast"] > df["sma_slow"]) & (df["sma_fast"].shift(1) <= df["sma_slow"].shift(1)), "signal"] = 1
-    df.loc[(df["sma_fast"] < df["sma_slow"]) & (df["sma_fast"].shift(1) >= df["sma_slow"].shift(1)), "signal"] = -1
-    return df
-`,
-  },
-  {
-    label: 'RSI Mean Reversion',
-    code: `# RSI mean reversion - buy oversold, exit overbought
-def strategy(df):
-    df["rsi"] = ta.rsi(df["close"], period=14)
-
-    df["signal"] = 0
-    df.loc[(df["rsi"] < 30) & (df["rsi"].shift(1) >= 30), "signal"] = 1
-    df.loc[(df["rsi"] > 70) & (df["rsi"].shift(1) <= 70), "signal"] = -1
-    return df
-`,
-  },
-  {
-    label: 'Supertrend',
-    code: `# Supertrend trend-following strategy
-# ta.supertrend returns (st_levels, direction); direction 1 = uptrend, -1 = downtrend
-def strategy(df):
-    st_levels, st_direction = ta.supertrend(df["high"], df["low"], df["close"], period=10, multiplier=3.0)
-
-    df["signal"] = 0
-    df.loc[(st_direction == 1) & (st_direction.shift(1) == -1), "signal"] = 1
-    df.loc[(st_direction == -1) & (st_direction.shift(1) == 1), "signal"] = -1
-    return df
-`,
-  },
-  {
-    label: 'Bollinger Band Bounce',
-    code: `# Bollinger Band mean reversion
-# ta.bbands returns (upper, middle, lower) bands
-def strategy(df):
-    bb_upper, bb_middle, bb_lower = ta.bbands(df["close"], period=20, std_dev=2.0)
-
-    df["signal"] = 0
-    df.loc[(df["close"] < bb_lower) & (df["close"].shift(1) >= bb_lower.shift(1)), "signal"] = 1
-    df.loc[(df["close"] > bb_upper) & (df["close"].shift(1) <= bb_upper.shift(1)), "signal"] = -1
-    return df
-`,
-  },
-  {
-    label: 'MACD Crossover',
-    code: `# MACD signal line crossover strategy
-# ta.macd returns (macd, signal, histogram)
-def strategy(df):
-    macd_line, signal_line, hist = ta.macd(df["close"], fast=12, slow=26, signal=9)
-
-    df["signal"] = 0
-    df.loc[(macd_line > signal_line) & (macd_line.shift(1) <= signal_line.shift(1)), "signal"] = 1
-    df.loc[(macd_line < signal_line) & (macd_line.shift(1) >= signal_line.shift(1)), "signal"] = -1
-    return df
-`,
-  },
-  {
-    label: 'Opening Range Breakout',
-    code: `# Opening Range Breakout (ORB) strategy
-def strategy(df):
-    # Simple rolling 30-period high/low breakout
-    df["orb_high"] = df["high"].rolling(30).max().shift(1)
-    df["orb_low"] = df["low"].rolling(30).min().shift(1)
-
-    df["signal"] = 0
-    df.loc[(df["close"] > df["orb_high"]) & (df["close"].shift(1) <= df["orb_high"].shift(1)), "signal"] = 1
-    df.loc[(df["close"] < df["orb_low"]) & (df["close"].shift(1) >= df["orb_low"].shift(1)), "signal"] = -1
-    return df
-`,
-  },
-]
-
-STRATEGY_TEMPLATES.push(
-  {
-    label: 'Event: multi-symbol momentum',
-    code: `# Event-driven strategy: runs on every selected symbol, shares one capital pool.
-# Orders placed in on_bar fill at the NEXT bar's open (no lookahead).
-class Momentum(Strategy):
-    params = {"lookback": 20, "stop_pct": 2.0}
-
-    def on_bar(self, ctx):
-        n = self.params["lookback"]
-        for sym in ctx.symbols:
-            if ctx.bar(sym) is None:
-                continue
-            closes = ctx.history(sym, n + 1, "close")
-            if len(closes) <= n:
-                continue
-            rising = closes.iloc[-1] > closes.iloc[0]
-            pos = ctx.position(sym)
-            if rising and not pos and not ctx.pending(sym):
-                ctx.buy(sym, pct=20, sl_pct=self.params["stop_pct"], trail_pct=3)
-            elif not rising and pos:
-                ctx.close(sym, tag="Momentum lost")
-`,
-  },
-  {
-    label: 'Event: SMA cross with indicators in init',
-    code: `# Precompute causal indicators once in init, then index them with ctx.i(sym).
-class SmaCross(Strategy):
-    params = {"fast": 9, "slow": 21}
-
-    def init(self, ctx):
-        self.fast, self.slow = {}, {}
-        for sym in ctx.symbols:
-            close = ctx.data(sym)["close"]
-            self.fast[sym] = close.rolling(self.params["fast"]).mean().to_numpy()
-            self.slow[sym] = close.rolling(self.params["slow"]).mean().to_numpy()
-
-    def on_bar(self, ctx):
-        for sym in ctx.symbols:
-            if ctx.bar(sym) is None:
-                continue
-            i = ctx.i(sym)
-            if i < 1 or i >= len(self.slow[sym]) or self.slow[sym][i] != self.slow[sym][i]:
-                continue
-            up = self.fast[sym][i] > self.slow[sym][i] and self.fast[sym][i - 1] <= self.slow[sym][i - 1]
-            down = self.fast[sym][i] < self.slow[sym][i] and self.fast[sym][i - 1] >= self.slow[sym][i - 1]
-            pos = ctx.position(sym)
-            if up and not pos:
-                ctx.buy(sym, pct=25)
-            elif down and pos:
-                ctx.close(sym)
-`,
-  },
-  {
-    label: 'Signal: parameterised RSI',
-    code: `# Signal-style strategy that reads tunable values from PARAMS (use with Optimize).
-def strategy(df):
-    period = PARAMS.get("period", 14)
-    low = PARAMS.get("low", 30)
-    high = PARAMS.get("high", 70)
-    df["rsi"] = ta.rsi(df["close"], period=period)
-
-    df["signal"] = 0
-    df.loc[(df["rsi"] < low) & (df["rsi"].shift(1) >= low), "signal"] = 1
-    df.loc[(df["rsi"] > high) & (df["rsi"].shift(1) <= high), "signal"] = -1
-    return df
-`,
-  }
-)
-
-const DEFAULT_STRATEGY_CODE = STRATEGY_TEMPLATES[0].code
+const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
 
 const INTERVALS = ['1m', '5m', '15m', '1h', 'D', 'W', 'M']
 const INTERVAL_PRESETS: { label: string; intervals: string[] }[] = [
@@ -306,6 +118,7 @@ const MISSING_DATA_POLICIES = [
   { value: 'forward_fill', label: 'Forward Fill' },
   { value: 'abort', label: 'Abort Run' },
 ]
+const DEFAULT_UNIVERSE = 'NIFTY50'
 
 // ---------------------------------------------------------------------------
 // Page
@@ -317,17 +130,30 @@ export default function Backtest() {
   const setResult = useStrategyBacktestStore((s) => s.setResult)
   const setBatch = useStrategyBacktestStore((s) => s.setBatch)
 
-  // Data source
+  // Mode
+  const [mode, setMode] = useState<PageMode>('stock')
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('data')
+
+  // Stock data source
   const [catalog, setCatalog] = useState<CatalogItem[]>([])
   const [catalogLoading, setCatalogLoading] = useState(true)
-
-  // Form state
   const [symbol, setSymbol] = useState('')
   const [exchange, setExchange] = useState('NSE')
+  const [extraSymbols, setExtraSymbols] = useState<string[]>([])
+  const [rangesByInterval, setRangesByInterval] = useState<Record<string, RangeInfo | null>>({})
+
+  // Universe data source
+  const [universeListing, setUniverseListing] = useState<UniverseListing | null>(null)
+  const [universeListingLoading, setUniverseListingLoading] = useState(false)
+  const [universeId, setUniverseId] = useState('')
+  const [universeRunType, setUniverseRunType] = useState<UniverseRunType>('universe')
+  const [coverage, setCoverage] = useState<UniverseCoverage | null>(null)
+  const [coverageLoading, setCoverageLoading] = useState(false)
+
+  // Shared form state
   const [intervals, setIntervals] = useState<string[]>(['1m'])
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
-  const [rangesByInterval, setRangesByInterval] = useState<Record<string, RangeInfo | null>>({})
   const [strategyCode, setStrategyCode] = useState(DEFAULT_STRATEGY_CODE)
   const [initialCapital, setInitialCapital] = useState(100000)
   const [sizingType, setSizingType] = useState('fixed_qty')
@@ -340,35 +166,32 @@ export default function Backtest() {
   const [takeProfitPct, setTakeProfitPct] = useState('')
   const [dailyLossLimit, setDailyLossLimit] = useState('')
   const [maxPositions, setMaxPositions] = useState(5)
-  const [extraSymbols, setExtraSymbols] = useState<string[]>([])
   const [engineOptions, setEngineOptions] = useState<EngineOptionsState>(DEFAULT_ENGINE_OPTIONS)
+  const rangeRequestGeneration = useRef(0)
   const [optimizeOpen, setOptimizeOpen] = useState(false)
 
   // Run state
   const [submitting, setSubmitting] = useState(false)
   const [activeJobId, setActiveJobId] = useState<string | null>(null)
   const [activeBatch, setActiveBatch] = useState<ActiveBatch | null>(null)
-  const [jobProgress, setJobProgress] = useState<
-    Record<string, { percent: number; current_date: string; equity: number; trades_count: number }>
-  >({})
+  const [jobProgress, setJobProgress] = useState<Record<string, JobProgress>>({})
+  const [historyFocus, setHistoryFocus] = useState(0)
+  const runsPanelRef = useRef<HTMLDivElement>(null)
 
-  // Jobs
-  const [jobs, setJobs] = useState<JobSummary[]>([])
-  const [jobsOpen, setJobsOpen] = useState(false)
-  const [runningJobIds, setRunningJobIds] = useState<Set<string>>(new Set())
+  // A run found pending/running on load is followed to its results, unless it
+  // belongs to a multi-run batch (that is followed through the batch instead).
+  const onRunningJob = useCallback((job: JobSummary) => {
+    if (!job.batch_id || job.batch_id === job.job_id) setActiveJobId(job.job_id)
+  }, [])
+  const { jobs, jobCount, loadingMore, loadJobs, loadMore, patchJob } = useBacktestJobs({
+    onRunningJob,
+  })
 
-  const socketRef = useRef(socket)
-  socketRef.current = socket
-
-  // Mirrors of state read inside stable callbacks below (loadCatalog,
-  // loadRanges) - closing over the state directly would force those
-  // callbacks' identities to change on every keystroke/selection, which
-  // would re-trigger the effects that depend on them and refetch on every
-  // symbol pick or date edit instead of once.
+  // Mirrors read inside stable callbacks and effects.
   const symbolRef = useRef(symbol)
   symbolRef.current = symbol
-  const startDateRef = useRef(startDate)
-  startDateRef.current = startDate
+  // Once the user (or a rerun) sets the dates, they are never re-seeded.
+  const datesTouchedRef = useRef(false)
 
   // -------------------------------------------------------------------------
   // Data loading
@@ -395,6 +218,7 @@ export default function Backtest() {
   }, [])
 
   const loadRanges = useCallback(async (sym: string, exch: string, ivs: string[]) => {
+    const generation = ++rangeRequestGeneration.current
     const results: Record<string, RangeInfo | null> = {}
     await Promise.all(
       ivs.map(async (iv) => {
@@ -410,48 +234,81 @@ export default function Backtest() {
         }
       })
     )
-    setRangesByInterval(results)
-    // Seed the date window from the first available interval, but never
-    // clobber a range the user already picked.
-    if (!startDateRef.current) {
-      const firstAvail = INTERVALS.find((iv) => results[iv])
-      if (firstAvail && results[firstAvail]) {
-        setStartDate((results[firstAvail] as RangeInfo).start_date.slice(0, 10))
-        setEndDate((results[firstAvail] as RangeInfo).end_date.slice(0, 10))
-      }
-    }
-  }, [])
-
-  const loadJobs = useCallback(async () => {
-    try {
-      const response = await fetch('/backtest/api/jobs', { credentials: 'include' })
-      const data = await response.json()
-      if (data.status === 'success') {
-        setJobs(data.jobs || [])
-        const newRunning = new Set<string>()
-        for (const job of (data.jobs || []) as JobSummary[]) {
-          if (job.status === 'pending' || job.status === 'running') {
-            newRunning.add(job.job_id)
-            setActiveJobId(job.job_id)
-          }
-        }
-        setRunningJobIds(newRunning)
-      }
-    } catch {
-      // ignore - jobs panel is optional
-    }
+    if (generation === rangeRequestGeneration.current) setRangesByInterval(results)
   }, [])
 
   useEffect(() => {
     loadCatalog()
-    loadJobs()
-  }, [loadCatalog, loadJobs])
+  }, [loadCatalog])
 
   useEffect(() => {
-    if (symbol && exchange && intervals.length) {
+    if (mode === 'stock' && symbol && exchange && intervals.length) {
       loadRanges(symbol, exchange, intervals)
     }
-  }, [symbol, exchange, intervals, loadRanges])
+  }, [mode, symbol, exchange, intervals, loadRanges])
+
+  // Universe listing, fetched the first time Universe mode is opened.
+  useEffect(() => {
+    if (mode !== 'universe' || universeListing || universeListingLoading) return
+    setUniverseListingLoading(true)
+    fetchUniverses()
+      .then((listing) => {
+        if (!listing) {
+          showToast.error('Failed to load index universes')
+          return
+        }
+        setUniverseListing(listing)
+        setUniverseId(
+          (prev) =>
+            prev ||
+            listing.universes.find((u) => u.id === DEFAULT_UNIVERSE)?.id ||
+            listing.universes[0]?.id ||
+            ''
+        )
+      })
+      .catch(() => showToast.error('Failed to load index universes'))
+      .finally(() => setUniverseListingLoading(false))
+  }, [mode, universeListing, universeListingLoading])
+
+  // Coverage for the chosen universe on the first selected timeframe.
+  const coverageInterval = intervals[0] ?? 'D'
+  useEffect(() => {
+    if (mode !== 'universe' || !universeId) return
+    let cancelled = false
+    setCoverageLoading(true)
+    fetchUniverseCoverage(universeId, coverageInterval)
+      .then((cov) => {
+        if (cancelled) return
+        setCoverage(cov)
+        if (!cov) showToast.error('Failed to load universe coverage')
+      })
+      .catch(() => {
+        if (!cancelled) showToast.error('Failed to load universe coverage')
+      })
+      .finally(() => {
+        if (!cancelled) setCoverageLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [mode, universeId, coverageInterval])
+
+  // Seed the date window from the data until the user picks one: the first
+  // timeframe with data in Stock mode, the common window in Universe mode.
+  useEffect(() => {
+    if (datesTouchedRef.current) return
+    if (mode === 'stock') {
+      const firstAvail = INTERVALS.find((iv) => rangesByInterval[iv])
+      const r = firstAvail ? rangesByInterval[firstAvail] : null
+      if (r) {
+        setStartDate(r.start_date.slice(0, 10))
+        setEndDate(r.end_date.slice(0, 10))
+      }
+    } else if (coverage?.common_first && coverage.common_last) {
+      setStartDate(coverage.common_first)
+      setEndDate(coverage.common_last)
+    }
+  }, [mode, rangesByInterval, coverage])
 
   // -------------------------------------------------------------------------
   // Socket progress
@@ -459,17 +316,7 @@ export default function Backtest() {
 
   useEffect(() => {
     if (!socket) return
-
-    const handleProgress = (data: {
-      job_id: string
-      batch_id?: string | null
-      batch_seq?: number | null
-      interval?: string | null
-      percent: number
-      current_date: string
-      equity: number
-      trades_count: number
-    }) => {
+    const handleProgress = (data: JobProgress & { job_id: string }) => {
       setJobProgress((prev) => ({
         ...prev,
         [data.job_id]: {
@@ -480,24 +327,66 @@ export default function Backtest() {
         },
       }))
     }
-
     socket.on('backtest_progress', handleProgress)
     return () => {
       socket.off('backtest_progress', handleProgress)
     }
   }, [socket])
 
-  // Poll jobs while any run is active to catch terminal state
-  useEffect(() => {
-    if (!runningJobIds.size) return
-    const timer = setInterval(() => {
-      loadJobs()
-    }, 2500)
-    return () => clearInterval(timer)
-  }, [runningJobIds, loadJobs])
+  // -------------------------------------------------------------------------
+  // Mode switching
+  // -------------------------------------------------------------------------
+
+  const switchMode = (next: PageMode) => {
+    if (next === mode) return
+    setMode(next)
+    if (!datesTouchedRef.current) {
+      setStartDate('')
+      setEndDate('')
+    }
+    if (next === 'universe') {
+      // Universes are mostly daily data held as delivery positions; move off
+      // the stock-mode defaults, never off something the user chose.
+      if (intervals.length === 1 && intervals[0] === '1m') setIntervals(['D'])
+      if (productType === 'MIS') setProductType('CNC')
+      if (universeRunType === 'scan' && intervals.length > 1) setIntervals([intervals[0]])
+    }
+  }
+
+  const changeRunType = (next: UniverseRunType) => {
+    setUniverseRunType(next)
+    // A scan runs one timeframe; keep the first one selected.
+    if (next === 'scan' && intervals.length > 1) setIntervals([intervals[0]])
+  }
+
+  const isScan = mode === 'universe' && universeRunType === 'scan'
+
+  const toggleInterval = (iv: string) => {
+    if (isScan) {
+      setIntervals([iv])
+      return
+    }
+    setIntervals((prev) => {
+      if (prev.includes(iv)) return prev.length > 1 ? prev.filter((x) => x !== iv) : prev
+      return [...prev, iv]
+    })
+  }
+
+  const setDate = (which: 'start' | 'end', value: string) => {
+    datesTouchedRef.current = true
+    if (which === 'start') setStartDate(value)
+    else setEndDate(value)
+  }
+
+  const useCommonWindow = () => {
+    if (!coverage?.common_first || !coverage.common_last) return
+    datesTouchedRef.current = true
+    setStartDate(coverage.common_first)
+    setEndDate(coverage.common_last)
+  }
 
   // -------------------------------------------------------------------------
-  // Actions
+  // Run payload
   // -------------------------------------------------------------------------
 
   const handleTemplateChange = (label: string) => {
@@ -507,8 +396,16 @@ export default function Backtest() {
 
   /** Run fields shared by "Run" and "Optimize"; null (after a toast) when the form is invalid. */
   const buildRunPayload = (): Record<string, unknown> | null => {
-    if (!symbol) {
+    if (mode === 'stock' && !symbol) {
       showToast.error('Please select a symbol')
+      return null
+    }
+    if (mode === 'universe' && !universeId) {
+      showToast.error('Please select a universe')
+      return null
+    }
+    if (mode === 'universe' && coverage && coverage.id === universeId && !coverage.with_data) {
+      showToast.error(`No ${coverage.name} constituent has ${coverage.base_interval} data`)
       return null
     }
     if (!intervals.length) {
@@ -524,18 +421,8 @@ export default function Backtest() {
       showToast.error(built.error)
       return null
     }
-    const primary = `${exchange}:${symbol}`
-    const allSymbols = [primary, ...extraSymbols.filter((k) => k !== primary)]
-    return {
-      name:
-        allSymbols.length > 1
-          ? `${symbol} +${allSymbols.length - 1} backtest`
-          : intervals.length > 1
-            ? `${symbol} MTF backtest`
-            : `${symbol} ${intervals[0]} backtest`,
+    const common = {
       strategy_code: strategyCode,
-      symbols: allSymbols,
-      exchange,
       intervals,
       interval: intervals[0],
       start_date: startDate || null,
@@ -553,18 +440,48 @@ export default function Backtest() {
       max_positions: maxPositions,
       engine_options: Object.keys(built.value).length ? built.value : undefined,
     }
+
+    if (mode === 'universe') {
+      const uName = universeListing?.universes.find((u) => u.id === universeId)?.name ?? universeId
+      const tf = intervals.length > 1 ? 'MTF' : intervals[0]
+      return {
+        name: `${uName} ${universeRunType === 'scan' ? 'scan' : 'portfolio'} ${tf}`,
+        ...common,
+        // The server resolves the constituents itself; the covered list is for
+        // the optimizer, which takes explicit symbols.
+        symbols: coverage?.id === universeId ? coveredSymbols(coverage) : [],
+        exchange: coverage?.exchange ?? 'NSE',
+        mode: universeRunType,
+        universe: universeId,
+      }
+    }
+
+    const primary = `${exchange}:${symbol}`
+    const allSymbols = [primary, ...extraSymbols.filter((k) => k !== primary)]
+    return {
+      name:
+        allSymbols.length > 1
+          ? `${symbol} +${allSymbols.length - 1} backtest`
+          : intervals.length > 1
+            ? `${symbol} MTF backtest`
+            : `${symbol} ${intervals[0]} backtest`,
+      symbols: allSymbols,
+      exchange,
+      ...common,
+    }
   }
 
   const handleRun = async () => {
     const payload = buildRunPayload()
     if (!payload) return
-    const firstRange = rangesByInterval[intervals[0]]
-    if (firstRange?.start_date && startDate < firstRange.start_date.slice(0, 10)) {
-      showToast.warning('Start date is before the earliest available data')
+    if (mode === 'stock') {
+      const firstRange = rangesByInterval[intervals[0]]
+      if (firstRange?.start_date && startDate < firstRange.start_date.slice(0, 10)) {
+        showToast.warning('Start date is before the earliest available data')
+      }
     }
 
     setSubmitting(true)
-    const sweep = intervals.length > 1
     try {
       const csrfToken = await fetchCSRFToken()
       const response = await fetch('/backtest/api/run', {
@@ -574,18 +491,34 @@ export default function Backtest() {
         body: JSON.stringify(payload),
       })
       const data = await response.json()
-      if (data.status === 'success') {
-        setActiveJobId(data.jobs?.[0]?.job_id ?? data.job_id)
-        setActiveBatch(sweep ? { batch_id: data.batch_id, jobs: data.jobs ?? [] } : null)
-        showToast.success(
-          sweep
-            ? `Backtest batch ${data.batch_id} queued (${data.jobs?.length ?? intervals.length} timeframes)`
-            : `Backtest job enqueued successfully!`
-        )
-        loadJobs()
-      } else {
+      if (data.status !== 'success') {
         showToast.error(data.message || 'Failed to submit backtest job')
+        return
       }
+      const queued: { job_id: string }[] = data.jobs ?? []
+      const skipped: string[] = data.skipped ?? []
+      if (data.batch_id && queued.length > 1) {
+        setActiveJobId(null)
+        setActiveBatch({
+          batch_id: data.batch_id,
+          name: String(payload.name),
+          mode: String(payload.mode ?? 'stock'),
+          total: queued.length,
+          done: 0,
+          completed: 0,
+          failed: 0,
+        })
+        const unit = isScan ? 'stocks' : 'timeframes'
+        showToast.success(`Queued ${queued.length} ${unit}`)
+      } else {
+        setActiveBatch(null)
+        setActiveJobId(queued[0]?.job_id ?? data.job_id)
+        showToast.success('Backtest job enqueued successfully!')
+      }
+      if (skipped.length) {
+        showToast.info(`${skipped.length} constituent(s) skipped for lack of data`)
+      }
+      loadJobs()
     } catch {
       showToast.error('Failed to submit backtest job')
     } finally {
@@ -593,21 +526,25 @@ export default function Backtest() {
     }
   }
 
-  const checkJobDone = useCallback(
-    (jobId: string) => {
-      const job = jobs.find((j) => j.job_id === jobId)
-      if (!job) return false
-      return job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'
-    },
-    [jobs]
-  )
+  // Ctrl/Cmd+Enter runs from anywhere on the page, the editor included.
+  const handleRunRef = useRef(handleRun)
+  handleRunRef.current = handleRun
+  const submittingRef = useRef(submitting)
+  submittingRef.current = submitting
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault()
+        if (!submittingRef.current) handleRunRef.current()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [])
 
-  const toggleInterval = (iv: string) => {
-    setIntervals((prev) => {
-      if (prev.includes(iv)) return prev.length > 1 ? prev.filter((x) => x !== iv) : prev
-      return [...prev, iv]
-    })
-  }
+  // -------------------------------------------------------------------------
+  // Results navigation
+  // -------------------------------------------------------------------------
 
   const openResults = useCallback(
     async (jobId: string) => {
@@ -630,61 +567,86 @@ export default function Backtest() {
     [navigate, setResult]
   )
 
-  const openBatchResults = useCallback(
-    async (batchId: string) => {
+  // A single run is followed through the job list until it is terminal.
+  useEffect(() => {
+    if (!activeJobId) return
+    const job = jobs.find((j) => j.job_id === activeJobId)
+    if (!job || !TERMINAL.has(job.status)) return
+    setActiveJobId(null)
+    if (job.status === 'completed') openResults(job.job_id)
+  }, [jobs, activeJobId, openResults])
+
+  // A batch can be far larger than the loaded job page (a scan of NIFTY 500),
+  // so it is followed through its own endpoint instead.
+  const activeBatchId = activeBatch?.batch_id
+  useEffect(() => {
+    if (!activeBatchId) return
+    let stopped = false
+    const poll = async () => {
       try {
-        const response = await fetch(`/backtest/api/batches/${batchId}`, { credentials: 'include' })
+        const response = await fetch(`/backtest/api/batches/${activeBatchId}`, {
+          credentials: 'include',
+        })
         const data = await response.json()
-        if (data.status === 'success') {
-          setBatch({
-            batch_id: data.batch_id,
-            name: data.name,
-            runs: data.runs,
-          })
-          navigate(`/backtest/results?batch_id=${batchId}`)
+        if (stopped || data.status !== 'success') return
+        const runs: BatchRunSummary[] = data.runs ?? []
+        const done = runs.filter((r) => TERMINAL.has(r.status)).length
+        const completed = runs.filter((r) => r.status === 'completed').length
+        const failed = runs.filter((r) => r.status === 'failed').length
+        if (runs.length && done === runs.length) {
+          stopped = true
+          setActiveBatch(null)
+          loadJobs()
+          if (completed) {
+            setBatch({
+              batch_id: data.batch_id,
+              name: data.name,
+              mode: data.mode,
+              universe: data.universe,
+              runs,
+            })
+            if (failed) showToast.warning(`${failed} of ${runs.length} runs failed`)
+            navigate(`/backtest/results?batch_id=${activeBatchId}`)
+          } else {
+            showToast.warning('Batch finished with no completed runs - see the runs panel')
+          }
           return
         }
-        showToast.error(data.message || 'Failed to load batch results')
+        setActiveBatch((prev) =>
+          prev && prev.batch_id === activeBatchId
+            ? { ...prev, total: runs.length || prev.total, done, completed, failed }
+            : prev
+        )
       } catch {
-        showToast.error('Failed to load batch results')
-      }
-    },
-    [navigate, setBatch]
-  )
-
-  // When all runs of the active batch reach a terminal state, open the
-  // batch results page. Single runs keep their existing per-job behavior.
-  useEffect(() => {
-    if (activeBatch?.jobs.length) {
-      const batchJobs = jobs.filter((j) => activeBatch.jobs.some((bj) => bj.job_id === j.job_id))
-      if (
-        batchJobs.length === activeBatch.jobs.length &&
-        batchJobs.every((j) => checkJobDone(j.job_id))
-      ) {
-        setActiveBatch(null)
-        const allOk = batchJobs.every((j) => j.status === 'completed')
-        if (allOk) {
-          openBatchResults(activeBatch.batch_id)
-        } else {
-          showToast.warning('Batch finished with some failures - see job history')
-        }
-      }
-      return
-    }
-    if (activeJobId && checkJobDone(activeJobId)) {
-      const job = jobs.find((j) => j.job_id === activeJobId)
-      if (job) {
-        setActiveJobId(null)
-        if (job.status === 'completed') {
-          openResults(job.job_id)
-        }
+        // transient; the next tick retries
       }
     }
-  }, [jobs, activeJobId, activeBatch, checkJobDone, openResults, openBatchResults])
+    poll()
+    const timer = setInterval(poll, 2500)
+    return () => {
+      stopped = true
+      clearInterval(timer)
+    }
+  }, [activeBatchId, loadJobs, navigate, setBatch])
 
-  const applyJobParams = useCallback((job: FullJobDetails) => {
+  // -------------------------------------------------------------------------
+  // Runs panel handlers
+  // -------------------------------------------------------------------------
+
+  const applyJobParams = useCallback((job: FullJobDetails, opts?: { asStock?: boolean }) => {
+    datesTouchedRef.current = true
+    const runMode = opts?.asStock ? 'stock' : (job.mode ?? 'stock')
     setStrategyCode(job.strategy_code)
-    setSymbol((job.symbols[0] || '').split(':')[1] || job.symbols[0] || '')
+    if (runMode === 'universe' || runMode === 'scan') {
+      setMode('universe')
+      setUniverseRunType(runMode)
+      if (job.universe) setUniverseId(job.universe)
+    } else {
+      const keys = job.symbols || []
+      setMode('stock')
+      setSymbol((keys[0] || '').split(':')[1] || keys[0] || '')
+      setExtraSymbols(keys.slice(1))
+    }
     setExchange(job.exchange)
     setIntervals([job.interval])
     setStartDate(job.start_date || '')
@@ -700,14 +662,22 @@ export default function Backtest() {
     setTakeProfitPct(job.take_profit_pct != null ? String(job.take_profit_pct) : '')
     setDailyLossLimit(job.daily_loss_limit != null ? String(job.daily_loss_limit) : '')
     setMaxPositions(job.max_positions)
+    setEngineOptions(engineOptionsFromSaved(job.engine_options))
+    setSettingsTab('data')
   }, [])
+
+  const fetchJobDetails = async (jobId: string): Promise<FullJobDetails | null> => {
+    const response = await fetch(`/backtest/api/jobs/${jobId}`, { credentials: 'include' })
+    const data = await response.json()
+    return data.status === 'success' && data.job ? (data.job as FullJobDetails) : null
+  }
 
   const handleReRun = async (job: JobSummary) => {
     try {
-      const response = await fetch(`/backtest/api/jobs/${job.job_id}`, { credentials: 'include' })
-      const data = await response.json()
-      if (data.status === 'success' && data.job) {
-        applyJobParams(data.job as FullJobDetails)
+      const details = await fetchJobDetails(job.job_id)
+      if (details) {
+        // One stock out of a scan reruns as a plain stock backtest on that stock.
+        applyJobParams(details, { asStock: job.mode === 'scan' })
         showToast.success('Job parameters loaded - press Run')
       }
     } catch {
@@ -717,851 +687,678 @@ export default function Backtest() {
 
   const handleBatchReRun = async (kids: JobSummary[]) => {
     try {
-      const response = await fetch(`/backtest/api/jobs/${kids[0].job_id}`, {
-        credentials: 'include',
-      })
-      const data = await response.json()
-      if (data.status === 'success' && data.job) {
-        applyJobParams(data.job as FullJobDetails)
-        setIntervals(kids.map((k) => k.interval))
-        showToast.success(`Batch parameters loaded for ${kids.length} timeframes - press Run`)
+      const details = await fetchJobDetails(kids[0].job_id)
+      if (details) {
+        applyJobParams(details)
+        if (kids[0].mode === 'scan') {
+          showToast.success('Scan parameters loaded - press Run')
+        } else {
+          setIntervals(kids.map((k) => k.interval))
+          showToast.success(`Batch parameters loaded for ${kids.length} timeframes - press Run`)
+        }
       }
     } catch {
       showToast.error('Failed to load batch parameters')
     }
   }
 
-  const handleDeleteJob = async (jobId: string) => {
+  const postAndReload = async (
+    url: string,
+    method: 'POST' | 'DELETE',
+    ok: string,
+    fail: string
+  ) => {
     try {
       const csrfToken = await fetchCSRFToken()
-      const response = await fetch(`/backtest/api/jobs/${jobId}`, {
-        method: 'DELETE',
+      const response = await fetch(url, {
+        method,
         credentials: 'include',
         headers: { 'X-CSRFToken': csrfToken },
       })
       const data = await response.json()
       if (data.status === 'success') {
-        showToast.success('Job deleted')
-        loadJobs()
+        showToast.success(ok)
+        loadJobs({ all: true })
+      } else {
+        showToast.error(data.message || fail)
       }
     } catch {
-      showToast.error('Failed to delete job')
+      showToast.error(fail)
     }
   }
 
-  const handleDeleteBatch = async (batchId: string) => {
-    try {
-      const csrfToken = await fetchCSRFToken()
-      const response = await fetch(`/backtest/api/batches/${batchId}`, {
-        method: 'DELETE',
-        credentials: 'include',
-        headers: { 'X-CSRFToken': csrfToken },
-      })
-      const data = await response.json()
-      if (data.status === 'success') {
-        showToast.success('Batch deleted')
-        loadJobs()
-      }
-    } catch {
-      showToast.error('Failed to delete batch')
-    }
-  }
+  const handleDeleteJob = (jobId: string) =>
+    postAndReload(`/backtest/api/jobs/${jobId}`, 'DELETE', 'Job deleted', 'Failed to delete job')
 
-  // Group jobs into batches for the history table. A legacy/single run is a
-  // batch of one (batch_id = job_id) and renders as a flat row.
-  const batchGroups = useMemo(() => {
-    const map = new Map<string, JobSummary[]>()
-    for (const job of jobs) {
-      const key = job.batch_id || job.job_id
-      const arr = map.get(key) ?? []
-      arr.push(job)
-      map.set(key, arr)
-    }
-    return [...map.entries()].map(([batchId, kids]) => ({
-      batchId,
-      kids: kids.sort((a, b) => (a.batch_seq ?? 0) - (b.batch_seq ?? 0)),
-    }))
-  }, [jobs])
+  const handleDeleteBatch = (batchId: string) =>
+    postAndReload(
+      `/backtest/api/batches/${batchId}`,
+      'DELETE',
+      'Batch deleted',
+      'Failed to delete batch'
+    )
 
-  const [expandedBatches, setExpandedBatches] = useState<Set<string>>(new Set())
+  const handleCancelJob = (jobId: string) =>
+    postAndReload(`/backtest/api/cancel/${jobId}`, 'POST', 'Job cancelled', 'Failed to cancel job')
 
-  const toggleBatchRow = (batchId: string) => {
-    setExpandedBatches((prev) => {
-      const next = new Set(prev)
-      if (next.has(batchId)) next.delete(batchId)
-      else next.add(batchId)
-      return next
-    })
-  }
-
-  const batchStatusBadge = (kids: JobSummary[]) => {
-    const statuses = kids.map((k) => k.status)
-    if (statuses.every((s) => s === 'completed')) return 'completed'
-    if (statuses.some((s) => s === 'running')) return 'running'
-    if (statuses.some((s) => s === 'pending')) return 'pending'
-    if (statuses.some((s) => s === 'failed') || statuses.some((s) => s === 'cancelled'))
-      return 'partial'
-    return 'pending'
-  }
-
-  const jobRowActions = (job: JobSummary, batchId?: string) => (
-    <div className="flex items-center gap-1">
-      {job.status === 'completed' && (
-        <Button
-          variant="ghost"
-          size="icon"
-          title="View results in new tab"
-          onClick={(e) => {
-            e.stopPropagation()
-            window.open(`/backtest/results?job_id=${job.job_id}`, '_blank')
-          }}
-        >
-          <LineChart className="h-4 w-4" />
-        </Button>
-      )}
-      <Button
-        variant="ghost"
-        size="icon"
-        title="Rerun with same parameters"
-        onClick={(e) => {
-          e.stopPropagation()
-          if (batchId) {
-            setJobsOpen(false)
-            const kids = batchGroups.find((g) => g.batchId === batchId)?.kids
-            if (kids) handleBatchReRun(kids)
-          } else {
-            setJobsOpen(false)
-            handleReRun(job)
-          }
-        }}
-      >
-        <RotateCcw className="h-4 w-4" />
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        title="Delete"
-        onClick={(e) => {
-          e.stopPropagation()
-          handleDeleteJob(job.job_id)
-        }}
-      >
-        <Trash2 className="h-4 w-4 text-rose-400" />
-      </Button>
-    </div>
-  )
-
-  const activeAndQueuedJobs = useMemo(() => {
-    return jobs.filter((j) => j.status === 'running' || j.status === 'pending')
-  }, [jobs])
-
-  const runningJobs = useMemo(() => {
-    return activeAndQueuedJobs.filter((j) => j.status === 'running')
-  }, [activeAndQueuedJobs])
-
-  const pendingJobs = useMemo(() => {
-    return activeAndQueuedJobs.filter((j) => j.status === 'pending')
-  }, [activeAndQueuedJobs])
+  const handleCancelBatch = (batchId: string) =>
+    postAndReload(
+      `/backtest/api/batches/${batchId}/cancel`,
+      'POST',
+      'Batch cancel requested',
+      'Failed to cancel batch'
+    )
 
   const handleCancelAllActive = async () => {
     try {
       const csrfToken = await fetchCSRFToken()
-      for (const j of activeAndQueuedJobs) {
-        await fetch(`/backtest/api/cancel/${j.job_id}`, {
+      const headers = { 'X-CSRFToken': csrfToken }
+      if (activeBatch) {
+        await fetch(`/backtest/api/batches/${activeBatch.batch_id}/cancel`, {
           method: 'POST',
           credentials: 'include',
-          headers: { 'X-CSRFToken': csrfToken },
+          headers,
         })
       }
-      showToast.info('Cancel requests sent for queued/active jobs')
-      loadJobs()
+      const response = await fetch('/backtest/api/cancel-active', {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+      })
+      const data = await response.json()
+      if (!response.ok || data.status !== 'success') {
+        showToast.error(data.message || 'Failed to cancel active jobs')
+        return
+      }
+      showToast.info(`Cancel requests sent: ${data.cancelled} of ${data.requested} active jobs`)
+      loadJobs({ all: true })
     } catch {
       showToast.error('Failed to cancel active jobs')
     }
   }
 
-  const handleCancelJob = async (jobId: string) => {
+  const handlePurge = async () => {
     try {
       const csrfToken = await fetchCSRFToken()
-      const response = await fetch(`/backtest/api/cancel/${jobId}`, {
+      const response = await fetch('/backtest/api/cleanup', {
         method: 'POST',
         credentials: 'include',
-        headers: { 'X-CSRFToken': csrfToken },
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+        body: JSON.stringify({ days_to_keep: 30 }),
       })
       const data = await response.json()
-      if (data.status === 'success') {
-        showToast.info('Job cancelled')
-        loadJobs()
-      } else {
-        showToast.error(data.message || 'Failed to cancel job')
+      if (!response.ok || data.status !== 'success') {
+        showToast.error(data.message || 'Failed to purge old runs')
+        return
       }
+      showToast.success('Old runs purged (retention 30 days)')
+      loadJobs({ all: true })
     } catch {
-      showToast.error('Failed to cancel job')
+      showToast.error('Failed to purge old runs')
     }
   }
+
+  const handleToggleStar = async (job: JobSummary) => {
+    const next = !job.starred
+    patchJob(job.job_id, { starred: next })
+    try {
+      const saved = await patchJobMeta(job.job_id, { starred: next })
+      patchJob(job.job_id, { starred: saved.starred })
+    } catch (e) {
+      patchJob(job.job_id, { starred: !next })
+      showToast.error(e instanceof Error ? e.message : 'Failed to update run')
+    }
+  }
+
+  const handleSaveNotes = async (job: JobSummary, notes: string) => {
+    try {
+      const saved = await patchJobMeta(job.job_id, { notes })
+      patchJob(job.job_id, { notes: saved.notes })
+      showToast.success('Notes saved')
+    } catch (e) {
+      showToast.error(e instanceof Error ? e.message : 'Failed to save notes')
+      throw e
+    }
+  }
+
+  const handleLoadMore = async () => {
+    if (!(await loadMore())) showToast.error('Failed to load more jobs')
+  }
+
+  // Stable handler identities so the memoized runs panel skips form-only renders;
+  // each call still reaches the latest closure.
+  const handlers = {
+    onCancelJob: handleCancelJob,
+    onCancelAll: handleCancelAllActive,
+    onPurge: handlePurge,
+    onReRun: handleReRun,
+    onBatchReRun: handleBatchReRun,
+    onDeleteJob: handleDeleteJob,
+    onDeleteBatch: handleDeleteBatch,
+    onLoadMore: handleLoadMore,
+    onToggleStar: handleToggleStar,
+    onSaveNotes: handleSaveNotes,
+  }
+  const latestHandlers = useRef(handlers)
+  latestHandlers.current = handlers
+  const panelHandlers = useMemo(
+    () => ({
+      onCancelJob: (id: string) => latestHandlers.current.onCancelJob(id),
+      onCancelAll: () => latestHandlers.current.onCancelAll(),
+      onPurge: () => latestHandlers.current.onPurge(),
+      onReRun: (job: JobSummary) => latestHandlers.current.onReRun(job),
+      onBatchReRun: (kids: JobSummary[]) => latestHandlers.current.onBatchReRun(kids),
+      onDeleteJob: (id: string) => latestHandlers.current.onDeleteJob(id),
+      onDeleteBatch: (id: string) => latestHandlers.current.onDeleteBatch(id),
+      onLoadMore: () => latestHandlers.current.onLoadMore(),
+      onToggleStar: (job: JobSummary) => latestHandlers.current.onToggleStar(job),
+      onSaveNotes: (job: JobSummary, notes: string) =>
+        latestHandlers.current.onSaveNotes(job, notes),
+    }),
+    []
+  )
+
+  const showHistory = () => {
+    setHistoryFocus((n) => n + 1)
+    runsPanelRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+  }
+
+  const activeCount = useMemo(
+    () => jobs.filter((j) => j.status === 'running' || j.status === 'pending').length,
+    [jobs]
+  )
 
   // -------------------------------------------------------------------------
   // Render
   // -------------------------------------------------------------------------
 
+  const timeframePicker = (
+    <div className="space-y-1.5">
+      <Label>{isScan ? 'Timeframe' : 'Timeframes'}</Label>
+      <div className="flex flex-wrap gap-1.5">
+        {INTERVALS.map((iv) => {
+          const selected = intervals.includes(iv)
+          const r = mode === 'stock' ? rangesByInterval[iv] : undefined
+          return (
+            <Button
+              key={iv}
+              size="sm"
+              variant={selected ? 'default' : 'outline'}
+              onClick={() => toggleInterval(iv)}
+              title={
+                mode !== 'stock'
+                  ? iv
+                  : r
+                    ? `${iv}: ${r.record_count?.toLocaleString() ?? '?'} bars from ${r.start_date}`
+                    : `${iv}: no available data`
+              }
+            >
+              {iv}
+            </Button>
+          )
+        })}
+      </div>
+      {isScan ? (
+        <p className="text-xs text-muted-foreground">A scan runs on one timeframe.</p>
+      ) : (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {INTERVAL_PRESETS.map((p) => (
+            <Button
+              key={p.label}
+              size="sm"
+              variant="ghost"
+              className="h-6 px-2 text-xs"
+              onClick={() => setIntervals(p.intervals)}
+            >
+              {p.label}
+            </Button>
+          ))}
+          <span className="text-xs text-muted-foreground">
+            {mode === 'stock'
+              ? '- one run per timeframe'
+              : '- one portfolio run per timeframe; coverage shown for the first'}
+          </span>
+        </div>
+      )}
+      {mode === 'stock' && intervals.length > 0 && (
+        <div className="flex flex-wrap gap-x-3 gap-y-1">
+          {intervals.map((iv) => {
+            const r = rangesByInterval[iv]
+            return (
+              <span key={iv} className="inline-flex items-center gap-1.5 text-xs">
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${r ? 'bg-emerald-400' : 'bg-slate-600'}`}
+                />
+                {iv}
+                <span className={r ? 'text-muted-foreground' : 'text-slate-500'}>
+                  {r ? `${(r.record_count ?? 0).toLocaleString()} bars` : 'no data'}
+                </span>
+              </span>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+
+  const dateFields = (
+    <div className="space-y-1.5">
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <Label>Start Date</Label>
+          <Input type="date" value={startDate} onChange={(e) => setDate('start', e.target.value)} />
+        </div>
+        <div className="space-y-1.5">
+          <Label>End Date</Label>
+          <Input type="date" value={endDate} onChange={(e) => setDate('end', e.target.value)} />
+        </div>
+      </div>
+      {mode === 'universe' && coverage?.common_first && (
+        <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={useCommonWindow}>
+          Use common window ({coverage.common_first} to {coverage.common_last})
+        </Button>
+      )}
+    </div>
+  )
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="mr-auto min-w-0">
           <h1 className="text-2xl font-bold text-foreground">Strategy Backtesting</h1>
           <p className="text-sm text-muted-foreground">
-            Configure a strategy, set the data window and risk parameters, then queue backtests.
-            Multiple jobs can be queued and run in parallel/background without waiting.
+            {mode === 'stock'
+              ? 'Test a strategy on one stock or a hand-picked basket, across timeframes.'
+              : 'Test a strategy across an index universe: as one portfolio, or stock by stock.'}
           </p>
         </div>
+        <fieldset
+          aria-label="Backtest mode"
+          className="grid grid-cols-2 gap-1 rounded-lg border bg-muted/40 p-1"
+        >
+          {(['stock', 'universe'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              aria-pressed={mode === m}
+              onClick={() => switchMode(m)}
+              className={cn(
+                'rounded-md px-4 py-1.5 text-sm font-medium transition-colors',
+                mode === m
+                  ? 'bg-background text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              )}
+            >
+              {m === 'stock' ? 'Stock' : 'Universe'}
+            </button>
+          ))}
+        </fieldset>
         <div className="flex flex-wrap items-center gap-2">
-          {activeAndQueuedJobs.length > 0 && (
-            <Button variant="destructive" onClick={handleCancelAllActive}>
-              <Square className="h-4 w-4" /> Cancel All Active
-            </Button>
-          )}
-          <Button variant="outline" onClick={() => setJobsOpen(true)}>
-            <History className="h-4 w-4" /> Job History ({jobs.length})
+          <Button variant="outline" onClick={showHistory}>
+            <History className="h-4 w-4" /> Job History ({jobCount.toLocaleString('en-IN')})
           </Button>
           <Button variant="outline" onClick={() => navigate('/backtest/optimizations')}>
             Optimizations
           </Button>
-          <Button variant="outline" onClick={() => setOptimizeOpen(true)}>
+          <Button
+            variant="outline"
+            disabled={isScan}
+            title={isScan ? 'Optimize a Portfolio run or a single stock, not a scan' : undefined}
+            onClick={() => setOptimizeOpen(true)}
+          >
             <SlidersHorizontal className="h-4 w-4" /> Optimize
           </Button>
-          <Button onClick={handleRun} disabled={submitting}>
+          <Button
+            onClick={handleRun}
+            disabled={submitting}
+            aria-label="Run / Queue Backtest"
+            title="Run (Ctrl+Enter)"
+          >
             {submitting ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" /> Queueing...
               </>
             ) : (
               <>
-                <Play className="h-4 w-4" /> Run / Queue Backtest
+                <Play className="h-4 w-4" /> {isScan ? 'Run Scan' : 'Run Backtest'}
               </>
             )}
           </Button>
         </div>
       </div>
 
-      {/* Active & Queued Backtests */}
-      {activeAndQueuedJobs.length > 0 && (
-        <Card className="border-primary/20 bg-card/60 shadow-sm">
-          <CardHeader className="pb-3">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-base flex items-center gap-2">
-                <Activity className="h-4 w-4 text-primary animate-pulse" /> Active & Queued
-                Backtests
-              </CardTitle>
-              <div className="flex items-center gap-2">
-                {runningJobs.length > 0 && (
-                  <Badge variant="default" className="text-xs bg-emerald-600">
-                    {runningJobs.length} Running
-                  </Badge>
-                )}
-                {pendingJobs.length > 0 && (
-                  <Badge variant="outline" className="text-xs text-amber-500 border-amber-500/40">
-                    {pendingJobs.length} Queued
-                  </Badge>
-                )}
+      {activeBatch && (
+        <Card className="gap-0 border-primary/30 py-0">
+          <div className="flex flex-wrap items-center gap-3 px-4 py-3">
+            <Loader2 className="h-4 w-4 animate-spin text-primary" />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm">
+                <span className="font-medium">{activeBatch.name}</span>
+                <span className="tabular-nums text-muted-foreground">
+                  {activeBatch.done} / {activeBatch.total} done
+                  {activeBatch.failed ? ` - ${activeBatch.failed} failed` : ''}
+                </span>
               </div>
+              <Progress
+                value={activeBatch.total ? (activeBatch.done / activeBatch.total) * 100 : 0}
+                className="mt-1.5 h-1.5"
+              />
             </div>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {activeAndQueuedJobs.map((j) => {
-              const p = jobProgress[j.job_id]
-              const isRunningJob = j.status === 'running'
-              const symbolClean = (j.symbols?.[0] || '').replace('NSE:', '').replace('BSE:', '')
-
-              return (
-                <div key={j.job_id} className="p-3 rounded-lg border bg-background/80 space-y-2">
-                  <div className="flex items-center justify-between text-sm">
-                    <div className="flex items-center gap-2">
-                      <span className="font-semibold">{j.name || symbolClean}</span>
-                      <Badge variant="outline" className="text-xs">
-                        {j.interval}
-                      </Badge>
-                      {isRunningJob ? (
-                        <Badge variant="default" className="text-[10px] bg-emerald-600">
-                          Running
-                        </Badge>
-                      ) : (
-                        <Badge variant="secondary" className="text-[10px] text-amber-500">
-                          Queued
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {isRunningJob && p && p.current_date && (
-                        <span className="text-xs text-muted-foreground font-mono">
-                          {p.current_date} • Equity: ₹{p.equity.toLocaleString()}
-                        </span>
-                      )}
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 px-2 text-rose-500 hover:text-rose-600 hover:bg-rose-500/10"
-                        onClick={() => handleCancelJob(j.job_id)}
-                      >
-                        <Square className="h-3.5 w-3.5 mr-1" /> Cancel
-                      </Button>
-                    </div>
-                  </div>
-
-                  {isRunningJob ? (
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between text-xs text-muted-foreground">
-                        <span>Trades: {p?.trades_count ?? 0}</span>
-                        <span className="font-medium text-foreground">
-                          {p ? `${p.percent.toFixed(1)}%` : '0.0%'}
-                        </span>
-                      </div>
-                      <Progress value={p?.percent ?? 0} className="h-1.5" />
-                    </div>
-                  ) : (
-                    <div className="text-xs text-muted-foreground flex items-center gap-1.5 pt-0.5">
-                      <Loader2 className="h-3 w-3 animate-spin text-amber-500" />
-                      Waiting in execution queue for next available worker thread...
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-          </CardContent>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-rose-500 hover:bg-rose-500/10 hover:text-rose-600"
+              onClick={() => handleCancelBatch(activeBatch.batch_id)}
+            >
+              <Square className="h-3.5 w-3.5" /> Cancel
+            </Button>
+          </div>
         </Card>
       )}
 
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        {/* Data source */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base flex items-center gap-2">
-              <Activity className="h-4 w-4 text-primary" /> Data Source
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label>Symbol</Label>
-                <Select
-                  value={symbol}
-                  onValueChange={(v) => {
-                    setSymbol(v)
-                    const item = catalog.find((c) => c.symbol === v)
-                    if (item) setExchange(item.exchange)
-                  }}
-                >
-                  <SelectTrigger disabled={catalogLoading}>
-                    <SelectValue placeholder={catalogLoading ? 'Loading...' : 'Select symbol'} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <ScrollArea className="h-72">
-                      {catalog.map((item) => (
-                        <SelectItem key={`${item.exchange}:${item.symbol}`} value={item.symbol}>
-                          {item.symbol} ({item.exchange})
-                        </SelectItem>
-                      ))}
-                    </ScrollArea>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label>Timeframes</Label>
-                <div className="flex flex-wrap gap-1.5">
-                  {INTERVALS.map((iv) => {
-                    const selected = intervals.includes(iv)
-                    const r = rangesByInterval[iv]
-                    return (
-                      <Button
-                        key={iv}
-                        size="sm"
-                        variant={selected ? 'default' : 'outline'}
-                        onClick={() => toggleInterval(iv)}
-                        title={
-                          r
-                            ? `${iv}: ${r.record_count?.toLocaleString() ?? '?'} bars from ${r.start_date}`
-                            : `${iv}: no available data`
-                        }
-                      >
-                        {iv}
-                      </Button>
-                    )
-                  })}
-                </div>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {INTERVAL_PRESETS.map((p) => (
-                    <Button
-                      key={p.label}
-                      size="sm"
-                      variant="ghost"
-                      className="h-6 px-2 text-xs"
-                      onClick={() => setIntervals(p.intervals)}
-                    >
-                      {p.label}
-                    </Button>
-                  ))}
-                  <span className="text-xs text-muted-foreground">
-                    - select one or more timeframes
-                  </span>
-                </div>
-                {intervals.length > 0 && (
-                  <div className="flex flex-wrap gap-x-3 gap-y-1">
-                    {intervals.map((iv) => {
-                      const r = rangesByInterval[iv]
-                      return (
-                        <span key={iv} className="inline-flex items-center gap-1.5 text-xs">
-                          <span
-                            className={`h-1.5 w-1.5 rounded-full ${r ? 'bg-emerald-400' : 'bg-slate-600'}`}
-                          />
-                          {iv}
-                          <span className={r ? 'text-muted-foreground' : 'text-slate-500'}>
-                            {r ? `${(r.record_count ?? 0).toLocaleString()} bars` : 'no data'}
-                          </span>
-                        </span>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <ExtraSymbols
-              catalog={catalog}
-              primary={symbol ? `${exchange}:${symbol}` : ''}
-              value={extraSymbols}
-              onChange={setExtraSymbols}
-            />
-
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label>Start Date</Label>
-                <Input
-                  type="date"
-                  value={startDate}
-                  onChange={(e) => setStartDate(e.target.value)}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>End Date</Label>
-                <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
-              </div>
-            </div>
-
-            <div className="rounded-md border border-slate-800 bg-slate-900/60 p-2 text-xs text-muted-foreground">
-              Available data per selected timeframe is shown above (green = has data, grey = none).
-              Runs without data are marked failed at submit time; the rest of the batch proceeds.
-            </div>
-          </CardContent>
-        </Card>
-
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,7fr)_minmax(0,5fr)]">
         {/* Strategy */}
-        <Card>
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <CardTitle className="text-base flex items-center gap-2">
+        <Card className="gap-3">
+          <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0">
+            <CardTitle className="flex items-center gap-2 text-base">
               <FlaskConical className="h-4 w-4 text-primary" /> Strategy
             </CardTitle>
-            <div className="flex items-center gap-2">
-              <Label className="text-xs text-muted-foreground">Template</Label>
-              <Select onValueChange={handleTemplateChange}>
-                <SelectTrigger className="w-44">
-                  <SelectValue placeholder="Load template" />
-                </SelectTrigger>
-                <SelectContent>
-                  {STRATEGY_TEMPLATES.map((t) => (
-                    <SelectItem key={t.label} value={t.label}>
-                      {t.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            <Select onValueChange={handleTemplateChange}>
+              <SelectTrigger className="w-56" aria-label="Load template">
+                <SelectValue placeholder="Load template" />
+              </SelectTrigger>
+              <SelectContent>
+                {STRATEGY_TEMPLATES.map((t) => (
+                  <SelectItem key={t.label} value={t.label}>
+                    {t.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="rounded-lg border border-slate-800 overflow-hidden">
-              <PythonEditor value={strategyCode} onChange={setStrategyCode} height="280px" />
+            <div className="overflow-hidden rounded-lg border">
+              <PythonEditor value={strategyCode} onChange={setStrategyCode} height="520px" />
             </div>
             <p className="text-xs text-muted-foreground">
-              Signal style: define <code className="text-primary">strategy(df)</code> returning the
-              bars DataFrame with a <code className="text-primary">signal</code> column (1 = BUY, -1
-              = exit long, 2 = SHORT, -2 = cover); it runs separately on every selected symbol.
-              Event style: subclass <code className="text-primary">Strategy</code> and implement{' '}
-              <code className="text-primary">on_bar(ctx)</code> for multi-symbol logic, brackets,
-              trailing stops and scaling. Available: <code className="text-primary">ta</code>,{' '}
+              Signal style: <code className="text-primary">strategy(df)</code> returns the bars with
+              a <code className="text-primary">signal</code> column (1 buy, -1 exit long, 2 short,
+              -2 cover) and runs on each symbol separately. Event style: subclass{' '}
+              <code className="text-primary">Strategy</code> with{' '}
+              <code className="text-primary">on_bar(ctx)</code> for cross-symbol logic, brackets and
+              trailing stops
+              {mode === 'universe' ? '; in a Portfolio run it sees every constituent' : ''}.
+              Available: <code className="text-primary">ta</code>,{' '}
               <code className="text-primary">pd</code>, <code className="text-primary">np</code>,{' '}
-              <code className="text-primary">PARAMS</code>. Code runs in a sandbox with no network
-              or file access.
+              <code className="text-primary">PARAMS</code>,{' '}
+              <code className="text-primary">SYMBOLS</code>. Sandboxed, no network or files.
             </p>
           </CardContent>
         </Card>
 
-        {/* Execution & Risk */}
-        <Card className="xl:col-span-2">
-          <CardHeader>
-            <CardTitle className="text-base flex items-center gap-2">
-              <Target className="h-4 w-4 text-primary" /> Execution & Risk
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              <div className="space-y-1.5">
-                <Label>Initial Capital</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={initialCapital}
-                  onChange={(e) => setInitialCapital(Number(e.target.value))}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Product Type</Label>
-                <Select value={productType} onValueChange={setProductType}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {PRODUCT_TYPES.map((p) => (
-                      <SelectItem key={p.value} value={p.value}>
-                        {p.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label>Position Sizing</Label>
-                <Select value={sizingType} onValueChange={setSizingType}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {SIZING_TYPES.map((s) => (
-                      <SelectItem key={s.value} value={s.value}>
-                        {s.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label>
-                  {sizingType === 'fixed_qty'
-                    ? 'Quantity'
-                    : sizingType === 'pct_equity'
-                      ? 'Percent of Equity'
-                      : 'Amount'}
-                </Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={sizingValue}
-                  onChange={(e) => setSizingValue(Number(e.target.value))}
-                />
-              </div>
-            </div>
+        {/* Settings: every tab stays mounted (hidden when inactive) so switching tabs
+            is instant and nothing inside loses local state. */}
+        <Card className="gap-3">
+          <CardContent className="pt-0">
+            <Tabs value={settingsTab} onValueChange={(v) => setSettingsTab(v as SettingsTab)}>
+              <TabsList className="w-full">
+                <TabsTrigger value="data">Data</TabsTrigger>
+                <TabsTrigger value="execution">Execution</TabsTrigger>
+                <TabsTrigger value="risk">Risk</TabsTrigger>
+                <TabsTrigger value="engine">Engine</TabsTrigger>
+              </TabsList>
 
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              <div className="space-y-1.5">
-                <Label>Slippage (bps)</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={slippageBps}
-                  onChange={(e) => setSlippageBps(Number(e.target.value))}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Brokerage (bps)</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={brokerageBps}
-                  onChange={(e) => setBrokerageBps(Number(e.target.value))}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Missing Data Policy</Label>
-                <Select value={missingDataPolicy} onValueChange={setMissingDataPolicy}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {MISSING_DATA_POLICIES.map((m) => (
-                      <SelectItem key={m.value} value={m.value}>
-                        {m.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label>Max Open Positions</Label>
-                <Input
-                  type="number"
-                  min={1}
-                  value={maxPositions}
-                  onChange={(e) => setMaxPositions(Number(e.target.value))}
-                />
-              </div>
-            </div>
+              <TabsContent
+                value="data"
+                forceMount
+                className="mt-3 space-y-4 data-[state=inactive]:hidden"
+              >
+                {mode === 'stock' ? (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label>Symbol</Label>
+                      <Select
+                        value={symbol}
+                        onValueChange={(v) => {
+                          setSymbol(v)
+                          const item = catalog.find((c) => c.symbol === v)
+                          if (item) setExchange(item.exchange)
+                        }}
+                      >
+                        <SelectTrigger disabled={catalogLoading} className="w-full">
+                          <SelectValue
+                            placeholder={catalogLoading ? 'Loading...' : 'Select symbol'}
+                          />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <ScrollArea className="h-72">
+                            {catalog.map((item) => (
+                              <SelectItem
+                                key={`${item.exchange}:${item.symbol}`}
+                                value={item.symbol}
+                              >
+                                {item.symbol} ({item.exchange})
+                              </SelectItem>
+                            ))}
+                          </ScrollArea>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {timeframePicker}
+                    <ExtraSymbols
+                      catalog={catalog}
+                      primary={symbol ? `${exchange}:${symbol}` : ''}
+                      value={extraSymbols}
+                      onChange={setExtraSymbols}
+                    />
+                    {dateFields}
+                    <p className="text-xs text-muted-foreground">
+                      Green timeframes have data for the symbol. Runs without data are marked failed
+                      at submit time; the rest of the batch proceeds.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <UniversePicker
+                      listing={universeListing}
+                      listingLoading={universeListingLoading}
+                      universeId={universeId}
+                      onUniverseChange={setUniverseId}
+                      runType={universeRunType}
+                      onRunTypeChange={changeRunType}
+                      coverage={coverage?.id === universeId ? coverage : null}
+                      coverageLoading={coverageLoading}
+                    />
+                    {timeframePicker}
+                    {dateFields}
+                  </>
+                )}
+              </TabsContent>
 
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
-              <div className="space-y-1.5">
-                <Label>Stop Loss %</Label>
-                <Input
-                  type="number"
-                  value={stopLossPct}
-                  placeholder="Optional"
-                  onChange={(e) => setStopLossPct(e.target.value)}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Take Profit %</Label>
-                <Input
-                  type="number"
-                  value={takeProfitPct}
-                  placeholder="Optional"
-                  onChange={(e) => setTakeProfitPct(e.target.value)}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Daily Loss Limit (Rs)</Label>
-                <Input
-                  type="number"
-                  value={dailyLossLimit}
-                  placeholder="Optional"
-                  onChange={(e) => setDailyLossLimit(e.target.value)}
-                />
-              </div>
-            </div>
+              <TabsContent
+                value="execution"
+                forceMount
+                className="mt-3 space-y-4 data-[state=inactive]:hidden"
+              >
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label>Initial Capital</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      value={initialCapital}
+                      onChange={(e) => setInitialCapital(Number(e.target.value))}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Product Type</Label>
+                    <Select value={productType} onValueChange={setProductType}>
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {PRODUCT_TYPES.map((p) => (
+                          <SelectItem key={p.value} value={p.value}>
+                            {p.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Position Sizing</Label>
+                    <Select value={sizingType} onValueChange={setSizingType}>
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {SIZING_TYPES.map((s) => (
+                          <SelectItem key={s.value} value={s.value}>
+                            {s.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>
+                      {sizingType === 'fixed_qty'
+                        ? 'Quantity'
+                        : sizingType === 'pct_equity'
+                          ? 'Percent of Equity'
+                          : 'Amount'}
+                    </Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      value={sizingValue}
+                      onChange={(e) => setSizingValue(Number(e.target.value))}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Slippage (bps)</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      value={slippageBps}
+                      onChange={(e) => setSlippageBps(Number(e.target.value))}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Brokerage (bps)</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      value={brokerageBps}
+                      onChange={(e) => setBrokerageBps(Number(e.target.value))}
+                    />
+                  </div>
+                  <div className="col-span-2 space-y-1.5">
+                    <Label>Missing Data Policy</Label>
+                    <Select value={missingDataPolicy} onValueChange={setMissingDataPolicy}>
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {MISSING_DATA_POLICIES.map((m) => (
+                          <SelectItem key={m.value} value={m.value}>
+                            {m.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  MIS positions are squared off at the exchange close (15:15 IST for NSE). Brokerage
+                  and slippage apply per fill.
+                  {mode === 'universe' && productType === 'MIS'
+                    ? ' Daily-bar universe runs usually want CNC.'
+                    : ''}
+                </p>
+              </TabsContent>
 
-            <p className="text-xs text-muted-foreground">
-              MIS positions are auto squared-off at the exchange close time (e.g. 15:15 IST for
-              NSE). Brokerage & slippage apply per fill. Daily loss limit kills the strategy for the
-              day when breached.
-            </p>
+              <TabsContent
+                value="risk"
+                forceMount
+                className="mt-3 space-y-4 data-[state=inactive]:hidden"
+              >
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label>Max Open Positions</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      value={maxPositions}
+                      onChange={(e) => setMaxPositions(Number(e.target.value))}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Daily Loss Limit (Rs)</Label>
+                    <Input
+                      type="number"
+                      value={dailyLossLimit}
+                      placeholder="Optional"
+                      onChange={(e) => setDailyLossLimit(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Stop Loss %</Label>
+                    <Input
+                      type="number"
+                      value={stopLossPct}
+                      placeholder="Optional"
+                      onChange={(e) => setStopLossPct(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Take Profit %</Label>
+                    <Input
+                      type="number"
+                      value={takeProfitPct}
+                      placeholder="Optional"
+                      onChange={(e) => setTakeProfitPct(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {mode === 'universe' && universeRunType === 'universe'
+                    ? 'Max Open Positions caps how many constituents the portfolio holds at once. '
+                    : ''}
+                  The daily loss limit stops the strategy for the rest of the day when breached.
+                </p>
+              </TabsContent>
+
+              <TabsContent value="engine" forceMount className="mt-3 data-[state=inactive]:hidden">
+                <EngineOptionsCard value={engineOptions} onChange={setEngineOptions} />
+              </TabsContent>
+            </Tabs>
           </CardContent>
         </Card>
-
-        <EngineOptionsCard value={engineOptions} onChange={setEngineOptions} />
       </div>
+
+      <div ref={runsPanelRef} className="scroll-mt-4">
+        <BacktestJobsPanel
+          jobs={jobs}
+          jobCount={jobCount}
+          loadingMore={loadingMore}
+          jobProgress={jobProgress}
+          historyFocus={historyFocus}
+          {...panelHandlers}
+        />
+      </div>
+      {activeCount > 0 && (
+        <p className="sr-only" aria-live="polite">
+          {activeCount} backtest(s) active
+        </p>
+      )}
 
       <OptimizeDialog
         open={optimizeOpen}
         onOpenChange={setOptimizeOpen}
         buildRunPayload={buildRunPayload}
       />
-
-      {/* Job history dialog */}
-      <Dialog open={jobsOpen} onOpenChange={setJobsOpen}>
-        {/* sm:max-w-7xl, not max-w-7xl: DialogContent's own base class is
-            sm:max-w-lg, and tailwind-merge keeps responsive and unprefixed
-            max-w-* as separate groups - so an unprefixed override loses to it
-            above 640px and the dialog collapses back to 32rem. */}
-        <DialogContent className="w-[95vw] sm:max-w-7xl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <History className="h-5 w-5" /> Backtest Job History
-            </DialogTitle>
-            <DialogDescription>
-              Past runs with status and key metrics. Click a row to open its results page.
-            </DialogDescription>
-          </DialogHeader>
-
-          {/* Native scroll container rather than ScrollArea: Radix renders its
-              viewport as display:table, which shrink-wraps to content instead
-              of taking the dialog's width, so a nested overflow-x-auto never
-              gets a definite width to scroll against and the table paints
-              outside the dialog. */}
-          <div className="max-h-[26rem] overflow-auto rounded-md border border-slate-800">
-            <div>
-              <Table className="min-w-[750px]">
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Name</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Symbol</TableHead>
-                    <TableHead>Interval</TableHead>
-                    <TableHead className="text-right">Return %</TableHead>
-                    <TableHead className="text-right">Sharpe</TableHead>
-                    <TableHead className="text-right">Max DD %</TableHead>
-                    <TableHead className="text-right">Trades</TableHead>
-                    <TableHead className="text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {batchGroups.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={9} className="text-center py-10 text-muted-foreground">
-                        No backtest jobs have been submitted yet
-                      </TableCell>
-                    </TableRow>
-                  )}
-                  {batchGroups.map(({ batchId, kids }) => {
-                    const isBatch = kids.length > 1
-                    if (!isBatch) {
-                      const job = kids[0]
-                      return (
-                        <TableRow key={job.job_id} className="cursor-pointer">
-                          <TableCell className="font-medium">{job.name}</TableCell>
-                          <TableCell>
-                            <Badge variant={statusBadgeVariant(job.status)}>{job.status}</Badge>
-                          </TableCell>
-                          <TableCell className="text-xs">
-                            {(job.symbols || []).join(', ')}
-                          </TableCell>
-                          <TableCell>{job.interval}</TableCell>
-                          <TableCell
-                            className={`text-right ${
-                              job.total_return_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                            }`}
-                          >
-                            {job.total_return_pct}%
-                          </TableCell>
-                          <TableCell className="text-right">{job.sharpe_ratio ?? '-'}</TableCell>
-                          <TableCell className="text-right">{job.max_drawdown_pct}%</TableCell>
-                          <TableCell className="text-right">{job.total_trades}</TableCell>
-                          <TableCell>{jobRowActions(job, undefined)}</TableCell>
-                        </TableRow>
-                      )
-                    }
-                    const expanded = expandedBatches.has(batchId)
-                    const rollup = batchStatusBadge(kids)
-                    const bestReturn = Math.max(...kids.map((k) => k.total_return_pct))
-                    const worstReturn = Math.min(...kids.map((k) => k.total_return_pct))
-                    return (
-                      <Fragment key={batchId}>
-                        <TableRow
-                          className="cursor-pointer bg-slate-900/40"
-                          onClick={() => toggleBatchRow(batchId)}
-                        >
-                          <TableCell className="font-medium">
-                            <span className="flex items-center gap-1.5">
-                              {expanded ? (
-                                <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                              ) : (
-                                <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                              )}
-                              {kids[0].batch_name || kids[0].name}
-                            </span>
-                          </TableCell>
-                          <TableCell>
-                            <Badge variant={statusBadgeVariant(rollup)}>{rollup}</Badge>
-                          </TableCell>
-                          <TableCell className="text-xs">
-                            {(kids[0].symbols || []).join(', ')}
-                          </TableCell>
-                          <TableCell>{kids.length} TF</TableCell>
-                          <TableCell className="text-right">
-                            <span
-                              className={bestReturn >= 0 ? 'text-emerald-400' : 'text-rose-400'}
-                            >
-                              {bestReturn}%
-                            </span>
-                            <span className="text-xs text-muted-foreground ml-1">
-                              ({worstReturn}%)
-                            </span>
-                          </TableCell>
-                          <TableCell className="text-right text-muted-foreground">-</TableCell>
-                          <TableCell className="text-right text-muted-foreground">-</TableCell>
-                          <TableCell className="text-right">{kids.length}</TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1">
-                              {kids.some((k) => k.status === 'completed') && (
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  title="View batch results in new tab"
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    window.open(`/backtest/results?batch_id=${batchId}`, '_blank')
-                                  }}
-                                >
-                                  <LineChart className="h-4 w-4" />
-                                </Button>
-                              )}
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                title="Rerun all timeframes with the same parameters"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  setJobsOpen(false)
-                                  handleBatchReRun(kids)
-                                }}
-                              >
-                                <RotateCcw className="h-4 w-4" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                title="Delete whole batch"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  handleDeleteBatch(batchId)
-                                }}
-                              >
-                                <Trash2 className="h-4 w-4 text-rose-400" />
-                              </Button>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                        {expanded &&
-                          kids.map((job) => (
-                            <TableRow
-                              key={job.job_id}
-                              className="border-l-2 border-slate-800 pl-6 cursor-pointer bg-slate-900/20"
-                            >
-                              <TableCell className="pl-8 text-xs text-muted-foreground">
-                                {job.name}
-                              </TableCell>
-                              <TableCell>
-                                <Badge variant={statusBadgeVariant(job.status)}>{job.status}</Badge>
-                              </TableCell>
-                              <TableCell className="text-xs">-</TableCell>
-                              <TableCell className="pl-8">{job.interval}</TableCell>
-                              <TableCell
-                                className={`text-right ${
-                                  job.total_return_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                                }`}
-                              >
-                                {job.total_return_pct}%
-                              </TableCell>
-                              <TableCell className="text-right">
-                                {job.sharpe_ratio ?? '-'}
-                              </TableCell>
-                              <TableCell className="text-right">{job.max_drawdown_pct}%</TableCell>
-                              <TableCell className="text-right">{job.total_trades}</TableCell>
-                              <TableCell>{jobRowActions(job, batchId)}</TableCell>
-                            </TableRow>
-                          ))}
-                      </Fragment>
-                    )
-                  })}
-                </TableBody>
-              </Table>
-            </div>
-          </div>
-
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={async () => {
-                const csrfToken = await fetchCSRFToken()
-                await fetch('/backtest/api/cleanup', {
-                  method: 'POST',
-                  credentials: 'include',
-                  headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
-                  body: JSON.stringify({ days_to_keep: 30 }),
-                })
-                showToast.success('Old runs purged (retention 30 days)')
-                loadJobs()
-              }}
-            >
-              <Trash2 className="h-4 w-4" /> Purge runs older than 30 days
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   )
 }

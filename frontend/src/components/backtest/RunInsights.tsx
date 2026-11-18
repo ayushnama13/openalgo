@@ -135,6 +135,7 @@ function TradeChart({ jobId, symbols }: { jobId: string; symbols: string[] }) {
   useEffect(() => {
     let cancelled = false
     setLoading(true)
+    setData(null)
     setError(null)
     getJson<ChartData>(
       `/backtest/api/chart/${jobId}?symbol=${encodeURIComponent(symbol)}&max_bars=5000`
@@ -278,14 +279,20 @@ function GroupTable({
   )
 }
 
-function AnalyticsPanel({ jobId }: { jobId: string }) {
+export function AnalyticsPanel({ jobId }: { jobId: string }) {
   const [data, setData] = useState<Analytics | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    let cancelled = false
+    setData(null)
+    setError(null)
     getJson<Analytics>(`/backtest/api/analytics/${jobId}`)
-      .then(setData)
-      .catch((e: Error) => setError(e.message))
+      .then((nextData) => !cancelled && setData(nextData))
+      .catch((e: Error) => !cancelled && setError(e.message))
+    return () => {
+      cancelled = true
+    }
   }, [jobId])
 
   const rollingPlot = useMemo(() => {
@@ -466,6 +473,13 @@ function MonteCarloPanel({ jobId, tradeCount }: { jobId: string; tradeCount: num
   const [method, setMethod] = useState('bootstrap')
   const [result, setResult] = useState<MonteCarlo | null>(null)
   const [running, setRunning] = useState(false)
+  const currentJobId = useRef(jobId)
+
+  useEffect(() => {
+    currentJobId.current = jobId
+    setResult(null)
+    setRunning(false)
+  }, [jobId])
 
   const run = useCallback(async () => {
     setRunning(true)
@@ -479,11 +493,11 @@ function MonteCarloPanel({ jobId, tradeCount }: { jobId: string; tradeCount: num
       })
       const body = await res.json()
       if (body.status !== 'success') throw new Error(body.message)
-      setResult(body.monte_carlo as MonteCarlo)
+      if (currentJobId.current === jobId) setResult(body.monte_carlo as MonteCarlo)
     } catch (e) {
       showToast.error(e instanceof Error ? e.message : 'Monte Carlo failed')
     } finally {
-      setRunning(false)
+      if (currentJobId.current === jobId) setRunning(false)
     }
   }, [jobId, method])
 

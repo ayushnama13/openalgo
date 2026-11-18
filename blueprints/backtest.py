@@ -1,6 +1,7 @@
 # blueprints/backtest.py
 
 import json
+import math
 import uuid
 from datetime import datetime
 
@@ -9,13 +10,15 @@ import pytz
 from flask import Blueprint, jsonify, render_template_string, request
 
 from database.backtest_db import (
-    BacktestEquityCurve,
     BacktestOptimization,
     BacktestRun,
     BacktestStrategy,
     BacktestTrade,
     cleanup_old_runs,
     db_session,
+    delete_equity_curves,
+    load_equity_curve,
+    reclaim_space,
 )
 from database.historify_db import (
     get_available_symbols,
@@ -32,6 +35,7 @@ from services.backtest_reports import (
     trade_breakdown,
 )
 from services.backtest_service import (
+    RUN_MODES,
     cancel_batch,
     cancel_job,
     cancel_optimization,
@@ -39,6 +43,7 @@ from services.backtest_service import (
     start_backtest_batch,
     start_optimization,
 )
+from services.backtest_universes import list_universes, universe_coverage
 from utils.logging import get_logger
 from utils.session import check_session_validity
 
@@ -49,16 +54,56 @@ backtest_bp = Blueprint("backtest_api", __name__, url_prefix="/backtest/api")
 # Server-side cap for equity curves on the batch overlay — 7 timeframes of 1m
 # over a year is ~500k raw points, far too heavy for one chart request.
 MAX_CURVE_POINTS = 2000
+# /results and /compare cap; pass ?full=1 to /results for every point.
+RESULTS_CURVE_POINTS = 5000
+_SIZING_TYPES = {"fixed_qty", "pct_equity", "fixed_capital", "kelly_vol"}
+_MISSING_DATA_POLICIES = {"skip", "forward_fill", "abort"}
+
+
+def _validate_run_inputs(data):
+    try:
+        initial_capital = float(data.get("initial_capital", 100000.0))
+    except (TypeError, ValueError):
+        raise ValueError("initial_capital must be a finite number greater than 0") from None
+    if not math.isfinite(initial_capital) or initial_capital <= 0:
+        raise ValueError("initial_capital must be a finite number greater than 0")
+    sizing_type = data.get("sizing_type") or "fixed_qty"
+    if sizing_type not in _SIZING_TYPES:
+        raise ValueError(f"sizing_type must be one of {', '.join(sorted(_SIZING_TYPES))}")
+    missing_data_policy = data.get("missing_data_policy") or "skip"
+    if missing_data_policy not in _MISSING_DATA_POLICIES:
+        raise ValueError("missing_data_policy must be one of skip, forward_fill, abort")
+    return initial_capital, sizing_type, missing_data_policy
 
 
 def _downsample_curve(rows: list, limit: int = MAX_CURVE_POINTS) -> list:
     """Evenly downsample a list of curve points to at most ``limit`` entries."""
-    n = len(rows)
-    if n <= limit:
+    if len(rows) <= limit:
         return rows
-    step = n / limit
-    idxs = sorted({min(n - 1, int(i * step)) for i in range(limit)} | {n - 1})
-    return [rows[i] for i in idxs]
+    return [rows[i] for i in _downsample_indices(len(rows), limit)]
+
+
+def _downsample_indices(n: int, limit: int) -> list[int]:
+    """Positions of at most ``limit`` evenly spaced points out of ``n`` (last always kept)."""
+    if n <= limit:
+        return list(range(n))
+    step = (n - 1) / (limit - 1) if limit > 1 else n
+    return sorted({min(n - 1, int(i * step)) for i in range(limit - 1)} | {n - 1})
+
+
+def _equity_points(curve: dict, fields: tuple[str, ...], limit: int | None) -> list[dict]:
+    """Row dicts for the chart, downsampled BEFORE any per-point object is built."""
+    n = len(curve["timestamp"])
+    idxs = range(n) if limit is None else _downsample_indices(n, limit)
+    columns = {}
+    for key in fields:
+        values = curve[key]
+        if hasattr(values, "tolist"):  # numpy -> plain Python floats in one call
+            values = values[list(idxs)].tolist() if limit is not None else values.tolist()
+        else:
+            values = [values[i] for i in idxs]
+        columns[key] = values
+    return [dict(zip(fields, row, strict=True)) for row in zip(*(columns[k] for k in fields), strict=True)]
 
 
 @backtest_bp.route("/catalog", methods=["GET"])
@@ -70,6 +115,31 @@ def get_catalog():
         return jsonify({"status": "success", "catalog": symbols_data})
     except Exception as e:
         logger.exception(f"Error fetching backtest data catalog: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@backtest_bp.route("/universes", methods=["GET"])
+@check_session_validity
+def get_universes():
+    """Index universes available for universe-mode runs (id, name, category, count)."""
+    try:
+        return jsonify({"status": "success", **list_universes()})
+    except Exception as e:
+        logger.exception(f"Error listing backtest universes: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@backtest_bp.route("/universes/<universe_id>", methods=["GET"])
+@check_session_validity
+def get_universe_coverage(universe_id):
+    """Constituents of one universe with their Historify coverage for ``interval``."""
+    interval = request.args.get("interval", "D")
+    try:
+        return jsonify({"status": "success", "universe": universe_coverage(universe_id, interval)})
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 404
+    except Exception as e:
+        logger.exception(f"Error fetching universe {universe_id}: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -144,21 +214,23 @@ def submit_run():
             intervals = [interval]
         start_date = data.get("start_date")
         end_date = data.get("end_date")
-        initial_capital = float(data.get("initial_capital", 100000.0))
-        sizing_type = data.get("sizing_type", "fixed_qty")
+        initial_capital, sizing_type, missing_data_policy = _validate_run_inputs(data)
         sizing_value = float(data.get("sizing_value", 1.0))
         slippage_bps = float(data.get("slippage_bps", 0.0))
         brokerage_bps = float(data.get("brokerage_bps", 0.0))
         product_type = data.get("product_type", "MIS")
-        missing_data_policy = data.get("missing_data_policy", "skip")
         stop_loss_pct = float(data["stop_loss_pct"]) if data.get("stop_loss_pct") is not None else None
         take_profit_pct = float(data["take_profit_pct"]) if data.get("take_profit_pct") is not None else None
         daily_loss_limit = float(data["daily_loss_limit"]) if data.get("daily_loss_limit") is not None else None
         max_positions = int(data.get("max_positions", 5))
         engine_options = data.get("engine_options")
+        mode = str(data.get("mode") or "stock").lower()
+        universe = data.get("universe")
 
         if not strategy_code:
             return jsonify({"status": "error", "message": "strategy_code is required"}), 400
+        if mode not in RUN_MODES:
+            return jsonify({"status": "error", "message": f"mode must be one of {', '.join(RUN_MODES)}"}), 400
 
         batch = start_backtest_batch(
             name=name,
@@ -180,14 +252,18 @@ def submit_run():
             daily_loss_limit=daily_loss_limit,
             max_positions=max_positions,
             engine_options=engine_options,
+            mode=mode,
+            universe=universe,
         )
         first_job = batch["jobs"][0]["job_id"]
+        unit = "symbol" if mode == "scan" else "timeframe"
         return jsonify({
             "status": "success",
             "job_id": first_job,
             "batch_id": batch["batch_id"],
             "jobs": batch["jobs"],
-            "message": f"Backtest batch of {len(batch['jobs'])} timeframe(s) submitted successfully",
+            "skipped": batch.get("skipped", []),
+            "message": f"Backtest batch of {len(batch['jobs'])} {unit}(s) submitted successfully",
         })
     except ValueError as e:
         return jsonify({"status": "error", "message": str(e)}), 400
@@ -211,13 +287,75 @@ def cancel_backtest(job_id):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@backtest_bp.route("/cancel-active", methods=["POST"])
+@check_session_validity
+def cancel_active_backtests():
+    """Requests cancellation for every pending or running backtest."""
+    session = db_session()
+    try:
+        rows = session.query(BacktestRun.job_id, BacktestRun.batch_id).filter(
+            BacktestRun.status.in_(["pending", "running"])
+        ).all()
+    except Exception as e:
+        logger.exception(f"Error finding active backtest jobs: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db_session.remove()
+
+    jobs_by_batch = {}
+    standalone_jobs = []
+    for job_id, batch_id in rows:
+        if batch_id:
+            jobs_by_batch.setdefault(batch_id, []).append(job_id)
+        else:
+            standalone_jobs.append(job_id)
+
+    cancelled_jobs = set()
+    failed = []
+    for batch_id, job_ids in jobs_by_batch.items():
+        try:
+            cancelled_jobs.update(cancel_batch(batch_id))
+        except Exception as e:
+            logger.exception(f"Error cancelling active backtest batch {batch_id}: {e}")
+            failed.extend(job_ids)
+    for job_id in standalone_jobs:
+        try:
+            if cancel_job(job_id):
+                cancelled_jobs.add(job_id)
+            else:
+                failed.append(job_id)
+        except Exception as e:
+            logger.exception(f"Error cancelling active backtest job {job_id}: {e}")
+            failed.append(job_id)
+
+    eligible_jobs = {job_id for job_id, _ in rows}
+    cancelled_jobs.intersection_update(eligible_jobs)
+    failed.extend(job_id for job_id, batch_id in rows if batch_id and job_id not in cancelled_jobs and job_id not in failed)
+    return jsonify({
+        "status": "success",
+        "requested": len(rows),
+        "cancelled": len(cancelled_jobs),
+        "failed": failed,
+    })
+
+
 @backtest_bp.route("/jobs", methods=["GET"])
 @check_session_validity
 def list_jobs():
     """Returns list of past backtest runs with summary metadata."""
     session = db_session()
     try:
-        runs = session.query(BacktestRun).order_by(BacktestRun.created_at.desc()).all()
+        limit = min(2000, max(1, request.args.get("limit", 500, type=int)))
+        offset = max(0, request.args.get("offset", 0, type=int))
+        total = session.query(BacktestRun.job_id).count()
+        runs = session.query(
+            BacktestRun.job_id, BacktestRun.name, BacktestRun.status, BacktestRun.symbols,
+            BacktestRun.exchange, BacktestRun.interval, BacktestRun.start_date, BacktestRun.end_date,
+            BacktestRun.initial_capital, BacktestRun.created_at, BacktestRun.completed_at,
+            BacktestRun.metrics_json, BacktestRun.batch_id, BacktestRun.batch_name,
+            BacktestRun.batch_seq, BacktestRun.error_message, BacktestRun.mode,
+            BacktestRun.universe, BacktestRun.starred, BacktestRun.notes,
+        ).order_by(BacktestRun.created_at.desc()).limit(limit).offset(offset).all()
         results = []
         for r in runs:
             metrics = json.loads(r.metrics_json) if r.metrics_json else {}
@@ -242,8 +380,12 @@ def list_jobs():
                 "batch_name": r.batch_name,
                 "batch_seq": r.batch_seq or 0,
                 "error_message": r.error_message,
+                "mode": r.mode or "stock",
+                "universe": r.universe,
+                "starred": bool(r.starred),
+                "notes": r.notes or "",
             })
-        return jsonify({"status": "success", "jobs": results})
+        return jsonify({"status": "success", "jobs": results, "total": total})
     except Exception as e:
         logger.exception(f"Error listing backtest jobs: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -257,7 +399,14 @@ def list_batches():
     """Returns one summary row per batch (batch of one for legacy runs)."""
     session = db_session()
     try:
-        runs = session.query(BacktestRun).order_by(BacktestRun.created_at.desc()).all()
+        # Only the columns the summary needs: a universe scan writes hundreds of
+        # rows, and loading each one's strategy code just to group them is waste.
+        runs = session.query(
+            BacktestRun.job_id, BacktestRun.batch_id, BacktestRun.batch_seq, BacktestRun.batch_name,
+            BacktestRun.name, BacktestRun.status, BacktestRun.symbols, BacktestRun.exchange,
+            BacktestRun.interval, BacktestRun.metrics_json, BacktestRun.created_at,
+            BacktestRun.mode, BacktestRun.universe,
+        ).order_by(BacktestRun.created_at.desc()).all()
         groups: dict[str, list] = {}
         for r in runs:
             groups.setdefault(r.batch_id or r.job_id, []).append(r)
@@ -301,6 +450,8 @@ def list_batches():
                 "status": overall,
                 "status_counts": statuses,
                 "intervals": [m.interval for m in members],
+                "mode": first.mode or "stock",
+                "universe": first.universe,
                 "best_return_pct": round(max(returns), 2) if returns else None,
                 "worst_return_pct": round(min(returns), 2) if returns else None,
                 "created_at": latest_created.isoformat() if latest_created else "",
@@ -335,11 +486,14 @@ def get_batch_details(batch_id):
             "status": "success",
             "batch_id": batch_id,
             "name": name,
+            "mode": runs[0].mode or "stock",
+            "universe": runs[0].universe,
             "runs": [
                 {
                     "job_id": r.job_id,
                     "name": r.name,
                     "interval": r.interval,
+                    "symbols": json.loads(r.symbols) if r.symbols else [],
                     "batch_seq": r.batch_seq or 0,
                     "status": r.status,
                     "metrics": json.loads(r.metrics_json) if r.metrics_json else {},
@@ -372,26 +526,14 @@ def get_batch_curves(batch_id):
 
         curves = []
         for r in runs:
-            eq_rows = (
-                session.query(BacktestEquityCurve)
-                .filter_by(job_id=r.job_id)
-                .order_by(BacktestEquityCurve.id.asc())
-                .all()
-            )
-            points = [
-                {
-                    "timestamp": eq.timestamp,
-                    "equity": eq.equity,
-                    "drawdown_pct": eq.drawdown_pct,
-                }
-                for eq in eq_rows
-            ]
+            curve = load_equity_curve(session, r.job_id)
+            points = _equity_points(curve, ("timestamp", "equity", "drawdown_pct"), 2000) if curve else []
             curves.append({
                 "job_id": r.job_id,
                 "interval": r.interval,
                 "batch_seq": r.batch_seq or 0,
                 "status": r.status,
-                "points": _downsample_curve(points),
+                "points": points,
             })
 
         return jsonify({"status": "success", "batch_id": batch_id, "curves": curves})
@@ -429,10 +571,11 @@ def delete_batch(batch_id):
         # Stop anything still running or queued first: a live pipeline holds its
         # own session and would keep writing rows back after the delete.
         cancel_batch(batch_id)
-        session.query(BacktestEquityCurve).filter(BacktestEquityCurve.job_id.in_(job_ids)).delete(synchronize_session=False)
+        delete_equity_curves(session, job_ids)
         session.query(BacktestTrade).filter(BacktestTrade.job_id.in_(job_ids)).delete(synchronize_session=False)
         session.query(BacktestRun).filter(BacktestRun.batch_id == batch_id).delete(synchronize_session=False)
         session.commit()
+        reclaim_space()
         return jsonify({"status": "success", "message": f"Batch {batch_id} and {len(job_ids)} runs deleted successfully"})
     except Exception as e:
         session.rollback()
@@ -483,10 +626,51 @@ def get_job_details(job_id):
                 "completed_at": run.completed_at.isoformat() if run.completed_at else "",
                 "metrics": metrics,
                 "error_message": run.error_message,
+                "mode": run.mode or "stock",
+                "universe": run.universe,
+                "starred": bool(run.starred),
+                "notes": run.notes or "",
             }
         })
     except Exception as e:
         logger.exception(f"Error fetching job details for {job_id}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db_session.remove()
+
+
+_MAX_NOTE_CHARS = 4000
+
+
+@backtest_bp.route("/jobs/<job_id>/meta", methods=["PATCH"])
+@check_session_validity
+def update_job_meta(job_id):
+    """Set a run's star and/or note: {"starred": bool, "notes": str}."""
+    data = request.get_json(silent=True) or {}
+    if "starred" not in data and "notes" not in data:
+        return jsonify({"status": "error", "message": "Nothing to update (starred, notes)"}), 400
+    session = db_session()
+    try:
+        run = session.query(BacktestRun).filter_by(job_id=job_id).first()
+        if not run:
+            return jsonify({"status": "error", "message": "Job not found"}), 404
+        if "starred" in data:
+            run.starred = 1 if data["starred"] else 0
+        if "notes" in data:
+            notes = data["notes"]
+            if notes is not None and not isinstance(notes, str):
+                return jsonify({"status": "error", "message": "notes must be a string"}), 400
+            run.notes = (notes or "")[:_MAX_NOTE_CHARS] or None
+        session.commit()
+        return jsonify({
+            "status": "success",
+            "job_id": job_id,
+            "starred": bool(run.starred),
+            "notes": run.notes or "",
+        })
+    except Exception as e:
+        session.rollback()
+        logger.exception(f"Error updating backtest job meta {job_id}: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         db_session.remove()
@@ -501,10 +685,11 @@ def delete_job(job_id):
         # Stop the run before removing its rows, otherwise the live pipeline
         # keeps its own session open and writes status back after the delete.
         cancel_job(job_id)
-        session.query(BacktestEquityCurve).filter_by(job_id=job_id).delete()
+        delete_equity_curves(session, [job_id])
         session.query(BacktestTrade).filter_by(job_id=job_id).delete()
         session.query(BacktestRun).filter_by(job_id=job_id).delete()
         session.commit()
+        reclaim_space()
         return jsonify({"status": "success", "message": f"Job {job_id} deleted successfully"})
     except Exception as e:
         session.rollback()
@@ -519,7 +704,13 @@ def delete_job(job_id):
 def cleanup_runs():
     """Purges old backtest runs according to retention policy."""
     data = request.get_json() or {}
-    days_to_keep = int(data.get("days_to_keep", 30))
+    raw_days_to_keep = data.get("days_to_keep", 30)
+    try:
+        days_to_keep = int(raw_days_to_keep)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "days_to_keep must be an integer greater than or equal to 1"}), 400
+    if isinstance(raw_days_to_keep, bool) or (isinstance(raw_days_to_keep, float) and not raw_days_to_keep.is_integer()) or days_to_keep < 1:
+        return jsonify({"status": "error", "message": "days_to_keep must be an integer greater than or equal to 1"}), 400
     try:
         cleanup_old_runs(days_to_keep=days_to_keep)
         return jsonify({"status": "success", "message": f"Cleaned up backtest runs older than {days_to_keep} days"})
@@ -541,14 +732,18 @@ def get_results(job_id):
         metrics = json.loads(run.metrics_json) if run.metrics_json else {}
 
         # Fetch Equity Curve
-        eq_rows = session.query(BacktestEquityCurve).filter_by(job_id=job_id).order_by(BacktestEquityCurve.id.asc()).all()
-        equity_curve = [{
-            "timestamp": eq.timestamp,
-            "equity": eq.equity,
-            "drawdown_pct": eq.drawdown_pct,
-            "cash": eq.cash,
-            "positions_value": eq.positions_value,
-        } for eq in eq_rows]
+        curve = load_equity_curve(session, job_id)
+        full = request.args.get("full") == "1"
+        equity_points_total = len(curve["timestamp"]) if curve else 0
+        equity_curve = (
+            _equity_points(
+                curve,
+                ("timestamp", "equity", "drawdown_pct", "cash", "positions_value"),
+                None if full else RESULTS_CURVE_POINTS,
+            )
+            if curve
+            else []
+        )
 
         # Fetch Trades Log
         trade_rows = session.query(BacktestTrade).filter_by(job_id=job_id).order_by(BacktestTrade.id.asc()).all()
@@ -581,6 +776,7 @@ def get_results(job_id):
             interval=run.interval,
             initial_capital=run.initial_capital,
         )
+        benchmark_curve = benchmark_curve if full else _downsample_curve(benchmark_curve, RESULTS_CURVE_POINTS)
 
         return jsonify({
             "status": "success",
@@ -590,6 +786,8 @@ def get_results(job_id):
             "equity_curve": equity_curve,
             "trades": trades,
             "benchmark_curve": benchmark_curve,
+            "equity_points_total": equity_points_total,
+            "equity_downsampled": len(equity_curve) < equity_points_total,
         })
     except Exception as e:
         logger.exception(f"Error fetching results for job {job_id}: {e}")
@@ -616,8 +814,8 @@ def compare_jobs():
                 continue
             metrics = json.loads(run.metrics_json) if run.metrics_json else {}
 
-            eq_rows = session.query(BacktestEquityCurve).filter_by(job_id=jid).order_by(BacktestEquityCurve.id.asc()).all()
-            equity_curve = [{"timestamp": eq.timestamp, "equity": eq.equity} for eq in eq_rows]
+            curve = load_equity_curve(session, jid)
+            equity_curve = _equity_points(curve, ("timestamp", "equity"), RESULTS_CURVE_POINTS) if curve else []
 
             comparison_results.append({
                 "job_id": jid,
@@ -661,7 +859,14 @@ def generate_tearsheet(batch_or_job_id):
             return jsonify({"status": "error", "message": "Job not found"}), 404
 
         metrics = json.loads(runs[0].metrics_json) if runs[0].metrics_json else {}
-        trades = session.query(BacktestTrade).filter_by(job_id=runs[0].job_id).limit(100).all()
+        trades = (
+            session.query(BacktestTrade)
+            .filter_by(job_id=runs[0].job_id)
+            .order_by(BacktestTrade.id.desc())
+            .limit(100)
+            .all()
+        )
+        trades.reverse()
         runs_view = [
             {
                 "job_id": r.job_id,
@@ -867,16 +1072,18 @@ def delete_saved_strategy(strat_id):
 @backtest_bp.route("/optimize", methods=["POST"])
 @check_session_validity
 def submit_optimization():
-    """Queue a parameter sweep (``optimize.kind='sweep'``) or walk-forward study.
+    """Queue a sweep, walk-forward, or transaction-cost stress study.
 
     Body: the same run fields as ``/run`` (single ``interval``), plus
-    ``optimize``: ``{kind, param_space, method, max_trials, objective,
-    min_trades, oos_pct | train_pct/test_pct/n_windows, seed}``.
+    ``optimize`` supports sweep and walk-forward fields, or a stress spec
+    ``{kind: 'stress', multipliers: [1, 1.5, 2, 3], params: {}}`` or a noise spec
+    ``{kind: 'noise', runs: 20, noise_pct: 0.1, seed: 0, params: {}}``.
     """
     data = request.get_json() or {}
     try:
         if not data.get("strategy_code"):
             return jsonify({"status": "error", "message": "strategy_code is required"}), 400
+        initial_capital, sizing_type, missing_data_policy = _validate_run_inputs(data)
         symbols = data.get("symbols", ["NSE:SBIN"])
         opt_id = start_optimization(
             name=data.get("name", "Untitled Optimization"),
@@ -887,13 +1094,13 @@ def submit_optimization():
             interval=data.get("interval", "5m"),
             start_date=data.get("start_date"),
             end_date=data.get("end_date"),
-            initial_capital=float(data.get("initial_capital", 100000.0)),
-            sizing_type=data.get("sizing_type", "fixed_qty"),
+            initial_capital=initial_capital,
+            sizing_type=sizing_type,
             sizing_value=float(data.get("sizing_value", 1.0)),
             slippage_bps=float(data.get("slippage_bps", 0.0)),
             brokerage_bps=float(data.get("brokerage_bps", 0.0)),
             product_type=data.get("product_type", "MIS"),
-            missing_data_policy=data.get("missing_data_policy", "skip"),
+            missing_data_policy=missing_data_policy,
             stop_loss_pct=float(data["stop_loss_pct"]) if data.get("stop_loss_pct") is not None else None,
             take_profit_pct=float(data["take_profit_pct"]) if data.get("take_profit_pct") is not None else None,
             daily_loss_limit=float(data["daily_loss_limit"]) if data.get("daily_loss_limit") is not None else None,
@@ -908,9 +1115,19 @@ def submit_optimization():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+def _opt_source_job(rec: BacktestOptimization) -> str | None:
+    """The run a robustness study was launched from, when the client recorded one."""
+    try:
+        source = (json.loads(rec.config_json or "{}").get("optimize") or {}).get("source_job_id")
+    except (ValueError, AttributeError):
+        return None
+    return source if isinstance(source, str) and len(source) <= 64 else None
+
+
 def _opt_summary(rec: BacktestOptimization) -> dict:
     return {
         "opt_id": rec.opt_id,
+        "source_job_id": _opt_source_job(rec),
         "name": rec.name,
         "kind": rec.kind,
         "status": rec.status,
@@ -974,6 +1191,7 @@ def delete_optimization(opt_id):
             return jsonify({"status": "error", "message": "Cancel it before deleting"}), 409
         session.delete(rec)
         session.commit()
+        reclaim_space()
         return jsonify({"status": "success"})
     except Exception as e:
         session.rollback()
@@ -1033,15 +1251,12 @@ def get_analytics(job_id):
         run = session.query(BacktestRun).filter_by(job_id=job_id).first()
         if not run:
             return jsonify({"status": "error", "message": "Job not found"}), 404
-        eq_rows = (
-            session.query(BacktestEquityCurve).filter_by(job_id=job_id)
-            .order_by(BacktestEquityCurve.id.asc()).all()
-        )
-        if not eq_rows:
+        curve = load_equity_curve(session, job_id)
+        if not curve:
             return jsonify({"status": "error", "message": "Run has no equity curve yet"}), 409
-        idx = pd.to_datetime([r.timestamp for r in eq_rows])
-        equity = pd.Series([r.equity for r in eq_rows], index=idx)
-        positions = pd.Series([r.positions_value for r in eq_rows], index=idx)
+        idx = pd.to_datetime(curve["timestamp"])
+        equity = pd.Series(curve["equity"], index=idx)
+        positions = pd.Series(curve["positions_value"], index=idx)
         ppy = periods_per_year_for_interval(run.interval)
         return jsonify({
             "status": "success",

@@ -7,11 +7,12 @@ Unit tests for OpenAlgo Replay Mode modules.
 import os
 from datetime import datetime
 
+import pandas as pd
 import pytest
 import pytz
 
 from replay.clock import ReplayClock
-from replay.dal import get_range, get_state, invalidate_day
+from replay.dal import get_ltp_states, get_range, get_state, invalidate_day
 from replay.fill_simulator import simulate_order_fill
 from replay.patterns import detect_patterns
 from replay.storage import compact_day, get_day_dir, load_day_df, save_events
@@ -306,6 +307,132 @@ def test_clock_configure_raises_on_invalid_date():
         clock.configure("invalid-date", "09:15:00", "15:30:00", ["NIFTY"])
 
 
+def test_slim_states_use_requested_fields_and_nan_becomes_none():
+    symbol = "ZZTSLIM"
+    date_str = "2026-08-11"
+    save_events(symbol, date_str, [{
+        "timestamp": "2026-08-11T09:15:00+05:30", "ltp": 10.5, "volume": None,
+    }])
+    from replay import dal
+
+    dal.clear_dal_cache()
+    with dal._day_cache_lock:
+        dal._day_cache.clear()
+    state = get_ltp_states([symbol.lower()], IST.localize(datetime(2026, 8, 11, 9, 15)))
+    assert state["ZZTSLIM"]["ltp"] == 10.5
+    assert state["ZZTSLIM"]["volume"] is None
+    assert state["ZZTSLIM"]["oi"] is None
+    assert "ZZTSLIM" not in dal._day_cache
+    assert len(dal._slim_cache) == 1
+
+
+def test_live_cache_refreshes_only_new_parts(monkeypatch):
+    from replay import dal, storage
+
+    symbol = "ZZTREFRESH"
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    save_events(symbol, today, [{"timestamp": f"{today}T09:15:00+05:30", "ltp": 1}])
+    dal.clear_dal_cache()
+    first = dal._cached_load_day_df(symbol, today)
+    assert len(first) == 1
+
+    # A flush flags today's entry stale (it does not evict it), so the refresh
+    # must read ONLY the part that was added, well inside the normal TTL.
+    loaded: list[list[str]] = []
+    real_loader = dal.load_day_df_from_paths
+
+    def tracking_loader(sym, date_str, paths, columns=None):
+        loaded.append(list(paths))
+        return real_loader(sym, date_str, paths, columns)
+
+    monkeypatch.setattr(dal, "load_day_df_from_paths", tracking_loader)
+    save_events(symbol, today, [{"timestamp": f"{today}T09:15:01+05:30", "ltp": 2}])
+    refreshed = dal._cached_load_day_df(symbol, today)
+    assert list(refreshed["ltp"]) == [1, 2]
+    all_paths = storage.list_day_files(symbol, today)
+    assert len(all_paths) == 2
+    assert loaded == [[all_paths[-1]]]
+
+    # A late write to a past day is picked up the same way.
+    past = "2026-08-11"
+    save_events(symbol, past, [{"timestamp": f"{past}T09:15:00+05:30", "ltp": 5}])
+    assert len(dal._cached_load_day_df(symbol, past)) == 1
+    save_events(symbol, past, [{"timestamp": f"{past}T09:15:01+05:30", "ltp": 6}])
+    assert list(dal._cached_load_day_df(symbol, past)["ltp"]) == [5, 6]
+
+
+def test_storage_retries_when_part_disappears_between_list_and_read(monkeypatch):
+    from replay import storage
+
+    symbol = "ZZTRACE"
+    date_str = "2026-08-11"
+    save_events(symbol, date_str, [
+        {"timestamp": f"{date_str}T09:15:00+05:30", "ltp": 1},
+        {"timestamp": f"{date_str}T09:15:01+05:30", "ltp": 2},
+    ])
+    paths = storage.list_day_files(symbol, date_str)
+    replacement = os.path.join(storage.get_day_dir(symbol, date_str), "part-retry.parquet")
+    original_read = pd.read_parquet
+    first = True
+
+    def disappear(path, *args, **kwargs):
+        nonlocal first
+        if first:
+            first = False
+            complete = pd.concat([original_read(p) for p in paths], ignore_index=True)
+            complete.to_parquet(replacement, index=False)
+            for old_path in paths:
+                os.remove(old_path)
+            raise FileNotFoundError(path)
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(storage.pd, "read_parquet", disappear)
+    frame = storage.load_day_df(symbol, date_str)
+    assert list(frame["ltp"]) == [1, 2]
+
+
+def test_get_range_columns_and_timestamp_serialization():
+    symbol = "ZZTRANGE"
+    date_str = "2026-08-11"
+    save_events(symbol, date_str, [{
+        "timestamp": "2026-08-11T09:15:00+05:30", "ltp": 1, "volume": 2,
+        "oi": 3,
+    }])
+    start = IST.localize(datetime(2026, 8, 11, 9, 15))
+    row = get_range(symbol, start, start, limit=None)[0]
+    slim = get_range(symbol, start, start, limit=None, columns=["ltp", "unknown"])[0]
+    assert slim == {"timestamp": row["timestamp"], "ltp": row["ltp"]}
+
+
+def test_recorder_flush_threshold_and_past_day_compaction(monkeypatch):
+    from replay import recorder
+    from replay.storage import list_day_files
+
+    symbol = "ZZTFLUSH"
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    past = "2026-08-11"
+    rec = recorder.ReplayRecorder(symbol, "NSE", today)
+    monkeypatch.setattr(recorder, "REPLAY_FLUSH_MIN_ROWS", 2)
+    monkeypatch.setattr(recorder, "REPLAY_FLUSH_MAX_AGE", 1000)
+    for n in range(1):
+        rec.push_event({"timestamp": f"{today}T09:15:0{n}+05:30", "ltp": n})
+    assert rec.flush(force=False) == 0
+    rec.push_event({"timestamp": f"{today}T09:15:01+05:30", "ltp": 1})
+    assert rec.flush(force=False) == 2
+
+    for day in (past, today):
+        for n in range(2):
+            save_events(symbol, day, [{"timestamp": f"{day}T09:15:0{n}+05:30", "ltp": n}])
+    recorder._compaction_date = None
+    recorder._refresh_compaction_queue(today)
+    assert (symbol, past) in recorder._compaction_queue
+    assert (symbol, today) not in recorder._compaction_queue
+    recorder._compaction_queue.remove((symbol, past))
+    assert compact_day(symbol, past) == 2
+    assert len(list_day_files(symbol, past)) == 1
+    assert len(list_day_files(symbol, today)) == 3
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _cleanup_test_tapes():
     """
@@ -321,10 +448,45 @@ def _cleanup_test_tapes():
     clear_dal_cache()
     db = SessionLocal()
     try:
-        rows = db.query(SymbolDateIndex).filter(SymbolDateIndex.symbol.like("TEST%")).all()
+        rows = db.query(SymbolDateIndex).filter(
+            (SymbolDateIndex.symbol.like("TEST%")) | (SymbolDateIndex.symbol.like("ZZT%"))
+        ).all()
         for row in rows:
             shutil.rmtree(os.path.join("data", "replay", row.symbol), ignore_errors=True)
             db.delete(row)
         db.commit()
     finally:
         db.close()
+
+
+def test_entry_loaded_during_its_day_is_not_final_after_rollover(monkeypatch):
+    """A tape cached mid-session must not be served as the full day once the date changes."""
+    from replay import dal, storage
+
+    symbol = "ZZTROLL"
+    day = "2026-08-12"
+    mid_session = IST.localize(datetime(2026, 8, 12, 14, 0)).timestamp()
+    next_day = IST.localize(datetime(2026, 8, 13, 9, 0)).timestamp()
+    assert not dal._is_final(mid_session, day)
+    assert dal._is_final(next_day, day)
+
+    clock = {"now": mid_session}
+    monkeypatch.setattr(dal.time, "time", lambda: clock["now"])
+    save_events(symbol, day, [{"timestamp": f"{day}T13:59:00+05:30", "ltp": 1}])
+    dal.clear_dal_cache()
+    assert list(dal._cached_load_day_df(symbol, day)["ltp"]) == [1]
+
+    # The recorder runs in another process: its flush never reaches this cache.
+    monkeypatch.setattr(dal, "mark_day_stale", lambda *_: None)
+    save_events(symbol, day, [{"timestamp": f"{day}T15:29:00+05:30", "ltp": 2}])
+
+    clock["now"] = next_day
+    assert list(dal._cached_load_day_df(symbol, day)["ltp"]) == [1, 2]
+    states = dal.get_ltp_states([symbol], IST.localize(datetime(2026, 8, 12, 15, 30)))
+    assert states[symbol]["ltp"] == 2.0
+
+    # Loaded after the day ended: final now, no further directory listing.
+    monkeypatch.setattr(dal, "list_day_files", lambda *_: (_ for _ in ()).throw(AssertionError))
+    clock["now"] = next_day + 3600
+    assert len(dal._cached_load_day_df(symbol, day)) == 2
+    assert storage.MAX_DEPTH_LEVELS == 20

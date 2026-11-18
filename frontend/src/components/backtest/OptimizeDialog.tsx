@@ -46,8 +46,9 @@ interface Props {
 }
 
 /** Number of combinations a space expands to, or null when the shape is wrong. */
-function countCombos(space: unknown): number | null {
+export function countCombos(space: unknown): number | null {
   if (!space || typeof space !== 'object' || Array.isArray(space)) return null
+  if (!Object.keys(space).length) return null
   let total = 1
   for (const spec of Object.values(space as Record<string, unknown>)) {
     if (Array.isArray(spec)) {
@@ -76,6 +77,7 @@ export default function OptimizeDialog({ open, onOpenChange, buildRunPayload }: 
   const [trainPct, setTrainPct] = useState(60)
   const [testPct, setTestPct] = useState(20)
   const [windows, setWindows] = useState(5)
+  const [windowMode, setWindowMode] = useState('rolling')
   const [submitting, setSubmitting] = useState(false)
 
   const parsed = useMemo(() => {
@@ -108,7 +110,13 @@ export default function OptimizeDialog({ open, onOpenChange, buildRunPayload }: 
         min_trades: minTrades,
       }
       if (kind === 'sweep') optimize.oos_pct = oosPct > 0 ? oosPct : null
-      else Object.assign(optimize, { train_pct: trainPct, test_pct: testPct, n_windows: windows })
+      else
+        Object.assign(optimize, {
+          train_pct: trainPct,
+          test_pct: testPct,
+          n_windows: windows,
+          window_mode: windowMode,
+        })
       const { intervals: _ignored, ...rest } = run
       const res = await fetch('/backtest/api/optimize', {
         method: 'POST',
@@ -223,6 +231,18 @@ export default function OptimizeDialog({ open, onOpenChange, buildRunPayload }: 
               num('Hold out last % (OOS)', oosPct, setOosPct, 0, 50)
             ) : (
               <>
+                <div className="space-y-1.5">
+                  <Label>Windows</Label>
+                  <Select value={windowMode} onValueChange={setWindowMode}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="rolling">Rolling</SelectItem>
+                      <SelectItem value="anchored">Anchored</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
                 {num('Train %', trainPct, setTrainPct, 10, 90)}
                 {num('Test %', testPct, setTestPct, 5, 50)}
                 {num('Max windows', windows, setWindows, 1, 20)}
@@ -232,7 +252,9 @@ export default function OptimizeDialog({ open, onOpenChange, buildRunPayload }: 
           <p className="text-xs text-muted-foreground">
             {kind === 'sweep'
               ? 'The held-out tail is never used to rank candidates, so comparing in-sample and out-of-sample scores shows overfitting.'
-              : 'Parameters are chosen on each training window only and scored on the unseen window after it. The test windows are stitched into one out-of-sample curve.'}
+              : windowMode === 'anchored'
+                ? 'Anchored: every training window starts at the first bar and grows by one test window each step. Parameters are scored on the unseen window after it, and the test windows are stitched into one out-of-sample curve.'
+                : 'Rolling: a fixed-length training window slides forward. Parameters are chosen on each training window only and scored on the unseen window after it, and the test windows are stitched into one out-of-sample curve.'}
           </p>
         </div>
 

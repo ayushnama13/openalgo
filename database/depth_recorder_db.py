@@ -17,9 +17,8 @@ Uses the project-wide engine factory (SQLite + NullPool) so it shares the
 same connection-hygiene policy as every other database in OpenAlgo.
 """
 
-import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytz
 from sqlalchemy import (
@@ -31,13 +30,15 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import scoped_session, sessionmaker
 
 from database.engine_factory import create_db_engine
+from utils.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -132,6 +133,22 @@ class DepthTick(Base):
     )
 
 
+class DepthSession(Base):
+    """Daily summary for the depth tick inventory."""
+
+    __tablename__ = "depth_sessions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(60), nullable=False)
+    exchange = Column(String(20), nullable=False)
+    day = Column(String(10), nullable=False)
+    first_tick = Column(DateTime(timezone=False), nullable=False)
+    last_tick = Column(DateTime(timezone=False), nullable=False)
+    n_ticks = Column(Integer, nullable=False)
+
+    __table_args__ = (UniqueConstraint("symbol", "exchange", "day"),)
+
+
 class DepthRecorderConfig(Base):
     """
     Persists recorder configuration (symbol, exchange, status, depth_level).
@@ -168,7 +185,7 @@ def _ensure_columns(table: str, columns: dict[str, str]) -> None:
         }
         for col_name, col_type in columns.items():
             if col_name not in existing:
-                logger.info("depth_recorder_db: adding missing column %s.%s", table, col_name)
+                logger.info(f"depth_recorder_db: adding missing column {table}.{col_name}")
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}"))
         conn.commit()
 
@@ -181,8 +198,29 @@ def init_db():
     try:
         _ensure_columns("depth_ticks", {"depth_level": "INTEGER", "levels_json": "TEXT"})
         _ensure_columns("depth_recorder_config", {"depth_level": "INTEGER DEFAULT 5"})
+        # Existence checks only: COUNT(*) would scan the whole tick table at every boot.
+        if (
+            db_session.query(DepthSession.id).first() is None
+            and db_session.query(DepthTick.id).first() is not None
+        ):
+            aggregates = (
+                db_session.query(
+                    DepthTick.symbol, DepthTick.exchange, func.date(DepthTick.tick_time),
+                    func.min(DepthTick.tick_time), func.max(DepthTick.tick_time), func.count(DepthTick.id),
+                )
+                .group_by(DepthTick.symbol, DepthTick.exchange, func.date(DepthTick.tick_time))
+                .all()
+            )
+            for symbol, exchange, day, first_tick, last_tick, n_ticks in aggregates:
+                db_session.add(DepthSession(symbol=symbol, exchange=exchange, day=day,
+                                            first_tick=first_tick, last_tick=last_tick, n_ticks=n_ticks))
+            db_session.commit()
     except Exception:
         logger.exception("depth_recorder_db: migration failed")
+        db_session.rollback()
+    finally:
+        # Boot runs outside a request: release the connection the checks opened.
+        db_session.remove()
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +311,30 @@ def batch_save_ticks(ticks: list[dict]) -> int:
     if not ticks:
         return 0
     try:
+        groups = {}
+        for tick in ticks:
+            day = tick["tick_time"].date().isoformat()
+            key = (tick["symbol"], tick["exchange"], day)
+            current = groups.get(key)
+            if current is None:
+                groups[key] = [tick["tick_time"], tick["tick_time"], 1]
+            else:
+                current[0] = min(current[0], tick["tick_time"])
+                current[1] = max(current[1], tick["tick_time"])
+                current[2] += 1
         db_session.bulk_insert_mappings(DepthTick, ticks)
+        for (symbol, exchange, day), (first_tick, last_tick, count) in groups.items():
+            summary = db_session.query(DepthSession).filter_by(
+                symbol=symbol, exchange=exchange, day=day
+            ).first()
+            if summary is None:
+                summary = DepthSession(symbol=symbol, exchange=exchange, day=day,
+                                       first_tick=first_tick, last_tick=last_tick, n_ticks=count)
+                db_session.add(summary)
+            else:
+                summary.first_tick = min(summary.first_tick, first_tick)
+                summary.last_tick = max(summary.last_tick, last_tick)
+                summary.n_ticks += count
         db_session.commit()
         return len(ticks)
     except Exception:
@@ -433,9 +494,28 @@ def get_session_ticks_flat(
     bid/ask scalar columns the analytics engine consumes (bid1_p ... ask5_o),
     skipping the nested bids/asks round-trip entirely.
     """
+    cols, rows = get_session_rows_flat(symbol, exchange, start, end)
+    if not rows:
+        return []
+    return [dict(zip(cols, row, strict=True)) for row in rows]
+
+
+def get_session_rows_flat(
+    symbol: str, exchange: str, start: datetime, end: datetime
+) -> tuple[list[str], list[tuple]]:
+    """Return scalar analytics columns and their rows without ORM instances."""
+    cols = ["tick_time", "ltp", "volume", "ltt", "total_buy_qty", "total_sell_qty"]
+    for i in range(1, 6):
+        cols.extend((f"bid{i}_p", f"bid{i}_q", f"bid{i}_o", f"ask{i}_p", f"ask{i}_q", f"ask{i}_o"))
     try:
+        entities = [DepthTick.tick_time, DepthTick.ltp, DepthTick.volume, DepthTick.ltt,
+                    DepthTick.total_buy_qty, DepthTick.total_sell_qty]
+        for i in range(1, 6):
+            entities.extend((getattr(DepthTick, f"bid{i}_price"), getattr(DepthTick, f"bid{i}_qty"),
+                             getattr(DepthTick, f"bid{i}_orders"), getattr(DepthTick, f"ask{i}_price"),
+                             getattr(DepthTick, f"ask{i}_qty"), getattr(DepthTick, f"ask{i}_orders")))
         rows = (
-            db_session.query(DepthTick)
+            db_session.query(*entities)
             .filter(
                 DepthTick.symbol == symbol.upper(),
                 DepthTick.exchange == exchange.upper(),
@@ -445,29 +525,11 @@ def get_session_ticks_flat(
             .order_by(DepthTick.tick_time.asc())
             .all()
         )
-        out = []
-        for r in rows:
-            d = {
-                "tick_time": r.tick_time,
-                "ltp": r.ltp,
-                "volume": r.volume,
-                "ltt": r.ltt,
-                "total_buy_qty": r.total_buy_qty,
-                "total_sell_qty": r.total_sell_qty,
-            }
-            for i in (1, 2, 3, 4, 5):
-                d[f"bid{i}_p"] = getattr(r, f"bid{i}_price")
-                d[f"bid{i}_q"] = getattr(r, f"bid{i}_qty")
-                d[f"bid{i}_o"] = getattr(r, f"bid{i}_orders")
-                d[f"ask{i}_p"] = getattr(r, f"ask{i}_price")
-                d[f"ask{i}_q"] = getattr(r, f"ask{i}_qty")
-                d[f"ask{i}_o"] = getattr(r, f"ask{i}_orders")
-            out.append(d)
-        return out
+        return cols, rows
     except Exception:
-        logger.exception("depth_recorder_db: get_session_ticks_flat failed")
+        logger.exception("depth_recorder_db: get_session_rows_flat failed")
         db_session.rollback()
-        return []
+        return cols, []
 
 
 def get_session_bounds(symbol: str, exchange: str) -> tuple[datetime, datetime] | None:
@@ -498,9 +560,8 @@ def get_tick_count(symbol: str, exchange: str) -> int:
     """Return total stored tick count for a symbol."""
     try:
         return (
-            db_session.query(DepthTick)
-            .filter_by(symbol=symbol.upper(), exchange=exchange.upper())
-            .count()
+            db_session.query(func.coalesce(func.sum(DepthSession.n_ticks), 0))
+            .filter_by(symbol=symbol.upper(), exchange=exchange.upper()).scalar()
         )
     except Exception:
         db_session.rollback()
@@ -510,18 +571,67 @@ def get_tick_count(symbol: str, exchange: str) -> int:
 def get_stats() -> dict:
     """Return overall DB stats for the dashboard."""
     try:
-        total = db_session.query(DepthTick).count()
-        symbols = db_session.query(DepthTick.symbol, DepthTick.exchange).distinct().all()
-        latest = db_session.query(DepthTick).order_by(DepthTick.tick_time.desc()).first()
+        total = db_session.query(func.coalesce(func.sum(DepthSession.n_ticks), 0)).scalar()
+        symbols = db_session.query(DepthSession.symbol, DepthSession.exchange).distinct().all()
+        latest = db_session.query(func.max(DepthSession.last_tick)).scalar()
         return {
             "total_ticks": total,
             "symbols": [{"symbol": s, "exchange": e} for s, e in symbols],
-            "latest_tick_time": latest.tick_time.isoformat() if latest else None,
+            "latest_tick_time": latest.isoformat() if latest else None,
         }
     except Exception:
         logger.exception("depth_recorder_db: get_stats failed")
         db_session.rollback()
         return {"total_ticks": 0, "symbols": [], "latest_tick_time": None}
+
+
+def prune_old_ticks(days_to_keep: int) -> int:
+    """Delete ticks older than ``days_to_keep`` days, one day per transaction.
+
+    Walks forward from the oldest stored tick using range predicates on
+    ``tick_time`` (so the time index is used and the write lock is only ever
+    held for one day's rows), and drops the matching summary rows with it.
+    Returns the number of tick rows deleted.
+    """
+    try:
+        days_to_keep = int(days_to_keep)
+    except (TypeError, ValueError):
+        return 0
+    if days_to_keep < 1:
+        return 0
+
+    cutoff_date = datetime.now(IST).date() - timedelta(days=days_to_keep)
+    cutoff = datetime.combine(cutoff_date, datetime.min.time())
+    deleted = 0
+    try:
+        while True:
+            oldest = db_session.query(func.min(DepthTick.tick_time)).scalar()
+            if oldest is None or oldest >= cutoff:
+                break
+            day_start = datetime.combine(oldest.date(), datetime.min.time())
+            day_end = min(day_start + timedelta(days=1), cutoff)
+            n = (
+                db_session.query(DepthTick)
+                .filter(DepthTick.tick_time >= day_start, DepthTick.tick_time < day_end)
+                .delete(synchronize_session=False)
+            )
+            db_session.query(DepthSession).filter(
+                DepthSession.day == day_start.date().isoformat()
+            ).delete(synchronize_session=False)
+            db_session.commit()
+            deleted += n
+            if n == 0:
+                break  # nothing matched: never spin on an unexpected row
+        # Summary rows whose ticks are already gone
+        db_session.query(DepthSession).filter(
+            DepthSession.day < cutoff_date.isoformat()
+        ).delete(synchronize_session=False)
+        db_session.commit()
+        return deleted
+    except Exception:
+        logger.exception("depth_recorder_db: prune_old_ticks failed")
+        db_session.rollback()
+        return deleted
 
 
 def _tick_to_dict(row: DepthTick) -> dict:
